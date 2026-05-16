@@ -9,10 +9,18 @@ const BETSIZES = GameStateModule.BETSIZES;
 pub const Edge = struct {
     action: Action,
     amount: f32,
+    stack1: f32,
+    stack2: f32,
     child: ?*Node,
 
     pub fn init(arena: Allocator, state: *GameState) !Edge {
-        return Edge{ .action = state.action, .amount = state.pot, .child = if (state.isTerm) null else try Node.create(arena) };
+        return Edge{
+            .action = state.action,
+            .amount = state.pot,
+            .stack1 = state.stack1,
+            .stack2 = state.stack2,
+            .child = if (state.isTerm) null else try Node.create(arena, state.isp1),
+        };
     }
 
     pub fn setChildren(self: *Edge, arena: Allocator, arr: *std.ArrayList(Edge), numCards: u16) !void {
@@ -24,13 +32,15 @@ pub const Edge = struct {
 
 pub const Node = struct {
     is_chance: bool,
+    isp1: bool,
     regrets: []f32,
     strategy_sum: []f32,
     edges: []Edge,
 
-    pub fn create(arena: Allocator) !*Node {
+    pub fn create(arena: Allocator, isp1: bool) !*Node {
         var self = try arena.create(Node);
         self.is_chance = false;
+        self.isp1 = isp1;
         self.regrets = &.{};
         self.strategy_sum = &.{};
         self.edges = &.{};

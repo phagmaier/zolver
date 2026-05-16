@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Card = @import("card.zig");
+const card_mod = @import("card.zig");
+const Card = card_mod.Card;
 
 /// A Hand represents a pair of hole cards.
 /// In the solver, we often refer to these by their index (0-1325).
@@ -26,8 +27,8 @@ pub const Hand = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        const s1 = Card.get_card_str(self.card1) catch [2]u8{ '?', '?' };
-        const s2 = Card.get_card_str(self.card2) catch [2]u8{ '?', '?' };
+        const s1 = card_mod.get_card_str(self.card1) catch [2]u8{ '?', '?' };
+        const s2 = card_mod.get_card_str(self.card2) catch [2]u8{ '?', '?' };
         try writer.print("{s}{s}", .{ s1, s2 });
     }
 };
@@ -39,7 +40,7 @@ pub const HandTable = struct {
 
     pub fn init() HandTable {
         var table: [1326]Hand = undefined;
-        const deck = Card.makeDeck();
+        const deck = card_mod.makeDeck();
         var count: usize = 0;
         
         var i: usize = 0;
@@ -105,7 +106,7 @@ test "HandTable: contains 1326 unique hands" {
     try std.testing.expectEqual(@as(usize, 1326), table.all_hands.len);
     
     // Spot check: AsKs
-    const deck = Card.makeDeck();
+    const deck = card_mod.makeDeck();
     // makeDeck generates in rank order: 2, 3, ... A
     // Suits: S, H, D, C
     // Ace of Spades is likely at index 48 (12*4 + 0)
