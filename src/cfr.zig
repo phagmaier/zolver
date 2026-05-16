@@ -35,6 +35,14 @@ pub const Solver = struct {
     hand_strengths: [NUM_HANDS]u32,
     blocked: [NUM_HANDS]bool,
 
+    // Performance optimizations: sorted indices for O(N) sweep and collision map
+    sorted_indices: [NUM_HANDS]u16,
+    rank_map: [NUM_HANDS]u16,
+    first_rank: [NUM_HANDS]u16,
+    last_rank: [NUM_HANDS]u16,
+    collisions: [NUM_HANDS][101]u16,
+    collision_counts: [NUM_HANDS]u8,
+
     // Dense reach vectors derived from the caller's sparse Range inputs.
     // Indexed by hand id 0..1325; blocked entries are zero.
     p1_reach: [NUM_HANDS]f32,
@@ -57,6 +65,12 @@ pub const Solver = struct {
             .pot_at_root = pot_at_root,
             .hand_strengths = undefined,
             .blocked = undefined,
+            .sorted_indices = undefined,
+            .rank_map = undefined,
+            .first_rank = undefined,
+            .last_rank = undefined,
+            .collisions = undefined,
+            .collision_counts = undefined,
             .p1_reach = undefined,
             .p2_reach = undefined,
         };
@@ -82,6 +96,46 @@ pub const Solver = struct {
                 };
                 self.hand_strengths[i] = self.evaluator.handStrength(seven);
             }
+            self.sorted_indices[i] = @intCast(i);
+        }
+
+        // Sort indices by strength for O(N) sweep
+        std.mem.sort(u16, &self.sorted_indices, &self, struct {
+            fn compare(ctx: *const Solver, a: u16, b: u16) bool {
+                return ctx.hand_strengths[a] < ctx.hand_strengths[b];
+            }
+        }.compare);
+
+        // Precompute ranges of identical strengths and rank map
+        var r: usize = 0;
+        while (r < NUM_HANDS) {
+            const start = r;
+            const strength = self.hand_strengths[self.sorted_indices[r]];
+            while (r < NUM_HANDS and self.hand_strengths[self.sorted_indices[r]] == strength) {
+                self.rank_map[self.sorted_indices[r]] = @intCast(r);
+                r += 1;
+            }
+            const end = r - 1;
+            for (start..r) |i| {
+                const hand_idx = self.sorted_indices[i];
+                self.first_rank[hand_idx] = @intCast(start);
+                self.last_rank[hand_idx] = @intCast(end);
+            }
+        }
+
+        // Precompute collision map
+        for (0..NUM_HANDS) |i| {
+            const h_i = self.hand_table.all_hands[i];
+            var c_count: u8 = 0;
+            for (0..NUM_HANDS) |j| {
+                if (i == j) continue;
+                const h_j = self.hand_table.all_hands[j];
+                if (!handsCompatible(h_i, h_j)) {
+                    self.collisions[i][c_count] = @intCast(j);
+                    c_count += 1;
+                }
+            }
+            self.collision_counts[i] = c_count;
         }
 
         for (p1.active_indices, p1.probs) |idx, p| {
@@ -96,6 +150,56 @@ pub const Solver = struct {
 
     pub fn deinit(self: *Solver) void {
         self.evaluator.deinit();
+    }
+
+    /// Update the solver's internal state (hand strengths, blocker mask, sorted indices)
+    /// for a new board. This is used when traversing chance nodes.
+    pub fn reinitForBoard(self: *Solver, board: [5]Card) void {
+        self.board = board;
+        for (self.hand_table.all_hands, 0..) |hand, i| {
+            var is_blocked = false;
+            for (board) |bc| {
+                if (hand.card1 == bc or hand.card2 == bc) {
+                    is_blocked = true;
+                    break;
+                }
+            }
+            self.blocked[i] = is_blocked;
+            if (is_blocked) {
+                self.hand_strengths[i] = 0;
+            } else {
+                const seven = [7]u32{
+                    hand.card1, hand.card2,
+                    board[0],   board[1], board[2], board[3], board[4],
+                };
+                self.hand_strengths[i] = self.evaluator.handStrength(seven);
+            }
+            self.sorted_indices[i] = @intCast(i);
+        }
+
+        // Sort indices by strength for O(N) sweep
+        std.mem.sort(u16, &self.sorted_indices, self, struct {
+            fn compare(ctx: *const Solver, a: u16, b: u16) bool {
+                return ctx.hand_strengths[a] < ctx.hand_strengths[b];
+            }
+        }.compare);
+
+        // Precompute ranges of identical strengths and rank map
+        var r: usize = 0;
+        while (r < NUM_HANDS) {
+            const start = r;
+            const strength = self.hand_strengths[self.sorted_indices[r]];
+            while (r < NUM_HANDS and self.hand_strengths[self.sorted_indices[r]] == strength) {
+                self.rank_map[self.sorted_indices[r]] = @intCast(r);
+                r += 1;
+            }
+            const end = r - 1;
+            for (start..r) |i| {
+                const hand_idx = self.sorted_indices[i];
+                self.first_rank[hand_idx] = @intCast(start);
+                self.last_rank[hand_idx] = @intCast(end);
+            }
+        }
     }
 
     // EV at a fold terminal. The pot goes to whoever didn't fold; the folder's
@@ -117,21 +221,31 @@ pub const Solver = struct {
         const p1_payoff: f32 = if (folder_isp1) -folder_loss else folder_loss;
         const p2_payoff: f32 = -p1_payoff;
 
-        @memset(out_cfv_p1, 0);
-        @memset(out_cfv_p2, 0);
+        var p1_total_mass: f32 = 0;
+        var p2_total_mass: f32 = 0;
+        for (0..NUM_HANDS) |i| {
+            p1_total_mass += p1_reach[i];
+            p2_total_mass += p2_reach[i];
+        }
 
-        var i: usize = 0;
-        while (i < NUM_HANDS) : (i += 1) {
-            if (self.blocked[i]) continue;
-            const hand_i = self.hand_table.all_hands[i];
-            var j: usize = 0;
-            while (j < NUM_HANDS) : (j += 1) {
-                if (self.blocked[j]) continue;
-                const hand_j = self.hand_table.all_hands[j];
-                if (!handsCompatible(hand_i, hand_j)) continue;
-                out_cfv_p1[i] += p2_reach[j] * p1_payoff;
-                out_cfv_p2[j] += p1_reach[i] * p2_payoff;
+        for (0..NUM_HANDS) |i| {
+            if (self.blocked[i]) {
+                out_cfv_p1[i] = 0;
+                out_cfv_p2[i] = 0;
+                continue;
             }
+
+            var p2_incomp: f32 = 0;
+            for (0..self.collision_counts[i]) |c_idx| {
+                p2_incomp += p2_reach[self.collisions[i][c_idx]];
+            }
+            out_cfv_p1[i] = p1_payoff * (p2_total_mass - p2_incomp);
+
+            var p1_incomp: f32 = 0;
+            for (0..self.collision_counts[i]) |c_idx| {
+                p1_incomp += p1_reach[self.collisions[i][c_idx]];
+            }
+            out_cfv_p2[i] = p2_payoff * (p1_total_mass - p1_incomp);
         }
     }
 
@@ -147,25 +261,48 @@ pub const Solver = struct {
         out_cfv_p2: []f32,
     ) void {
         const half_pot: f32 = edge.amount / 2.0;
+        self.computeShowdownCFV(p2_reach, out_cfv_p1, half_pot);
+        self.computeShowdownCFV(p1_reach, out_cfv_p2, half_pot);
+    }
 
-        @memset(out_cfv_p1, 0);
-        @memset(out_cfv_p2, 0);
+    fn computeShowdownCFV(self: *const Solver, reach: []const f32, out: []f32, payoff: f32) void {
+        var prefix_sum: [NUM_HANDS]f32 = undefined;
+        var total_mass: f32 = 0;
+        for (0..NUM_HANDS) |r| {
+            total_mass += reach[self.sorted_indices[r]];
+            prefix_sum[r] = total_mass;
+        }
 
-        var i: usize = 0;
-        while (i < NUM_HANDS) : (i += 1) {
-            if (self.blocked[i]) continue;
-            const hand_i = self.hand_table.all_hands[i];
-            const s_i = self.hand_strengths[i];
-            var j: usize = 0;
-            while (j < NUM_HANDS) : (j += 1) {
-                if (self.blocked[j]) continue;
-                const hand_j = self.hand_table.all_hands[j];
-                if (!handsCompatible(hand_i, hand_j)) continue;
-                const s_j = self.hand_strengths[j];
-                const p1_payoff: f32 = if (s_i > s_j) half_pot else if (s_i < s_j) -half_pot else 0;
-                out_cfv_p1[i] += p2_reach[j] * p1_payoff;
-                out_cfv_p2[j] -= p1_reach[i] * p1_payoff;
+        for (0..NUM_HANDS) |i| {
+            if (self.blocked[i]) {
+                out[i] = 0;
+                continue;
             }
+
+            const win_rank_end = @as(i32, @intCast(self.first_rank[i])) - 1;
+            const loss_rank_start = self.last_rank[i] + 1;
+
+            const naive_win_mass = if (win_rank_end >= 0) prefix_sum[@intCast(win_rank_end)] else 0;
+            const naive_loss_mass = if (loss_rank_start < NUM_HANDS) total_mass - prefix_sum[loss_rank_start - 1] else 0;
+
+            var corr_win_mass: f32 = 0;
+            var corr_loss_mass: f32 = 0;
+
+            const s_i = self.hand_strengths[i];
+            for (0..self.collision_counts[i]) |c_idx| {
+                const j = self.collisions[i][c_idx];
+                const s_j = self.hand_strengths[j];
+                if (s_j < s_i) {
+                    corr_win_mass += reach[j];
+                } else if (s_j > s_i) {
+                    corr_loss_mass += reach[j];
+                }
+            }
+
+            const real_win_mass = naive_win_mass - corr_win_mass;
+            const real_loss_mass = naive_loss_mass - corr_loss_mass;
+
+            out[i] = (real_win_mass - real_loss_mass) * payoff;
         }
     }
 };
@@ -203,7 +340,66 @@ fn walk(
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
 ) void {
-    if (node.is_chance) unreachable; // Chance nodes handled in step 7.
+    if (node.is_chance) {
+        // Enumerate all possible cards for the next street.
+        @memset(out_cfv_p1, 0);
+        @memset(out_cfv_p2, 0);
+
+        const current_board = self.board;
+        // Determine which street we are dealing for.
+        var num_board_cards: usize = 0;
+        for (current_board) |c| {
+            if (c != 0) num_board_cards += 1; // 0 is a dummy card if not all 5 are set
+        }
+        // Simplified: the solver root board should have 3 (flop) or 4 (turn) cards.
+        // For now, let's assume we deal the 4th (turn) or 5th (river) card.
+        const card_to_fill_idx: usize = if (num_board_cards == 3) @as(usize, 3) else @as(usize, 4);
+        
+        const deck = card_mod.makeDeck();
+        var possible_cards: u16 = 0;
+        
+        var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
+        var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
+
+        for (deck) |c| {
+            // Check if card is already on board
+            var on_board = false;
+            for (current_board) |bc| {
+                if (c == bc) {
+                    on_board = true;
+                    break;
+                }
+            }
+            if (on_board) continue;
+
+            possible_cards += 1;
+            var new_board = current_board;
+            new_board[card_to_fill_idx] = c;
+
+            // Update strengths for this runout
+            self.reinitForBoard(new_board);
+
+            // Recurse into the single chance child (Action.CHANCE)
+            walk(self, node.edges[0].child.?, p1_reach, p2_reach, &runout_cfv_p1, &runout_cfv_p2);
+
+            // Weight by card-removal (hand must not contain the new card)
+            for (0..NUM_HANDS) |i| {
+                const h = self.hand_table.all_hands[i];
+                if (h.card1 == c or h.card2 == c) continue;
+                out_cfv_p1[i] += runout_cfv_p1[i];
+                out_cfv_p2[i] += runout_cfv_p2[i];
+            }
+        }
+
+        // Restore original board and average CFVs
+        self.reinitForBoard(current_board);
+        const weight = 1.0 / @as(f32, @floatFromInt(possible_cards));
+        for (0..NUM_HANDS) |i| {
+            out_cfv_p1[i] *= weight;
+            out_cfv_p2[i] *= weight;
+        }
+        return;
+    }
 
     const n_actions = node.edges.len;
     const actor_isp1 = node.isp1;
@@ -336,7 +532,49 @@ fn brWalk(
     br_isp1: bool,
     out_cfv: []f32,
 ) void {
-    if (node.is_chance) unreachable;
+    if (node.is_chance) {
+        @memset(out_cfv, 0);
+        const current_board = self.board;
+        var num_board_cards: usize = 0;
+        for (current_board) |c| {
+            if (c != 0) num_board_cards += 1;
+        }
+        const card_to_fill_idx: usize = if (num_board_cards == 3) @as(usize, 3) else @as(usize, 4);
+        
+        const deck = card_mod.makeDeck();
+        var possible_cards: u16 = 0;
+        var runout_cfv: [NUM_HANDS]f32 = undefined;
+
+        for (deck) |c| {
+            var on_board = false;
+            for (current_board) |bc| {
+                if (c == bc) {
+                    on_board = true;
+                    break;
+                }
+            }
+            if (on_board) continue;
+
+            possible_cards += 1;
+            var new_board = current_board;
+            new_board[card_to_fill_idx] = c;
+            self.reinitForBoard(new_board);
+
+            brWalk(self, node.edges[0].child.?, p1_reach, p2_reach, br_isp1, &runout_cfv);
+
+            for (0..NUM_HANDS) |i| {
+                const h = self.hand_table.all_hands[i];
+                if (h.card1 == c or h.card2 == c) continue;
+                out_cfv[i] += runout_cfv[i];
+            }
+        }
+
+        self.reinitForBoard(current_board);
+        const weight = 1.0 / @as(f32, @floatFromInt(possible_cards));
+        for (0..NUM_HANDS) |i| out_cfv[i] *= weight;
+        return;
+    }
+
     const n_actions = node.edges.len;
     const actor_isp1 = node.isp1;
 
@@ -656,4 +894,113 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     // After 200 iters vanilla CFR lands at ~0.75 in this game.
     const expl = exploitability(&solver, root);
     try std.testing.expect(@abs(expl) < 1.0);
+}
+
+test "Solver.solve: polarized vs condensed river" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    // River: pot=100, stacks=500/500.
+    var root_state = gamestate_mod.GameState.init(.RIVER, true, 100, 500, 500);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try node_mod.buildTree(&root_state, &arr, arena_allocator, temp_allocator, NUM_HANDS, NUM_HANDS);
+    const root = arr.items[0].child.?;
+
+    // Board: As Ks 2h 3d 7c (Dry, high cards favored)
+    const board = [5]Card{
+        card_mod.makeCard(12, 0),
+        card_mod.makeCard(11, 0),
+        card_mod.makeCard(0, 1),
+        card_mod.makeCard(1, 2),
+        card_mod.makeCard(5, 3),
+    };
+
+    const ht = HandTable.init();
+    
+    // P1 (Polarized): AA, KK (Nuts) and some 72o (Air)
+    // P2 (Condensed): AQ, AJ, AT (Middling strength)
+    var p1 = try Range.initEmpty(temp_allocator, 3);
+    defer p1.deinit(temp_allocator);
+    p1.active_indices[0] = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(12, 2))).?; // AA
+    p1.active_indices[1] = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 1), card_mod.makeCard(11, 2))).?; // KK
+    p1.active_indices[2] = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(5, 0), card_mod.makeCard(0, 3))).?;  // 7s2c
+    p1.probs[0] = 0.2; p1.probs[1] = 0.2; p1.probs[2] = 0.6;
+    p1.normalize();
+
+    var p2 = try Range.initEmpty(temp_allocator, 3);
+    defer p2.deinit(temp_allocator);
+    p2.active_indices[0] = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(10, 2))).?; // AQ
+    p2.active_indices[1] = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(9, 2))).?;  // AJ
+    p2.active_indices[2] = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(8, 2))).?;  // AT
+    p2.probs[0] = 0.33; p2.probs[1] = 0.33; p2.probs[2] = 0.34;
+    p2.normalize();
+
+    var solver = try Solver.init(board, &p1, &p2, 500, 500, 100);
+    defer solver.deinit();
+
+    var cfv_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_p2: [NUM_HANDS]f32 = undefined;
+    solve(&solver, root, 200, &cfv_p1, &cfv_p2);
+
+    const expl = exploitability(&solver, root);
+    // Even with more hands, exploitability should trend towards zero.
+    try std.testing.expect(expl < 5.0); 
+}
+
+test "Solver.solve: turn-start AA vs KK — chance node enumeration" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    // Turn start: pot=50, stacks=100/100.
+    var root_state = gamestate_mod.GameState.init(.TURN, true, 50, 100, 100);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    // This tree will have chance nodes at check-check or bet-call transitions.
+    try node_mod.buildTree(&root_state, &arr, arena_allocator, temp_allocator, NUM_HANDS, NUM_HANDS);
+    const root = arr.items[0].child.?;
+
+    // Flop board (4th/5th cards are 0).
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        0, 0,
+    };
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+
+    var p1 = try Range.initEmpty(temp_allocator, 1);
+    defer p1.deinit(temp_allocator);
+    p1.active_indices[0] = aa_idx;
+    p1.probs[0] = 1.0;
+    var p2 = try Range.initEmpty(temp_allocator, 1);
+    defer p2.deinit(temp_allocator);
+    p2.active_indices[0] = kk_idx;
+    p2.probs[0] = 1.0;
+
+    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    defer solver.deinit();
+
+    var cfv_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_p2: [NUM_HANDS]f32 = undefined;
+    
+    // Just run a few iterations to verify it doesn't crash and handles chance.
+    solve(&solver, root, 10, &cfv_p1, &cfv_p2);
+
+    // AA still mostly beats KK, though some river cards could change that.
+    // We just want to see it run through the chance nodes.
+    try std.testing.expect(cfv_p1[aa_idx] > 0);
 }

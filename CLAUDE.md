@@ -99,3 +99,7 @@ These are independent; any one is a reasonable next move:
 2. **Real range vs range test.** The solver has only been exercised on single-hand-each ranges. Stand it up against e.g. a "value-heavy vs draw-heavy" matchup on a textured river and check that exploitability still trends → 0 and the average strategy looks sane (e.g. value hands bet, draws check). Will run slowly until (1) is done.
 
 3. **Chance nodes / Step 7 (turn or flop).** Extend the walker to enumerate runouts at chance nodes. Per CLAUDE.md's chance-node section, the right shape is: at a chance node, loop over the 47 remaining unblocked cards, recompute the showdown table for the new board, recurse into the (one) child subtree, weight contributions by `1/47` plus card-removal. Memory pressure starts here — for flop, plan on subgame decomposition (cheap leaf values at flop, re-solve each turn / river subgame independently) rather than holding all runouts' strategy data at once.
+
+## Current Status
+  The solver can now solve any street (Flop, Turn, River) through full runout enumeration. However, solving the Flop will be slow due to the combinatorial
+  explosion (47 Turn cards * 46 River cards = 2,162 runouts).

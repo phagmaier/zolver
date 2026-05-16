@@ -48,14 +48,16 @@ pub const Evaluator = struct {
         var counts = [_]u8{0} ** 13;
 
         inline for (hand) |card| {
-            const suit_nibble: u4 = @intCast((card >> 12) & 0xF);
-            const s_idx: usize = @ctz(suit_nibble);
-            const r: usize = (card >> 8) & 0xF;
-            const rb: u16 = @as(u16, 1) << @intCast(r);
-            ranks |= rb;
-            suit_ranks[s_idx] |= rb;
-            suit_counts[s_idx] += 1;
-            counts[r] += 1;
+            if (card != 0) {
+                const suit_nibble: u4 = @intCast((card >> 12) & 0xF);
+                const s_idx: usize = @ctz(suit_nibble);
+                const r: usize = (card >> 8) & 0xF;
+                const rb: u16 = @as(u16, 1) << @intCast(r);
+                ranks |= rb;
+                suit_ranks[s_idx] |= rb;
+                suit_counts[s_idx] += 1;
+                counts[r] += 1;
+            }
         }
 
         // Flush check (categories Flush=6 and Straight Flush=9, both > any non-flush hand
