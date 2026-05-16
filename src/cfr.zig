@@ -321,9 +321,12 @@ pub fn solve(
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
 ) void {
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
     var iter: usize = 0;
     while (iter < iterations) : (iter += 1) {
-        walk(self, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2);
+        walk(self, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random);
     }
 }
 
@@ -339,30 +342,21 @@ fn walk(
     p2_reach: []const f32,
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
+    random: std.Random,
 ) void {
     if (node.is_chance) {
-        // Enumerate all possible cards for the next street.
-        @memset(out_cfv_p1, 0);
-        @memset(out_cfv_p2, 0);
-
+        // Chance-Sampled CFR: Sample a single runout instead of enumerating all.
         const current_board = self.board;
-        // Determine which street we are dealing for.
         var num_board_cards: usize = 0;
         for (current_board) |c| {
-            if (c != 0) num_board_cards += 1; // 0 is a dummy card if not all 5 are set
+            if (c != 0) num_board_cards += 1;
         }
-        // Simplified: the solver root board should have 3 (flop) or 4 (turn) cards.
-        // For now, let's assume we deal the 4th (turn) or 5th (river) card.
         const card_to_fill_idx: usize = if (num_board_cards == 3) @as(usize, 3) else @as(usize, 4);
-        
-        const deck = card_mod.makeDeck();
-        var possible_cards: u16 = 0;
-        
-        var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
-        var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
 
-        for (deck) |c| {
-            // Check if card is already on board
+        const deck = card_mod.makeDeck();
+        var c: u32 = 0;
+        while (true) {
+            c = deck[random.uintLessThan(usize, 52)];
             var on_board = false;
             for (current_board) |bc| {
                 if (c == bc) {
@@ -370,34 +364,31 @@ fn walk(
                     break;
                 }
             }
-            if (on_board) continue;
+            if (!on_board) break;
+        }
 
-            possible_cards += 1;
-            var new_board = current_board;
-            new_board[card_to_fill_idx] = c;
+        var new_board = current_board;
+        new_board[card_to_fill_idx] = c;
 
-            // Update strengths for this runout
-            self.reinitForBoard(new_board);
+        // Update strengths for this sampled runout
+        self.reinitForBoard(new_board);
 
-            // Recurse into the single chance child (Action.CHANCE)
-            walk(self, node.edges[0].child.?, p1_reach, p2_reach, &runout_cfv_p1, &runout_cfv_p2);
+        // Recurse into the single chance child (Action.CHANCE)
+        walk(self, node.edges[0].child.?, p1_reach, p2_reach, out_cfv_p1, out_cfv_p2, random);
 
-            // Weight by card-removal (hand must not contain the new card)
-            for (0..NUM_HANDS) |i| {
-                const h = self.hand_table.all_hands[i];
-                if (h.card1 == c or h.card2 == c) continue;
-                out_cfv_p1[i] += runout_cfv_p1[i];
-                out_cfv_p2[i] += runout_cfv_p2[i];
+        // Card removal: reach must be zero for hands containing the sampled card.
+        // In sampled CFR, we don't weight by 1/N because the sampling distribution
+        // (uniform over legal cards) naturally handles the probability over iterations.
+        for (0..NUM_HANDS) |i| {
+            const h = self.hand_table.all_hands[i];
+            if (h.card1 == c or h.card2 == c) {
+                out_cfv_p1[i] = 0;
+                out_cfv_p2[i] = 0;
             }
         }
 
-        // Restore original board and average CFVs
+        // Restore original board
         self.reinitForBoard(current_board);
-        const weight = 1.0 / @as(f32, @floatFromInt(possible_cards));
-        for (0..NUM_HANDS) |i| {
-            out_cfv_p1[i] *= weight;
-            out_cfv_p2[i] *= weight;
-        }
         return;
     }
 
@@ -458,7 +449,7 @@ fn walk(
         const cfv_p2_slot = child_cfv_p2[off .. off + NUM_HANDS];
 
         if (edge.child) |child| {
-            walk(self, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot);
+            walk(self, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot, random);
         } else {
             switch (edge.action) {
                 .FOLD => self.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot),
