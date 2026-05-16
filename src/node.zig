@@ -23,12 +23,14 @@ pub const Edge = struct {
 };
 
 pub const Node = struct {
+    is_chance: bool,
     regrets: []f32,
     strategy_sum: []f32,
     edges: []Edge,
 
     pub fn create(arena: Allocator) !*Node {
         var self = try arena.create(Node);
+        self.is_chance = false;
         self.regrets = &.{};
         self.strategy_sum = &.{};
         self.edges = &.{};
@@ -37,10 +39,12 @@ pub const Node = struct {
 
     pub fn finalize(self: *Node, arena: Allocator, arr: *std.ArrayList(Edge), numCards: u16) !void {
         const size = arr.items.len;
-
-        // Allocate slices in Arena
         self.edges = try arena.alloc(Edge, size);
         @memcpy(self.edges, arr.items);
+
+        // Chance nodes have no strategic decision to make; CFR enumerates runouts at
+        // these points instead. Skip the regret/strategy allocation for them.
+        if (self.is_chance) return;
 
         self.regrets = try arena.alloc(f32, size * numCards);
         self.strategy_sum = try arena.alloc(f32, size * numCards);
@@ -57,26 +61,33 @@ pub fn buildTree(state: *GameState, arr: *std.ArrayList(Edge), arena: Allocator,
     }
     var childArr = std.ArrayList(Edge).empty;
     defer childArr.deinit(temp_allocator);
-    if (state.getFoldGameState()) |cState| {
-        var mutable_state = cState;
-        try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
-    }
-    if (state.getCallGameState()) |cState| {
-        var mutable_state = cState;
-        try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
-    }
-    if (state.getCheckGameState()) |cState| {
-        var mutable_state = cState;
-        try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
-    }
-    if (state.getAllInGameState()) |cState| {
-        var mutable_state = cState;
-        try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
-    }
-    for (BETSIZES) |prct| {
-        if (state.getBetGameState(prct)) |cState| {
+
+    if (state.is_chance) {
+        if (edge.child) |c| c.is_chance = true;
+        var post_chance = state.applyChance();
+        try buildTree(&post_chance, &childArr, arena, temp_allocator, numCards1, numCards2);
+    } else {
+        if (state.getFoldGameState()) |cState| {
             var mutable_state = cState;
             try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+        }
+        if (state.getCallGameState()) |cState| {
+            var mutable_state = cState;
+            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+        }
+        if (state.getCheckGameState()) |cState| {
+            var mutable_state = cState;
+            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+        }
+        if (state.getAllInGameState()) |cState| {
+            var mutable_state = cState;
+            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+        }
+        for (BETSIZES) |prct| {
+            if (state.getBetGameState(prct)) |cState| {
+                var mutable_state = cState;
+                try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+            }
         }
     }
 
@@ -85,29 +96,7 @@ pub fn buildTree(state: *GameState, arr: *std.ArrayList(Edge), arena: Allocator,
     try arr.append(temp_allocator, edge);
 }
 
-fn count_and_check(arr: *std.ArrayList(Edge), maxPotSize: f32) void {
-    var count: usize = 0;
-    for (arr.items) |*edge| {
-        count += _count_and_check(edge, maxPotSize);
-    }
-    std.debug.print("COUNT: {d}", .{count});
-}
-
-fn _count_and_check(edge: *Edge, maxPotSize: f32) usize {
-    var count: usize = 1;
-    std.debug.assert(edge.amount <= maxPotSize);
-    if (edge.amount == maxPotSize) {
-        std.debug.print("Got a max pot size: {d}\n", .{maxPotSize});
-    }
-    if (edge.child) |child| {
-        for (child.edges) |*children| {
-            count += _count_and_check(children, maxPotSize);
-        }
-    }
-    return count;
-}
-
-test "Init count and confirm sizes" {
+test "buildTree: every edge pot <= initial chips, tree is non-empty" {
     var da = std.heap.DebugAllocator(.{}){};
     defer _ = da.deinit();
     const temp_allocator = da.allocator();
@@ -116,12 +105,113 @@ test "Init count and confirm sizes" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    std.debug.print("Initializing Tree...\n", .{});
-
     var root_state = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
     const maxPotSize = root_state.pot + root_state.stack1 + root_state.stack2;
     var arr = std.ArrayList(Edge).empty;
     defer arr.deinit(temp_allocator);
-    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, 16);
-    count_and_check(&arr, maxPotSize);
+    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, 16, 16);
+
+    var count: usize = 0;
+    for (arr.items) |*edge| {
+        count += verifyEdge(edge, maxPotSize);
+    }
+    try std.testing.expect(count > 0);
+}
+
+fn verifyEdge(edge: *Edge, maxPotSize: f32) usize {
+    var count: usize = 1;
+    std.debug.assert(edge.amount <= maxPotSize + 1e-3);
+    if (edge.child) |child| {
+        for (child.edges) |*sub| {
+            count += verifyEdge(sub, maxPotSize);
+        }
+    }
+    return count;
+}
+
+test "buildTree: regret/strategy slices sized edges*numCards at every node" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const numCards1: u16 = 12;
+    const numCards2: u16 = 7;
+    var root_state = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, numCards1, numCards2);
+
+    // The root state's actor is p1, so the children-of-root node uses numCards1.
+    for (arr.items) |*edge| {
+        if (edge.child) |child| {
+            try std.testing.expect(!child.is_chance);
+            try std.testing.expect(child.regrets.len == child.edges.len * numCards1);
+            try std.testing.expect(child.strategy_sum.len == child.edges.len * numCards1);
+        }
+    }
+}
+
+fn findFirst(edges: []Edge, action: GameStateModule.Action) ?*Edge {
+    for (edges) |*e| if (e.action == action) return e;
+    return null;
+}
+
+test "buildTree: flop check-check inserts a chance node before turn" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var root_state = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, 8, 8);
+
+    // arr[0] -> root decision node (p1 to act on flop)
+    const root_node = arr.items[0].child.?;
+    const p1_check = findFirst(root_node.edges, .CHECK).?;
+    // p1 checked -> p2 decision node on flop
+    const p2_node = p1_check.child.?;
+    try std.testing.expect(!p2_node.is_chance);
+    const p2_check = findFirst(p2_node.edges, .CHECK).?;
+    // p2 checked -> chance node (turn deal pending)
+    const chance_node = p2_check.child.?;
+    try std.testing.expect(chance_node.is_chance);
+    try std.testing.expect(chance_node.edges.len == 1);
+    try std.testing.expect(chance_node.edges[0].action == .CHANCE);
+    try std.testing.expect(chance_node.regrets.len == 0);
+    try std.testing.expect(chance_node.strategy_sum.len == 0);
+    // beyond the chance edge is the turn-start decision node
+    const turn_node = chance_node.edges[0].child.?;
+    try std.testing.expect(!turn_node.is_chance);
+    try std.testing.expect(turn_node.regrets.len == turn_node.edges.len * 8);
+}
+
+test "buildTree: river check-check is terminal, not a chance node" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var root_state = GameState.init(.RIVER, true, 100.0, 1000.0, 1000.0);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, 8, 8);
+
+    const root_node = arr.items[0].child.?;
+    const p1_check = findFirst(root_node.edges, .CHECK).?;
+    const p2_node = p1_check.child.?;
+    const p2_check = findFirst(p2_node.edges, .CHECK).?;
+    // Terminal: no child node.
+    try std.testing.expect(p2_check.child == null);
 }
