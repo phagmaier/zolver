@@ -204,6 +204,41 @@ test "buildTree: flop check-check inserts a chance node before turn" {
     try std.testing.expect(turn_node.regrets.len == turn_node.edges.len * 8);
 }
 
+test "buildTree: pre-river all-in then call builds a chance chain to a terminal showdown" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    // FLOP start: all-in-call needs turn + river dealt before showdown, so the
+    // builder should produce two chance nodes followed by a terminal.
+    var root_state = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, 4, 4);
+
+    const root_node = arr.items[0].child.?;
+    const p1_allin = findFirst(root_node.edges, .ALLIN).?;
+    const p2_node = p1_allin.child.?;
+    try std.testing.expect(!p2_node.is_chance);
+
+    const p2_call = findFirst(p2_node.edges, .CALL).?;
+    const turn_chance = p2_call.child.?;
+    try std.testing.expect(turn_chance.is_chance);
+    try std.testing.expect(turn_chance.edges.len == 1);
+    try std.testing.expect(turn_chance.edges[0].action == .CHANCE);
+
+    const river_chance = turn_chance.edges[0].child.?;
+    try std.testing.expect(river_chance.is_chance);
+    try std.testing.expect(river_chance.edges.len == 1);
+    try std.testing.expect(river_chance.edges[0].action == .CHANCE);
+    // Showdown terminal: chance edge with no further child.
+    try std.testing.expect(river_chance.edges[0].child == null);
+}
+
 test "buildTree: river check-check is terminal, not a chance node" {
     var da = std.heap.DebugAllocator(.{}){};
     defer _ = da.deinit();

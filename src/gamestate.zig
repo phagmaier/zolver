@@ -177,13 +177,13 @@ pub const GameState = struct {
             new.current_bet_p2 += cost_to_call;
         }
 
-        // Terminal Logic
-        if (self.action == .ALLIN) {
-            new.isTerm = true;
-        } else if (self.street == .RIVER) {
+        // Terminal Logic. A call of an all-in pre-river is *not* terminal — the
+        // remaining board cards must run out before showdown. We model that as a
+        // chance node here; applyChance() chains additional chance steps as
+        // needed until the river is dealt.
+        if (self.street == .RIVER) {
             new.isTerm = true;
         } else {
-            // Defer the street advance to applyChance() so the tree gets a chance node.
             new.is_chance = true;
         }
 
@@ -196,6 +196,16 @@ pub const GameState = struct {
         new.is_chance = false;
         new.action = .CHANCE;
         new.nextStreet();
+        // Post-allin: at least one stack is zero, so no decision can occur. If
+        // we've reached the river the next node is the showdown terminal;
+        // otherwise we chain another chance step to deal the next street.
+        if (new.stack1 == 0 or new.stack2 == 0) {
+            if (new.street == .RIVER) {
+                new.isTerm = true;
+            } else {
+                new.is_chance = true;
+            }
+        }
         return new;
     }
 };
@@ -295,13 +305,39 @@ test "all action methods reject a chance state" {
     try expect(s2.getAllInGameState() == null);
 }
 
-test "all-in then call is terminal, chips conserved" {
+test "all-in then call pre-river is chance (runout pending), chips conserved" {
+    // FLOP all-in-call: turn and river still need to run before showdown, so the
+    // resulting state is a chance node, not a terminal. applyChance dealt twice
+    // takes us to a river-terminal post-allin state.
     const s = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
     const s1 = s.getAllInGameState().?;
     try expect(s1.action == .ALLIN);
     const s2 = s1.getCallGameState().?;
-    try expect(s2.isTerm);
+    try expect(s2.is_chance);
+    try expect(!s2.isTerm);
     try expect(chipsConserved(s2, 2100.0));
+
+    // First chance deal advances FLOP -> TURN. Stacks are still 0/0 so another
+    // chance step is required before showdown.
+    const s3 = s2.applyChance();
+    try expect(s3.street == .TURN);
+    try expect(s3.is_chance);
+    try expect(!s3.isTerm);
+
+    // Second chance deal advances TURN -> RIVER and lands on the showdown.
+    const s4 = s3.applyChance();
+    try expect(s4.street == .RIVER);
+    try expect(s4.isTerm);
+    try expect(!s4.is_chance);
+    try expect(chipsConserved(s4, 2100.0));
+}
+
+test "all-in call on river is terminal directly (no runout pending)" {
+    const s = GameState.init(.RIVER, true, 100.0, 1000.0, 1000.0);
+    const s1 = s.getAllInGameState().?;
+    const s2 = s1.getCallGameState().?;
+    try expect(s2.isTerm);
+    try expect(!s2.is_chance);
 }
 
 test "all-in respects chips already committed (regression)" {
@@ -317,7 +353,9 @@ test "all-in respects chips already committed (regression)" {
     try expect(s2.stack2 == 500.0);
     const s3 = s2.getCallGameState().?;
     try expect(s3.stack1 == 0.0);
-    try expect(s3.isTerm);
+    // Pre-river all-in-call is now a chance node, not terminal.
+    try expect(s3.is_chance);
+    try expect(!s3.isTerm);
     try expect(chipsConserved(s3, 1600.0));
 }
 

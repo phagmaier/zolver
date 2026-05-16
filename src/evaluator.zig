@@ -64,15 +64,17 @@ pub const Evaluator = struct {
         // reachable with 7 cards, so we can return immediately).
         inline for (suit_counts, 0..) |count, i| {
             if (count >= 5) {
-                var flush_bits = suit_ranks[i];
-                // Reduce to the top-5 ranks of the flush suit.
-                while (@popCount(flush_bits) > 5) flush_bits &= flush_bits - 1;
-                // Straight flush?
+                // Straight flush must be tested against the full suit bitmap:
+                // with 6+ suited cards, higher non-consecutive ranks can occupy
+                // the top-5 slots and hide a lower SF (e.g. a wheel SF behind
+                // two over-suited kickers).
                 inline for (STRAIGHTS, 0..) |sm, j| {
-                    if (flush_bits == sm) {
+                    if ((suit_ranks[i] & sm) == sm) {
                         return (STRAIGHT_FLUSH_BASE << 26) | @as(u32, @intCast(10 - j));
                     }
                 }
+                var flush_bits = suit_ranks[i];
+                while (@popCount(flush_bits) > 5) flush_bits &= flush_bits - 1;
                 return (FLUSH_BASE << 26) | @as(u32, flush_bits);
             }
         }
@@ -247,4 +249,21 @@ test "Histogram categorization vs prime-product oracle" {
     // Top 5 ranks: A(12), K(11), J(9), 9(7), 7(5). Bitmask = bits {5,7,9,11,12}.
     const expected_bits: u32 = (1 << 5) | (1 << 7) | (1 << 9) | (1 << 11) | (1 << 12);
     try std.testing.expectEqual(expected_bits, hc & 0x3FFFFFF);
+}
+
+test "wheel straight flush hidden behind suited over-kickers" {
+    // Regression: with 6+ same-suit cards, an SF whose run is below two higher
+    // suited kickers used to be missed because the popcount-strip dropped the
+    // wheel's low bits before the STRAIGHTS check ran.
+    // Hand: A♠ K♠ 5♠ 4♠ 3♠ 2♠ 9♣ — contains A-2-3-4-5 straight flush.
+    var eval = try Evaluator.init();
+    const wheel_sf = [_]u32{
+        Card.makeCard(12, 0), Card.makeCard(11, 0), Card.makeCard(3, 0),
+        Card.makeCard(2, 0),  Card.makeCard(1, 0),  Card.makeCard(0, 0),
+        Card.makeCard(7, 3),
+    };
+    const sf = eval.handStrength(wheel_sf);
+    try std.testing.expectEqual(@as(u32, STRAIGHT_FLUSH_BASE), sf >> 26);
+    // STRAIGHTS index 9 = wheel → value 10 - 9 = 1.
+    try std.testing.expectEqual(@as(u32, 1), sf & 0x3FFFFFF);
 }

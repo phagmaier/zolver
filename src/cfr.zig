@@ -373,12 +373,33 @@ fn walk(
         // Update strengths for this sampled runout
         self.reinitForBoard(new_board);
 
-        // Recurse into the single chance child (Action.CHANCE)
-        walk(self, node.edges[0].child.?, p1_reach, p2_reach, out_cfv_p1, out_cfv_p2, random);
+        // Card removal: hands containing the sampled card become illegal on the
+        // new board. Zero their reach before recursing so downstream regret /
+        // strategy_sum updates don't accumulate mass for hands that aren't in
+        // the player's effective range on this runout.
+        var masked_p1_reach: [NUM_HANDS]f32 = undefined;
+        var masked_p2_reach: [NUM_HANDS]f32 = undefined;
+        for (0..NUM_HANDS) |i| {
+            const h = self.hand_table.all_hands[i];
+            const keep = h.card1 != c and h.card2 != c;
+            masked_p1_reach[i] = if (keep) p1_reach[i] else 0;
+            masked_p2_reach[i] = if (keep) p2_reach[i] else 0;
+        }
 
-        // Card removal: reach must be zero for hands containing the sampled card.
+        // Recurse into the single chance child (Action.CHANCE).
         // In sampled CFR, we don't weight by 1/N because the sampling distribution
         // (uniform over legal cards) naturally handles the probability over iterations.
+        // A null child means the chance edge leads directly to a showdown — happens
+        // when an all-in is called pre-river, so the runout chain ends in showdown
+        // rather than another decision node.
+        const chance_edge = &node.edges[0];
+        if (chance_edge.child) |child| {
+            walk(self, child, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2, random);
+        } else {
+            self.terminalShowdown(chance_edge, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2);
+        }
+
+        // CFV is zero for now-illegal hands.
         for (0..NUM_HANDS) |i| {
             const h = self.hand_table.all_hands[i];
             if (h.card1 == c or h.card2 == c) {
@@ -551,7 +572,29 @@ fn brWalk(
             new_board[card_to_fill_idx] = c;
             self.reinitForBoard(new_board);
 
-            brWalk(self, node.edges[0].child.?, p1_reach, p2_reach, br_isp1, &runout_cfv);
+            // Mask reach for hands containing the dealt card so terminals /
+            // recursive calls don't accumulate mass on illegal hands.
+            var masked_p1: [NUM_HANDS]f32 = undefined;
+            var masked_p2: [NUM_HANDS]f32 = undefined;
+            for (0..NUM_HANDS) |i| {
+                const h = self.hand_table.all_hands[i];
+                const keep = h.card1 != c and h.card2 != c;
+                masked_p1[i] = if (keep) p1_reach[i] else 0;
+                masked_p2[i] = if (keep) p2_reach[i] else 0;
+            }
+
+            const chance_edge = &node.edges[0];
+            if (chance_edge.child) |child| {
+                brWalk(self, child, &masked_p1, &masked_p2, br_isp1, &runout_cfv);
+            } else {
+                // Post-allin runout terminal: showdown on the completed board.
+                var dummy: [NUM_HANDS]f32 = undefined;
+                if (br_isp1) {
+                    self.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &runout_cfv, &dummy);
+                } else {
+                    self.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &dummy, &runout_cfv);
+                }
+            }
 
             for (0..NUM_HANDS) |i| {
                 const h = self.hand_table.all_hands[i];
@@ -667,6 +710,33 @@ fn brWalk(
 
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) out_cfv[i] += child_cfv[i];
+        }
+    }
+}
+
+// Public strategy-extraction API. `node` must be a non-chance decision node.
+// `out` must be sized `node.edges.len * NUM_HANDS`, laid out as
+// `out[action * NUM_HANDS + hand_idx]`, matching the internal regret /
+// strategy_sum layout. For hands with zero accumulated mass (never reached
+// during solving) the uniform distribution is returned.
+pub fn averageStrategy(node: *const Node, out: []f32) void {
+    std.debug.assert(!node.is_chance);
+    const n = node.edges.len;
+    std.debug.assert(out.len == n * NUM_HANDS);
+    const uniform: f32 = 1.0 / @as(f32, @floatFromInt(n));
+    var i: usize = 0;
+    while (i < NUM_HANDS) : (i += 1) {
+        var sum: f32 = 0;
+        var a: usize = 0;
+        while (a < n) : (a += 1) sum += node.strategy_sum[a * NUM_HANDS + i];
+        if (sum > 0) {
+            a = 0;
+            while (a < n) : (a += 1) {
+                out[a * NUM_HANDS + i] = node.strategy_sum[a * NUM_HANDS + i] / sum;
+            }
+        } else {
+            a = 0;
+            while (a < n) : (a += 1) out[a * NUM_HANDS + i] = uniform;
         }
     }
 }
@@ -885,6 +955,84 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     // After 200 iters vanilla CFR lands at ~0.75 in this game.
     const expl = exploitability(&solver, root);
     try std.testing.expect(@abs(expl) < 1.0);
+}
+
+test "averageStrategy: KK folds to p1's bet on AA-vs-KK river" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var root_state = gamestate_mod.GameState.init(.RIVER, true, 50, 100, 100);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try node_mod.buildTree(&root_state, &arr, arena_allocator, temp_allocator, NUM_HANDS, NUM_HANDS);
+    const root = arr.items[0].child.?;
+
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        card_mod.makeCard(3, 3),
+        card_mod.makeCard(2, 0),
+    };
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+
+    var p1 = try range_mod.Range.initEmpty(temp_allocator, 1);
+    defer p1.deinit(temp_allocator);
+    p1.active_indices[0] = aa_idx;
+    p1.probs[0] = 1.0;
+    var p2 = try range_mod.Range.initEmpty(temp_allocator, 1);
+    defer p2.deinit(temp_allocator);
+    p2.active_indices[0] = kk_idx;
+    p2.probs[0] = 1.0;
+
+    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    defer solver.deinit();
+
+    var cfv_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_p2: [NUM_HANDS]f32 = undefined;
+    solve(&solver, root, 500, &cfv_p1, &cfv_p2);
+
+    // Find a p1 BET edge at the root; descend into p2's facing-bet node.
+    var bet_edge: ?*Edge = null;
+    for (root.edges) |*e| {
+        if (e.action == .BET or e.action == .ALLIN) {
+            bet_edge = e;
+            break;
+        }
+    }
+    const p2_node = bet_edge.?.child.?;
+    try std.testing.expect(!p2_node.is_chance);
+    try std.testing.expect(!p2_node.isp1);
+
+    const n_actions = p2_node.edges.len;
+    const out = try temp_allocator.alloc(f32, n_actions * NUM_HANDS);
+    defer temp_allocator.free(out);
+    averageStrategy(p2_node, out);
+
+    // Locate the FOLD action index for p2's response.
+    var fold_action: ?usize = null;
+    for (p2_node.edges, 0..) |e, idx| {
+        if (e.action == .FOLD) {
+            fold_action = idx;
+            break;
+        }
+    }
+    const fa = fold_action.?;
+    // KK must fold ~100% — it can never beat AA on a dry low board.
+    try std.testing.expect(out[fa * NUM_HANDS + kk_idx] > 0.95);
+
+    // Sanity: row sums to ~1 for the only hand we care about.
+    var row_sum: f32 = 0;
+    for (0..n_actions) |a| row_sum += out[a * NUM_HANDS + kk_idx];
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), row_sum, 1e-4);
 }
 
 test "Solver.solve: polarized vs condensed river" {
