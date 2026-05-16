@@ -324,6 +324,147 @@ fn walk(
     }
 }
 
+// Best response: walks the tree with the BR player picking max-EV action per
+// hand at their own decision nodes, while the opponent plays their *average*
+// strategy from strategy_sum. Writes per-hand BR CFV (from BR's perspective)
+// into out_cfv. Used to measure exploitability.
+fn brWalk(
+    self: *Solver,
+    node: *Node,
+    p1_reach: []const f32,
+    p2_reach: []const f32,
+    br_isp1: bool,
+    out_cfv: []f32,
+) void {
+    if (node.is_chance) unreachable;
+    const n_actions = node.edges.len;
+    const actor_isp1 = node.isp1;
+
+    if (actor_isp1 == br_isp1) {
+        // BR player's decision: walk every action with unchanged reach, then
+        // pick the per-hand max. Opponent's reach doesn't change here either,
+        // since BR plays a pure (per-hand) strategy.
+        var child_cfv: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
+        var dummy: [NUM_HANDS]f32 = undefined;
+        for (node.edges, 0..) |*edge, a| {
+            const off = a * NUM_HANDS;
+            const slot = child_cfv[off .. off + NUM_HANDS];
+            if (edge.child) |child| {
+                brWalk(self, child, p1_reach, p2_reach, br_isp1, slot);
+            } else if (br_isp1) {
+                switch (edge.action) {
+                    .FOLD => self.terminalFold(edge, actor_isp1, p1_reach, p2_reach, slot, &dummy),
+                    .CHECK, .CALL => self.terminalShowdown(edge, p1_reach, p2_reach, slot, &dummy),
+                    else => unreachable,
+                }
+            } else {
+                switch (edge.action) {
+                    .FOLD => self.terminalFold(edge, actor_isp1, p1_reach, p2_reach, &dummy, slot),
+                    .CHECK, .CALL => self.terminalShowdown(edge, p1_reach, p2_reach, &dummy, slot),
+                    else => unreachable,
+                }
+            }
+        }
+        var i: usize = 0;
+        while (i < NUM_HANDS) : (i += 1) {
+            var best: f32 = child_cfv[i];
+            var a: usize = 1;
+            while (a < n_actions) : (a += 1) {
+                const v = child_cfv[a * NUM_HANDS + i];
+                if (v > best) best = v;
+            }
+            out_cfv[i] = best;
+        }
+    } else {
+        // Opponent's decision: normalize strategy_sum → average strategy, scale
+        // opponent's reach by it per action, and sum the child CFVs.
+        var avg_strategy: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
+        {
+            var i: usize = 0;
+            while (i < NUM_HANDS) : (i += 1) {
+                var sum: f32 = 0;
+                var a: usize = 0;
+                while (a < n_actions) : (a += 1) sum += node.strategy_sum[a * NUM_HANDS + i];
+                if (sum > 0) {
+                    a = 0;
+                    while (a < n_actions) : (a += 1) {
+                        avg_strategy[a * NUM_HANDS + i] = node.strategy_sum[a * NUM_HANDS + i] / sum;
+                    }
+                } else {
+                    const uniform: f32 = 1.0 / @as(f32, @floatFromInt(n_actions));
+                    a = 0;
+                    while (a < n_actions) : (a += 1) avg_strategy[a * NUM_HANDS + i] = uniform;
+                }
+            }
+        }
+
+        @memset(out_cfv, 0);
+        var new_p1_reach: [NUM_HANDS]f32 = undefined;
+        var new_p2_reach: [NUM_HANDS]f32 = undefined;
+        var child_cfv: [NUM_HANDS]f32 = undefined;
+        var dummy: [NUM_HANDS]f32 = undefined;
+
+        for (node.edges, 0..) |*edge, a| {
+            const off = a * NUM_HANDS;
+            if (br_isp1) {
+                var i: usize = 0;
+                while (i < NUM_HANDS) : (i += 1) {
+                    new_p1_reach[i] = p1_reach[i];
+                    new_p2_reach[i] = p2_reach[i] * avg_strategy[off + i];
+                }
+            } else {
+                var i: usize = 0;
+                while (i < NUM_HANDS) : (i += 1) {
+                    new_p1_reach[i] = p1_reach[i] * avg_strategy[off + i];
+                    new_p2_reach[i] = p2_reach[i];
+                }
+            }
+
+            if (edge.child) |child| {
+                brWalk(self, child, &new_p1_reach, &new_p2_reach, br_isp1, &child_cfv);
+            } else if (br_isp1) {
+                switch (edge.action) {
+                    .FOLD => self.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, &child_cfv, &dummy),
+                    .CHECK, .CALL => self.terminalShowdown(edge, &new_p1_reach, &new_p2_reach, &child_cfv, &dummy),
+                    else => unreachable,
+                }
+            } else {
+                switch (edge.action) {
+                    .FOLD => self.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, &dummy, &child_cfv),
+                    .CHECK, .CALL => self.terminalShowdown(edge, &new_p1_reach, &new_p2_reach, &dummy, &child_cfv),
+                    else => unreachable,
+                }
+            }
+
+            var i: usize = 0;
+            while (i < NUM_HANDS) : (i += 1) out_cfv[i] += child_cfv[i];
+        }
+    }
+}
+
+pub fn bestResponse(self: *Solver, root: *Node, br_isp1: bool, out_cfv: []f32) void {
+    brWalk(self, root, &self.p1_reach, &self.p2_reach, br_isp1, out_cfv);
+}
+
+// Sum of best-response values for both players, weighted by their reach. At a
+// Nash equilibrium this is zero (zero-sum game); any positive value is how
+// much can be extracted by exploiting the current average strategies.
+pub fn exploitability(self: *Solver, root: *Node) f32 {
+    var br_p1: [NUM_HANDS]f32 = undefined;
+    var br_p2: [NUM_HANDS]f32 = undefined;
+    bestResponse(self, root, true, &br_p1);
+    bestResponse(self, root, false, &br_p2);
+
+    var v_p1: f32 = 0;
+    var v_p2: f32 = 0;
+    var i: usize = 0;
+    while (i < NUM_HANDS) : (i += 1) {
+        v_p1 += self.p1_reach[i] * br_p1[i];
+        v_p2 += self.p2_reach[i] * br_p2[i];
+    }
+    return v_p1 + v_p2;
+}
+
 test "Solver.init: blocker mask, strengths, densified ranges" {
     const allocator = std.testing.allocator;
 
@@ -510,4 +651,9 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     // (half of the unraised pot OR the folder's effective contribution).
     try std.testing.expectApproxEqAbs(@as(f32, 25), cfv_p1[aa_idx], 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, -25), cfv_p2[kk_idx], 0.5);
+
+    // Exploitability should be ~0 at this point: zero-sum game at NE.
+    // After 200 iters vanilla CFR lands at ~0.75 in this game.
+    const expl = exploitability(&solver, root);
+    try std.testing.expect(@abs(expl) < 1.0);
 }
