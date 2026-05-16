@@ -4,6 +4,7 @@ const Arena = std.heap.ArenaAllocator;
 const GameStateModule = @import("gamestate.zig");
 const GameState = GameStateModule.GameState;
 const Action = GameStateModule.Action;
+const Street = GameStateModule.Street;
 const BETSIZES = GameStateModule.BETSIZES;
 
 pub const Edge = struct {
@@ -32,6 +33,7 @@ pub const Edge = struct {
 
 pub const Node = struct {
     is_chance: bool,
+    is_leaf: bool,
     isp1: bool,
     regrets: []f32,
     strategy_sum: []f32,
@@ -40,6 +42,7 @@ pub const Node = struct {
     pub fn create(arena: Allocator, isp1: bool) !*Node {
         var self = try arena.create(Node);
         self.is_chance = false;
+        self.is_leaf = false;
         self.isp1 = isp1;
         self.regrets = &.{};
         self.strategy_sum = &.{};
@@ -64,6 +67,30 @@ pub const Node = struct {
 };
 
 pub fn buildTree(state: *GameState, arr: *std.ArrayList(Edge), arena: Allocator, temp_allocator: Allocator, numCards1: u16, numCards2: u16) !void {
+    try buildTreeInternal(state, arr, arena, temp_allocator, numCards1, numCards2, null);
+}
+
+pub fn buildTreeTruncated(
+    state: *GameState,
+    arr: *std.ArrayList(Edge),
+    arena: Allocator,
+    temp_allocator: Allocator,
+    numCards1: u16,
+    numCards2: u16,
+    truncate_after: Street,
+) !void {
+    try buildTreeInternal(state, arr, arena, temp_allocator, numCards1, numCards2, truncate_after);
+}
+
+fn buildTreeInternal(
+    state: *GameState,
+    arr: *std.ArrayList(Edge),
+    arena: Allocator,
+    temp_allocator: Allocator,
+    numCards1: u16,
+    numCards2: u16,
+    truncate_after: ?Street,
+) !void {
     var edge = try Edge.init(arena, state);
     if (state.isTerm) {
         try arr.append(temp_allocator, edge);
@@ -74,29 +101,43 @@ pub fn buildTree(state: *GameState, arr: *std.ArrayList(Edge), arena: Allocator,
 
     if (state.is_chance) {
         if (edge.child) |c| c.is_chance = true;
-        var post_chance = state.applyChance();
-        try buildTree(&post_chance, &childArr, arena, temp_allocator, numCards1, numCards2);
+        if (truncate_after == state.street) {
+            if (edge.child) |c| {
+                c.is_leaf = true;
+                const leaf_edge = Edge{
+                    .action = .CHANCE,
+                    .amount = state.pot,
+                    .stack1 = state.stack1,
+                    .stack2 = state.stack2,
+                    .child = null,
+                };
+                try childArr.append(temp_allocator, leaf_edge);
+            }
+        } else {
+            var post_chance = state.applyChance();
+            try buildTreeInternal(&post_chance, &childArr, arena, temp_allocator, numCards1, numCards2, truncate_after);
+        }
     } else {
         if (state.getFoldGameState()) |cState| {
             var mutable_state = cState;
-            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+            try buildTreeInternal(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2, truncate_after);
         }
         if (state.getCallGameState()) |cState| {
             var mutable_state = cState;
-            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+            try buildTreeInternal(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2, truncate_after);
         }
         if (state.getCheckGameState()) |cState| {
             var mutable_state = cState;
-            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+            try buildTreeInternal(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2, truncate_after);
         }
         if (state.getAllInGameState()) |cState| {
             var mutable_state = cState;
-            try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+            try buildTreeInternal(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2, truncate_after);
         }
         for (BETSIZES) |prct| {
             if (state.getBetGameState(prct)) |cState| {
                 var mutable_state = cState;
-                try buildTree(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2);
+                try buildTreeInternal(&mutable_state, &childArr, arena, temp_allocator, numCards1, numCards2, truncate_after);
             }
         }
     }
@@ -202,6 +243,35 @@ test "buildTree: flop check-check inserts a chance node before turn" {
     const turn_node = chance_node.edges[0].child.?;
     try std.testing.expect(!turn_node.is_chance);
     try std.testing.expect(turn_node.regrets.len == turn_node.edges.len * 8);
+}
+
+test "buildTreeTruncated: flop chance becomes an all-in equity leaf" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var root_state = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try buildTreeTruncated(&root_state, &arr, arena_allocator, temp_allocator, 8, 8, .FLOP);
+
+    const root_node = arr.items[0].child.?;
+    const p1_check = findFirst(root_node.edges, .CHECK).?;
+    const p2_node = p1_check.child.?;
+    const p2_check = findFirst(p2_node.edges, .CHECK).?;
+    const leaf = p2_check.child.?;
+
+    try std.testing.expect(leaf.is_chance);
+    try std.testing.expect(leaf.is_leaf);
+    try std.testing.expect(leaf.regrets.len == 0);
+    try std.testing.expect(leaf.strategy_sum.len == 0);
+    try std.testing.expect(leaf.edges.len == 1);
+    try std.testing.expect(leaf.edges[0].action == .CHANCE);
+    try std.testing.expect(leaf.edges[0].child == null);
 }
 
 test "buildTree: pre-river all-in then call builds a chance chain to a terminal showdown" {
