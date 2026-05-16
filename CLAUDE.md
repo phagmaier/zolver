@@ -17,11 +17,11 @@ This is not meant to compete with high-end commercial solvers. It is free softwa
 
 ## Architecture
 
-### PokerEval library (imported)
+### PokerEval (evaluator.zig)
 
 Hand evaluation lives in the `PokerEval` dependency (see `build.zig.zon`). Assume it is correct and fast — it returns a strength score given seven `Card`s. `main.zig` has an example.
 
-#### Card encoding
+#### Card encoding (card.zig)
 
 A `Card` packs four representations of one card so the evaluator can pick whichever is cheapest per check:
 
