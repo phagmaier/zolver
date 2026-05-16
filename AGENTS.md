@@ -54,6 +54,9 @@ Instead of enumerating all possible runouts (47 Turn cards, 46 River cards) at e
 #### Strategy Extraction
 `averageStrategy(node, out)` normalizes a non-chance node's `strategy_sum` into per-action probabilities per hand, laid out as `out[action * NUM_HANDS + hand_idx]`. This is the public-facing readout from a solved tree (used by the upcoming CLI and by any leaf-evaluator that wants to plug into a parent solve). Hands with zero accumulated mass fall back to uniform.
 
+#### All-In Equity Leaf Evaluator (Subgame Decomposition Phase 1)
+`allInEquityLeaf(edge, p1_reach, p2_reach, out_cfv_p1, out_cfv_p2)` is the cheap leaf value used when a truncated tree stops descending at a chance node. It assumes both players shove their remaining stacks immediately: synthetic showdown pot = `edge.amount + 2 * min(edge.stack1, edge.stack2)`, with `computeShowdownCFV` called per runout at `half_pot = effective_pot / 2` (same winner-gains-half-pot convention as `terminalShowdown`). Enumerates the remaining board completions (47×48 ordered pairs from a flop-chance entry, 48 cards from a turn-chance entry); a complete board takes the trivial single-showdown path. Reach masking and the chance-node averaging convention mirror `brWalk`'s chance handler so values are consistent with full-tree CFVs. Verified by three tests: full-board path agrees with `terminalShowdown` exactly, flop-chance and turn-chance entries each show AA dominating KK while preserving the AA+KK zero-sum invariant.
+
 ### Game Tree
 
 The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig` (tree structure).
@@ -64,9 +67,9 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 ## Current State
 
-- **Performance:** `zig build test` takes ~20s for 32 tests (down from ~22s after the `BoardSnapshot` optimization; pre-CFR+/optimization baseline was ~57s for 25 tests). Turn-start solves converge in seconds.
-- **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts is verified by a `node.zig` structural test. Snapshot/restore round-trip is verified directly.
-- **Correctness:** All 32 tests pass.
+- **Performance:** `zig build test` takes ~26s for 35 tests (the +3 tests / +6s vs. the prior 32-test baseline are from the new `allInEquityLeaf` runout enumerations). Turn-start solves converge in seconds.
+- **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts is verified by a `node.zig` structural test. Snapshot/restore round-trip is verified directly. `allInEquityLeaf` is checked against `terminalShowdown` on a full board and for the zero-sum invariant + AA dominance from flop-chance and turn-chance entries.
+- **Correctness:** All 35 tests pass.
 
 ## Known Gaps & Cautions
 
@@ -99,7 +102,9 @@ Modern free solvers solve this by **truncating** the Flop tree at the turn chanc
 
 Make Flop solving fit in laptop RAM with accuracy that is competitive for personal-machine use (not industrial), and expose an API where a user can say "give me the strategy on Turn = T♣" without ever materializing the full game tree.
 
-### Phase 1 — All-In Equity Leaf Evaluator
+### Phase 1 — All-In Equity Leaf Evaluator ✅ Done
+
+Lives in `cfr.zig` as `Solver.allInEquityLeaf`. See the "All-In Equity Leaf Evaluator" subsection under **CFR Solver** above for the as-built description; the original design notes below are preserved for context.
 
 Build a function that, at a chance node, returns the per-hand CFV under the simplifying assumption that **both players commit their remaining stacks immediately** and the rest of the board runs out.
 

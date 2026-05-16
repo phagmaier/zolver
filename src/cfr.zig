@@ -339,6 +339,155 @@ pub const Solver = struct {
             out[i] = (real_win_mass - real_loss_mass) * payoff;
         }
     }
+
+    // All-in equity leaf evaluator. At a chance node we wish to truncate, this
+    // returns each player's per-hand CFV under the simplifying assumption that
+    // both players commit their remaining stacks immediately and the rest of
+    // the board runs out uniformly. Used by the subgame-decomposition path to
+    // replace the missing turn/river subtree with a cheap value estimate.
+    //
+    // Pot accounting: both sides add min(edge.stack1, edge.stack2), so the
+    // synthetic showdown pot is `edge.amount + 2*min(stacks)`. We pass
+    // half of that to `computeShowdownCFV`, matching the convention in
+    // `terminalShowdown` (winner +half_pot, loser -half_pot).
+    //
+    // Card-removal handling mirrors `brWalk`: hands containing a dealt card
+    // are masked out of the runout's contribution. The output is averaged by
+    // the total enumerated runouts (not per-hand-legal counts), again matching
+    // brWalk's chance-node normalization.
+    pub fn allInEquityLeaf(
+        self: *Solver,
+        edge: *const Edge,
+        p1_reach: []const f32,
+        p2_reach: []const f32,
+        out_cfv_p1: []f32,
+        out_cfv_p2: []f32,
+    ) void {
+        const additional: f32 = @min(edge.stack1, edge.stack2);
+        const effective_pot: f32 = edge.amount + 2.0 * additional;
+        const half_pot: f32 = effective_pot / 2.0;
+
+        @memset(out_cfv_p1, 0);
+        @memset(out_cfv_p2, 0);
+
+        var snap: BoardSnapshot = undefined;
+        self.snapshotBoard(&snap);
+
+        var num_board_cards: usize = 0;
+        for (snap.board) |c| {
+            if (c != 0) num_board_cards += 1;
+        }
+
+        // Already a complete board: a single showdown at the synthetic pot.
+        if (num_board_cards == 5) {
+            self.computeShowdownCFV(p2_reach, out_cfv_p1, half_pot);
+            self.computeShowdownCFV(p1_reach, out_cfv_p2, half_pot);
+            self.restoreBoard(&snap);
+            return;
+        }
+
+        std.debug.assert(num_board_cards == 3 or num_board_cards == 4);
+
+        const deck = card_mod.makeDeck();
+        var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
+        var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
+        var possible_runouts: u32 = 0;
+
+        if (num_board_cards == 4) {
+            // Turn-chance leaf: enumerate the river card only.
+            for (deck) |r| {
+                var on_board = false;
+                for (snap.board) |bc| {
+                    if (r == bc) {
+                        on_board = true;
+                        break;
+                    }
+                }
+                if (on_board) continue;
+
+                var new_board = snap.board;
+                new_board[4] = r;
+                self.reinitForBoard(new_board);
+
+                var masked_p1: [NUM_HANDS]f32 = undefined;
+                var masked_p2: [NUM_HANDS]f32 = undefined;
+                for (0..NUM_HANDS) |i| {
+                    const h = self.hand_table.all_hands[i];
+                    const keep = h.card1 != r and h.card2 != r;
+                    masked_p1[i] = if (keep) p1_reach[i] else 0;
+                    masked_p2[i] = if (keep) p2_reach[i] else 0;
+                }
+
+                self.computeShowdownCFV(&masked_p2, &runout_cfv_p1, half_pot);
+                self.computeShowdownCFV(&masked_p1, &runout_cfv_p2, half_pot);
+
+                for (0..NUM_HANDS) |i| {
+                    const h = self.hand_table.all_hands[i];
+                    if (h.card1 == r or h.card2 == r) continue;
+                    out_cfv_p1[i] += runout_cfv_p1[i];
+                    out_cfv_p2[i] += runout_cfv_p2[i];
+                }
+                possible_runouts += 1;
+            }
+        } else {
+            // Flop-chance leaf: enumerate (turn, river) ordered pairs.
+            for (deck) |t| {
+                var t_on_board = false;
+                for (snap.board) |bc| {
+                    if (t == bc) {
+                        t_on_board = true;
+                        break;
+                    }
+                }
+                if (t_on_board) continue;
+
+                for (deck) |r| {
+                    if (r == t) continue;
+                    var r_on_board = false;
+                    for (snap.board) |bc| {
+                        if (r == bc) {
+                            r_on_board = true;
+                            break;
+                        }
+                    }
+                    if (r_on_board) continue;
+
+                    var new_board = snap.board;
+                    new_board[3] = t;
+                    new_board[4] = r;
+                    self.reinitForBoard(new_board);
+
+                    var masked_p1: [NUM_HANDS]f32 = undefined;
+                    var masked_p2: [NUM_HANDS]f32 = undefined;
+                    for (0..NUM_HANDS) |i| {
+                        const h = self.hand_table.all_hands[i];
+                        const keep = h.card1 != t and h.card2 != t and h.card1 != r and h.card2 != r;
+                        masked_p1[i] = if (keep) p1_reach[i] else 0;
+                        masked_p2[i] = if (keep) p2_reach[i] else 0;
+                    }
+
+                    self.computeShowdownCFV(&masked_p2, &runout_cfv_p1, half_pot);
+                    self.computeShowdownCFV(&masked_p1, &runout_cfv_p2, half_pot);
+
+                    for (0..NUM_HANDS) |i| {
+                        const h = self.hand_table.all_hands[i];
+                        if (h.card1 == t or h.card2 == t or h.card1 == r or h.card2 == r) continue;
+                        out_cfv_p1[i] += runout_cfv_p1[i];
+                        out_cfv_p2[i] += runout_cfv_p2[i];
+                    }
+                    possible_runouts += 1;
+                }
+            }
+        }
+
+        self.restoreBoard(&snap);
+
+        const weight: f32 = 1.0 / @as(f32, @floatFromInt(possible_runouts));
+        for (0..NUM_HANDS) |i| {
+            out_cfv_p1[i] *= weight;
+            out_cfv_p2[i] *= weight;
+        }
+    }
 };
 
 inline fn handsCompatible(a: range_mod.Hand, b: range_mod.Hand) bool {
@@ -1240,4 +1389,149 @@ test "Solver.solve: turn-start AA vs KK — chance node enumeration" {
     // AA still mostly beats KK, though some river cards could change that.
     // We just want to see it run through the chance nodes.
     try std.testing.expect(cfv_p1[aa_idx] > 0);
+}
+
+test "allInEquityLeaf: full 5-card board matches terminalShowdown" {
+    const allocator = std.testing.allocator;
+
+    // 7c 8h 2d 5c 4s — complete board, no draws relevant.
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        card_mod.makeCard(3, 3),
+        card_mod.makeCard(2, 0),
+    };
+
+    var p1 = try Range.initEmpty(allocator, 0);
+    defer p1.deinit(allocator);
+    var p2 = try Range.initEmpty(allocator, 0);
+    defer p2.deinit(allocator);
+
+    var solver = try Solver.init(board, &p1, &p2, 1000, 1000, 0);
+    defer solver.deinit();
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+    solver.p1_reach[aa_idx] = 1.0;
+    solver.p2_reach[kk_idx] = 1.0;
+
+    // edge.amount=200, stacks=0 → synthetic pot stays at 200, matching terminalShowdown.
+    const edge = Edge{
+        .action = .CALL,
+        .amount = 200,
+        .stack1 = 0,
+        .stack2 = 0,
+        .child = null,
+    };
+
+    var leaf_p1: [NUM_HANDS]f32 = undefined;
+    var leaf_p2: [NUM_HANDS]f32 = undefined;
+    solver.allInEquityLeaf(&edge, &solver.p1_reach, &solver.p2_reach, &leaf_p1, &leaf_p2);
+
+    var ref_p1: [NUM_HANDS]f32 = undefined;
+    var ref_p2: [NUM_HANDS]f32 = undefined;
+    solver.terminalShowdown(&edge, &solver.p1_reach, &solver.p2_reach, &ref_p1, &ref_p2);
+
+    // The leaf reduces to a single showdown on a full board, so the two paths
+    // must agree exactly on the hands we care about.
+    try std.testing.expectEqual(ref_p1[aa_idx], leaf_p1[aa_idx]);
+    try std.testing.expectEqual(ref_p2[kk_idx], leaf_p2[kk_idx]);
+}
+
+test "allInEquityLeaf: flop chance — AA dominates KK and CFVs are zero-sum" {
+    const allocator = std.testing.allocator;
+
+    // 7c 8h 2d, board cards 4 & 5 unset → flop-chance entry point.
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        0, 0,
+    };
+
+    var p1 = try Range.initEmpty(allocator, 0);
+    defer p1.deinit(allocator);
+    var p2 = try Range.initEmpty(allocator, 0);
+    defer p2.deinit(allocator);
+
+    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    defer solver.deinit();
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+    solver.p1_reach[aa_idx] = 1.0;
+    solver.p2_reach[kk_idx] = 1.0;
+
+    // Pot 50, both with 100 left → synthetic shove pot = 250, half = 125.
+    const edge = Edge{
+        .action = .CHANCE,
+        .amount = 50,
+        .stack1 = 100,
+        .stack2 = 100,
+        .child = null,
+    };
+
+    var leaf_p1: [NUM_HANDS]f32 = undefined;
+    var leaf_p2: [NUM_HANDS]f32 = undefined;
+    solver.allInEquityLeaf(&edge, &solver.p1_reach, &solver.p2_reach, &leaf_p1, &leaf_p2);
+
+    // AA is a heavy favorite on a dry low rainbow flop vs KK. Both reach
+    // singletons, so per-runout CFV is ±half_pot or 0. Averaged across the
+    // ~92% of runouts where AA is still legal, AA's CFV must be strongly
+    // positive (well above half of half_pot).
+    try std.testing.expect(leaf_p1[aa_idx] > 60.0);
+
+    // Zero-sum invariant: in any runout that knocks out AA, the masked p1
+    // reach is identically zero, so KK's CFV also drops to zero (and vice
+    // versa). So the per-runout sum is exactly 0 and the averaged sum is too.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), leaf_p1[aa_idx] + leaf_p2[kk_idx], 1e-3);
+
+    // Blocked hands stay at zero. Pick a hand using one of the flop cards.
+    const flop_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(5, 3), card_mod.makeCard(10, 0))).?;
+    try std.testing.expectEqual(@as(f32, 0.0), leaf_p1[flop_idx]);
+}
+
+test "allInEquityLeaf: turn chance — river-only enumeration runs and zero-sum holds" {
+    const allocator = std.testing.allocator;
+
+    // 7c 8h 2d 5c → turn complete, river pending.
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        card_mod.makeCard(3, 3),
+        0,
+    };
+
+    var p1 = try Range.initEmpty(allocator, 0);
+    defer p1.deinit(allocator);
+    var p2 = try Range.initEmpty(allocator, 0);
+    defer p2.deinit(allocator);
+
+    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    defer solver.deinit();
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+    solver.p1_reach[aa_idx] = 1.0;
+    solver.p2_reach[kk_idx] = 1.0;
+
+    const edge = Edge{
+        .action = .CHANCE,
+        .amount = 50,
+        .stack1 = 100,
+        .stack2 = 100,
+        .child = null,
+    };
+
+    var leaf_p1: [NUM_HANDS]f32 = undefined;
+    var leaf_p2: [NUM_HANDS]f32 = undefined;
+    solver.allInEquityLeaf(&edge, &solver.p1_reach, &solver.p2_reach, &leaf_p1, &leaf_p2);
+
+    try std.testing.expect(leaf_p1[aa_idx] > 60.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), leaf_p1[aa_idx] + leaf_p2[kk_idx], 1e-3);
 }
