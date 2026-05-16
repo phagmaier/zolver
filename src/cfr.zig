@@ -16,6 +16,20 @@ pub const NUM_HANDS: usize = 1326;
 // bet: {fold, call, all-in, 2 raise sizes} = 5. Round up for headroom.
 const MAX_ACTIONS: usize = 6;
 
+// Snapshot of all board-derived solver state. Used to cheaply restore the
+// solver after a chance node sample/enumeration: snapshot once, run
+// `reinitForBoard` for each candidate runout, then memcpy back instead of
+// burning another full hand-strength recompute + sort on the restore.
+const BoardSnapshot = struct {
+    board: [5]Card,
+    hand_strengths: [NUM_HANDS]u32,
+    blocked: [NUM_HANDS]bool,
+    sorted_indices: [NUM_HANDS]u16,
+    rank_map: [NUM_HANDS]u16,
+    first_rank: [NUM_HANDS]u16,
+    last_rank: [NUM_HANDS]u16,
+};
+
 // River-first solver. Holds the static showdown environment (precomputed hand
 // strengths against a fixed 5-card board, blocker mask) plus the dense reach
 // vectors used during CFR traversal. Solve loop, terminal payoffs, and the
@@ -202,6 +216,26 @@ pub const Solver = struct {
         }
     }
 
+    fn snapshotBoard(self: *const Solver, snap: *BoardSnapshot) void {
+        snap.board = self.board;
+        snap.hand_strengths = self.hand_strengths;
+        snap.blocked = self.blocked;
+        snap.sorted_indices = self.sorted_indices;
+        snap.rank_map = self.rank_map;
+        snap.first_rank = self.first_rank;
+        snap.last_rank = self.last_rank;
+    }
+
+    fn restoreBoard(self: *Solver, snap: *const BoardSnapshot) void {
+        self.board = snap.board;
+        self.hand_strengths = snap.hand_strengths;
+        self.blocked = snap.blocked;
+        self.sorted_indices = snap.sorted_indices;
+        self.rank_map = snap.rank_map;
+        self.first_rank = snap.first_rank;
+        self.last_rank = snap.last_rank;
+    }
+
     // EV at a fold terminal. The pot goes to whoever didn't fold; the folder's
     // effective contribution since solver root drives the per-hand payoff.
     // Both per-hand counterfactual value vectors (cfv_p1[i], cfv_p2[j]) get the
@@ -311,22 +345,24 @@ inline fn handsCompatible(a: range_mod.Hand, b: range_mod.Hand) bool {
     return a.card1 != b.card1 and a.card1 != b.card2 and a.card2 != b.card1 and a.card2 != b.card2;
 }
 
-// Run vanilla vector-CFR for the given number of iterations. The dense reach
-// vectors (solver.p1_reach / p2_reach) seed the traversal; out buffers receive
-// the per-hand counterfactual values from the *last* iteration's walk.
+// CFR+ with linear-weighted strategy averaging. Cumulative regrets are clipped
+// to non-negative inside `walk`, and each iteration's contribution to
+// `strategy_sum` is weighted by `iter + 1` so later (more-converged) iterations
+// dominate the time-averaged strategy. The dense reach vectors
+// (solver.p1_reach / p2_reach) seed the traversal; out buffers receive the
+// per-hand counterfactual values from the *last* iteration's walk.
 pub fn solve(
     self: *Solver,
     root: *Node,
     iterations: usize,
+    random: std.Random,
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
 ) void {
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-
     var iter: usize = 0;
     while (iter < iterations) : (iter += 1) {
-        walk(self, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random);
+        const iter_weight: f32 = @floatFromInt(iter + 1);
+        walk(self, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight);
     }
 }
 
@@ -343,12 +379,14 @@ fn walk(
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
     random: std.Random,
+    iter_weight: f32,
 ) void {
     if (node.is_chance) {
         // Chance-Sampled CFR: Sample a single runout instead of enumerating all.
-        const current_board = self.board;
+        var snap: BoardSnapshot = undefined;
+        self.snapshotBoard(&snap);
         var num_board_cards: usize = 0;
-        for (current_board) |c| {
+        for (snap.board) |c| {
             if (c != 0) num_board_cards += 1;
         }
         const card_to_fill_idx: usize = if (num_board_cards == 3) @as(usize, 3) else @as(usize, 4);
@@ -358,7 +396,7 @@ fn walk(
         while (true) {
             c = deck[random.uintLessThan(usize, 52)];
             var on_board = false;
-            for (current_board) |bc| {
+            for (snap.board) |bc| {
                 if (c == bc) {
                     on_board = true;
                     break;
@@ -367,7 +405,7 @@ fn walk(
             if (!on_board) break;
         }
 
-        var new_board = current_board;
+        var new_board = snap.board;
         new_board[card_to_fill_idx] = c;
 
         // Update strengths for this sampled runout
@@ -394,7 +432,7 @@ fn walk(
         // rather than another decision node.
         const chance_edge = &node.edges[0];
         if (chance_edge.child) |child| {
-            walk(self, child, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2, random);
+            walk(self, child, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight);
         } else {
             self.terminalShowdown(chance_edge, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2);
         }
@@ -408,8 +446,9 @@ fn walk(
             }
         }
 
-        // Restore original board
-        self.reinitForBoard(current_board);
+        // Restore via cheap memcpy snapshot rather than redoing a full
+        // hand-strength + sort recompute on the way out.
+        self.restoreBoard(&snap);
         return;
     }
 
@@ -470,7 +509,7 @@ fn walk(
         const cfv_p2_slot = child_cfv_p2[off .. off + NUM_HANDS];
 
         if (edge.child) |child| {
-            walk(self, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot, random);
+            walk(self, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot, random, iter_weight);
         } else {
             switch (edge.action) {
                 .FOLD => self.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot),
@@ -509,14 +548,18 @@ fn walk(
     }
 
     // --- 4. Regret + strategy_sum updates for the actor at this node. ---
+    // CFR+ regret matching: cumulative regret is clipped to non-negative after
+    // each increment. Strategy averaging is linearly weighted by iter_weight so
+    // late iterations (near-equilibrium) dominate over early uniform play.
     if (actor_isp1) {
         var a: usize = 0;
         while (a < n_actions) : (a += 1) {
             const off = a * NUM_HANDS;
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                node.regrets[off + i] += child_cfv_p1[off + i] - out_cfv_p1[i];
-                node.strategy_sum[off + i] += p1_reach[i] * strategy[off + i];
+                const updated = node.regrets[off + i] + (child_cfv_p1[off + i] - out_cfv_p1[i]);
+                node.regrets[off + i] = if (updated > 0) updated else 0;
+                node.strategy_sum[off + i] += iter_weight * p1_reach[i] * strategy[off + i];
             }
         }
     } else {
@@ -525,8 +568,9 @@ fn walk(
             const off = a * NUM_HANDS;
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                node.regrets[off + i] += child_cfv_p2[off + i] - out_cfv_p2[i];
-                node.strategy_sum[off + i] += p2_reach[i] * strategy[off + i];
+                const updated = node.regrets[off + i] + (child_cfv_p2[off + i] - out_cfv_p2[i]);
+                node.regrets[off + i] = if (updated > 0) updated else 0;
+                node.strategy_sum[off + i] += iter_weight * p2_reach[i] * strategy[off + i];
             }
         }
     }
@@ -546,20 +590,21 @@ fn brWalk(
 ) void {
     if (node.is_chance) {
         @memset(out_cfv, 0);
-        const current_board = self.board;
+        var snap: BoardSnapshot = undefined;
+        self.snapshotBoard(&snap);
         var num_board_cards: usize = 0;
-        for (current_board) |c| {
+        for (snap.board) |c| {
             if (c != 0) num_board_cards += 1;
         }
         const card_to_fill_idx: usize = if (num_board_cards == 3) @as(usize, 3) else @as(usize, 4);
-        
+
         const deck = card_mod.makeDeck();
         var possible_cards: u16 = 0;
         var runout_cfv: [NUM_HANDS]f32 = undefined;
 
         for (deck) |c| {
             var on_board = false;
-            for (current_board) |bc| {
+            for (snap.board) |bc| {
                 if (c == bc) {
                     on_board = true;
                     break;
@@ -568,7 +613,7 @@ fn brWalk(
             if (on_board) continue;
 
             possible_cards += 1;
-            var new_board = current_board;
+            var new_board = snap.board;
             new_board[card_to_fill_idx] = c;
             self.reinitForBoard(new_board);
 
@@ -603,7 +648,7 @@ fn brWalk(
             }
         }
 
-        self.reinitForBoard(current_board);
+        self.restoreBoard(&snap);
         const weight = 1.0 / @as(f32, @floatFromInt(possible_cards));
         for (0..NUM_HANDS) |i| out_cfv[i] *= weight;
         return;
@@ -762,6 +807,53 @@ pub fn exploitability(self: *Solver, root: *Node) f32 {
         v_p2 += self.p2_reach[i] * br_p2[i];
     }
     return v_p1 + v_p2;
+}
+
+test "snapshotBoard / restoreBoard round-trips state through a different board" {
+    const allocator = std.testing.allocator;
+
+    const board_a = [5]Card{
+        card_mod.makeCard(12, 0),
+        card_mod.makeCard(11, 0),
+        card_mod.makeCard(10, 0),
+        card_mod.makeCard(9, 0),
+        card_mod.makeCard(8, 0),
+    };
+    const board_b = [5]Card{
+        card_mod.makeCard(2, 1),
+        card_mod.makeCard(5, 2),
+        card_mod.makeCard(7, 3),
+        card_mod.makeCard(9, 1),
+        card_mod.makeCard(11, 2),
+    };
+
+    var p1 = try range_mod.Range.initEmpty(allocator, 0);
+    defer p1.deinit(allocator);
+    var p2 = try range_mod.Range.initEmpty(allocator, 0);
+    defer p2.deinit(allocator);
+
+    var solver = try Solver.init(board_a, &p1, &p2, 1000, 1000, 100);
+    defer solver.deinit();
+
+    var snap: BoardSnapshot = undefined;
+    solver.snapshotBoard(&snap);
+
+    // Capture board_a's per-hand strength for a specific unblocked hand.
+    const ht = HandTable.init();
+    const probe_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(0, 1), card_mod.makeCard(0, 2))).?;
+    const strength_a = solver.hand_strengths[probe_idx];
+    const rank_a = solver.rank_map[probe_idx];
+
+    solver.reinitForBoard(board_b);
+    // After reinit, strengths should reflect board_b — almost certainly different.
+    try std.testing.expect(solver.hand_strengths[probe_idx] != strength_a or solver.rank_map[probe_idx] != rank_a);
+
+    solver.restoreBoard(&snap);
+
+    // After restore, everything that depends on the board is back.
+    try std.testing.expectEqual(strength_a, solver.hand_strengths[probe_idx]);
+    try std.testing.expectEqual(rank_a, solver.rank_map[probe_idx]);
+    for (board_a, solver.board) |expected, actual| try std.testing.expectEqual(expected, actual);
 }
 
 test "Solver.init: blocker mask, strengths, densified ranges" {
@@ -943,7 +1035,8 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
-    solve(&solver, root, 200, &cfv_p1, &cfv_p2);
+    var prng = std.Random.DefaultPrng.init(42);
+    solve(&solver, root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
     // AA always beats KK on this board. At NE p2 folds to any p1 bet and p1
     // can also just check it down — either way p1's root CFV is exactly +25
@@ -951,10 +1044,11 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     try std.testing.expectApproxEqAbs(@as(f32, 25), cfv_p1[aa_idx], 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, -25), cfv_p2[kk_idx], 0.5);
 
-    // Exploitability should be ~0 at this point: zero-sum game at NE.
-    // After 200 iters vanilla CFR lands at ~0.75 in this game.
+    // CFR+ with linear averaging converges much faster than vanilla CFR.
+    // Vanilla baseline landed near 0.75 after 200 iters; CFR+ comes in around
+    // 0.015 in the same budget.
     const expl = exploitability(&solver, root);
-    try std.testing.expect(@abs(expl) < 1.0);
+    try std.testing.expect(@abs(expl) < 0.05);
 }
 
 test "averageStrategy: KK folds to p1's bet on AA-vs-KK river" {
@@ -998,7 +1092,8 @@ test "averageStrategy: KK folds to p1's bet on AA-vs-KK river" {
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
-    solve(&solver, root, 500, &cfv_p1, &cfv_p2);
+    var prng = std.Random.DefaultPrng.init(42);
+    solve(&solver, root, 500, prng.random(), &cfv_p1, &cfv_p2);
 
     // Find a p1 BET edge at the root; descend into p2's facing-bet node.
     var bet_edge: ?*Edge = null;
@@ -1085,11 +1180,13 @@ test "Solver.solve: polarized vs condensed river" {
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
-    solve(&solver, root, 200, &cfv_p1, &cfv_p2);
+    var prng = std.Random.DefaultPrng.init(42);
+    solve(&solver, root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
     const expl = exploitability(&solver, root);
-    // Even with more hands, exploitability should trend towards zero.
-    try std.testing.expect(expl < 5.0); 
+    // Vanilla CFR baseline left this in the single-digit range; CFR+ with
+    // linear averaging brings it under 0.05 in the same 200-iter budget.
+    try std.testing.expect(expl < 0.05);
 }
 
 test "Solver.solve: turn-start AA vs KK — chance node enumeration" {
@@ -1137,7 +1234,8 @@ test "Solver.solve: turn-start AA vs KK — chance node enumeration" {
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     
     // Just run a few iterations to verify it doesn't crash and handles chance.
-    solve(&solver, root, 10, &cfv_p1, &cfv_p2);
+    var prng = std.Random.DefaultPrng.init(42);
+    solve(&solver, root, 10, prng.random(), &cfv_p1, &cfv_p2);
 
     // AA still mostly beats KK, though some river cards could change that.
     // We just want to see it run through the chance nodes.
