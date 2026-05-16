@@ -75,9 +75,138 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 - **Walk Stack Footprint:** `walk` allocates ~100 KB of per-call buffers on the stack (`strategy`, `child_cfv_p1/p2`, `new_p1/p2_reach`), plus ~18 KB of `BoardSnapshot` on the chance branch. Fine on default thread stacks today, but a concern once parallelization spawns workers — `MAX_ACTIONS` is over-allocated at 6 vs the real max of 5, and heap-backed scratch buffers are likely cleaner.
 - **Street Conventions:** `Street.FLOP/TURN/RIVER` is interpreted by `walk` as "decisions on a board with 3/4/5 cards revealed respectively"; chance nodes deal one card per street transition. The existing turn-start CFR test passes a 3-card board with `Street.TURN`, which the evaluator tolerates (it skips zero cards), but new test setups should use the matching card count for the starting street.
 
-## Next Steps
+## Roadmap
 
-1.  **CLI/UI (prereq done):** Strategy extraction is now exposed via `averageStrategy`; remaining work is parsing user-supplied ranges/boards and printing the per-action probabilities.
-2.  **Subgame Decomposition (Late Solving):** Implement a "Subgame Manager" that can solve the Flop using estimated leaf values and then trigger Turn/River solves on demand.
-3.  **Leaf Value Estimation:** Implement a "Cheap Evaluator" (e.g., Equity-based) to provide values for Flop leaf nodes without full River enumeration.
-4.  **Parallelization:** Utilize Zig's threading model to parallelize the sampled `walk` iterations or the independent runouts in `bestResponse`. Note: `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a refactor that lifts those into a per-worker context.
+Priority order, engine first, user-facing last:
+
+1.  **Subgame Decomposition + Leaf Value Estimation** — the next major piece. Full plan in the next section.
+2.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a per-worker context. The existing `BoardSnapshot` is a natural unit for that.
+3.  **Small cleanups when convenient:** drop `MAX_ACTIONS` from 6 → 5 (real max), make `HandTable.getIndex` non-linear if it ever lands in a hot loop, fix the turn-start CFR test's 3-card-on-`Street.TURN` mismatch to pin the street convention.
+4.  **CLI/UI (last):** Parse user-supplied ranges/boards, run a solve, print per-action probabilities via `averageStrategy`. Range input format: investigate whether a community standard exists (PioSOLVER text format, GTO+ JSON, etc.) before defining our own. Otherwise spec a minimal format. Also support file upload of a preflop range.
+
+## Plan: Subgame Decomposition (next major piece)
+
+### Why
+
+A full Flop tree with all turn × river runouts enumerated blows up memory:
+- Per chance node: 47 turn cards × 46 river cards = 2,162 distinct boards.
+- Per board: a full betting subtree with regret + strategy_sum vectors of size `edges × 1326`.
+- Even at 100 bytes per node and a modest action set, a single Flop solve is multiple GB.
+
+Modern free solvers solve this by **truncating** the Flop tree at the turn chance node and replacing the missing subtree with an **approximate per-hand value** from a cheap "leaf evaluator." After the Flop converges, individual **Turn** and **River** subgames can be re-solved on demand, anchored to the Flop's reach distribution at the chance node. The Turn re-solve in turn truncates at the river chance and uses the leaf evaluator there. This keeps the working set to a single street at a time.
+
+### Goal
+
+Make Flop solving fit in laptop RAM with accuracy that is competitive for personal-machine use (not industrial), and expose an API where a user can say "give me the strategy on Turn = T♣" without ever materializing the full game tree.
+
+### Phase 1 — All-In Equity Leaf Evaluator
+
+Build a function that, at a chance node, returns the per-hand CFV under the simplifying assumption that **both players commit their remaining stacks immediately** and the rest of the board runs out.
+
+Why this assumption: it's the most common cheap leaf model in the literature. It overestimates pot size somewhat (real players don't always shove) but is the standard v1.
+
+**API sketch (lives in `cfr.zig`):**
+```zig
+pub fn allInEquityLeaf(
+    self: *Solver,
+    edge: *const Edge,           // for pot + stacks
+    p1_reach: []const f32,
+    p2_reach: []const f32,
+    out_cfv_p1: []f32,
+    out_cfv_p2: []f32,
+) void
+```
+
+**Mechanics:**
+- The effective pot at the leaf = `edge.pot + min(p1_remaining, p2_remaining)` (caller's remaining stacks).
+- Half-pot per player on a win; per-hand EV is `equity × half_pot - (1 - equity) × half_pot`.
+- Enumerate remaining board cards (1 or 2 depending on current street). For each runout, call `reinitForBoard` and use the existing `terminalShowdown` machinery — that already does O(N) per-hand EV given the showdown environment. Average across runouts.
+- Use a `BoardSnapshot` to restore state cheaply after the enumeration (parity with `brWalk`'s chance handler).
+
+**Test:**
+- AA-vs-KK on a dry flop should give AA ≈ 80–85% equity (over all turn + river runouts). Assert per-hand CFV consistent with that equity × pot.
+- Symmetric ranges should sum to ~0 CFV.
+
+### Phase 2 — Truncated Tree Builder
+
+Add a flag (or a sibling builder) that stops descending when crossing a configured street boundary:
+
+```zig
+pub fn buildTreeTruncated(
+    state: *GameState,
+    arr: *std.ArrayList(Edge),
+    arena: Allocator,
+    temp_allocator: Allocator,
+    numCards1: u16, numCards2: u16,
+    truncate_after: Street,   // e.g., .FLOP → no turn/river decisions
+) !void
+```
+
+When the builder would emit a chance node that crosses past `truncate_after`, instead emit a **leaf chance node**: `Node { is_chance: true, is_leaf: true, edges: [] }` (or just a flag on the existing Node — see Open Questions). Walkers detect this and call `allInEquityLeaf` instead of sampling/enumerating.
+
+**`walk` change:** when `node.is_chance and node.is_leaf` (or whatever the marker becomes), call the leaf evaluator with the current `p1_reach` / `p2_reach`, write directly to `out_cfv_*`, return. No descent, no `reinitForBoard` (because the leaf evaluator handles its own enumeration).
+
+**`brWalk` change:** symmetric. Leaf is a hard boundary for BR enumeration too.
+
+**Test:**
+- Truncated Flop tree node count should be a small constant × the betting tree size, *not* multiplied by 47 × 46.
+- Build and walk a truncated Flop tree on AA-vs-KK; verify it converges and the CFV at root is within tolerance of the equity-based prediction (≈ AA's all-in equity × root pot).
+
+### Phase 3 — SubgameManager (composition)
+
+A new module / type that orchestrates "solve flop now, solve turn-on-demand, solve river-on-demand":
+
+```zig
+pub const SubgameManager = struct {
+    flop_solver: Solver,        // truncated at turn
+    flop_root:   *Node,
+    // ... arena/allocators ...
+
+    pub fn solveFlop(self: *SubgameManager, iters: usize, random: std.Random) void;
+
+    // Build + solve a turn subgame on a specific turn card.
+    // Uses the flop's converged strategies to derive reach at the chance node.
+    pub fn solveTurn(self: *SubgameManager, turn_card: Card, iters: usize, random: std.Random) !TurnSolution;
+
+    pub fn solveRiver(self: *SubgameManager, turn_card: Card, river_card: Card, iters: usize, random: std.Random) !RiverSolution;
+};
+```
+
+**Reach propagation:** to seed the Turn subgame, walk the flop tree with `averageStrategy` to compute the reach vectors at each (flop) chance node. The Turn root's reach = (chance-node reach) with hands containing the dealt turn card zeroed out. This is a tree-walk pass over the converged solution, not a re-solve — cheap.
+
+**Turn subgame solve:** a fresh `Solver` instance, rooted at the dealt turn board, truncated at river. Use the propagated reaches as `p1_reach` / `p2_reach`. Solve with CFR+ as today.
+
+**River subgame solve:** identical pattern, no truncation needed (river has no further streets), uses the turn solution's chance-node reach.
+
+### Phase 4 — Verification
+
+The hard part. Cheap leaf evaluators introduce error. We need to bound how bad the approximation is.
+
+**Tests:**
+1. **Equity oracle on AA-vs-KK:** A full-tree solve and a truncated-tree solve should agree on root CFV to within ~5% on a heads-up all-in-only game.
+2. **Turn re-solve consistency:** Solve the full game (turn-start, no truncation) and a truncated flop + Turn re-solve, on the *same* game. Strategies at the turn-decision node should be close.
+3. **Polarized vs condensed truncated:** Run the existing polarized/condensed test in truncated form; exploitability won't hit `< 0.05` (the leaf approximation introduces a floor) but should remain bounded.
+4. **Memory test:** Assert the truncated flop tree's total `Edge` count is below some threshold (sanity check that truncation actually trimmed it).
+
+### Open Questions / Decisions to Make in Implementation
+
+- **Node flag vs new type:** is `is_leaf: bool` enough on the existing `Node`, or do we need a dedicated `LeafNode` variant? The flag is simpler; the variant is type-safe. Lean flag for v1.
+- **Leaf model choice:** all-in equity (Phase 1) vs "check-down" equity (assume both players check the rest of the way). All-in is more common in literature and produces a more aggressive game tree; check-down is more conservative. Start with all-in, leave the model as a parameter so check-down can be added later.
+- **Reach propagation precision:** with linear-weighted averaging, the "average strategy" is *time-averaged*, not the instantaneous best response. Propagated reaches should use this averaged strategy, not the current iteration's. The existing `averageStrategy` API gives the right object.
+- **Caching across runs:** if `solveTurn` is called many times for different turn cards from the same Flop solution, the Flop work is done once and the per-turn cost is just the (smaller) turn solve. That's the whole point of the architecture. Make sure the Flop solver state is preserved across Turn calls.
+- **Street convention cleanup:** before this work, lock the convention "`Street.X` ⟺ X cards on the board." Fix the turn-start CFR test (currently 3 cards on `Street.TURN`). This is a small precondition.
+
+### Files Likely to Change
+
+- `src/cfr.zig` — add `allInEquityLeaf`, leaf-handling branches in `walk` / `brWalk`. Possibly factor out the per-runout enumeration loop that's already in `brWalk` so the leaf evaluator can reuse it.
+- `src/node.zig` — add `is_leaf` flag to `Node`; add `buildTreeTruncated` (or a `truncate_after: ?Street` param to `buildTree`).
+- `src/subgame.zig` (new) — `SubgameManager` and reach propagation.
+- `src/root.zig` — register the new module + reference in the `test {}` block (otherwise its tests won't run, per the gotcha at the top of this doc).
+- `AGENTS.md` — update Architecture with a "Subgame Decomposition" subsection once it's in.
+
+### Estimated Effort
+
+- Phase 1 (leaf evaluator): ~half a session — small, well-defined, lots of code reuse from `brWalk`.
+- Phase 2 (truncated tree): ~half a session — straightforward flag plumbing once Phase 1 is in.
+- Phase 3 (SubgameManager): ~one session — most of the new design lives here.
+- Phase 4 (verification + bounds): ~one session — easy to underestimate; budget time for tuning leaf models if accuracy is bad.
