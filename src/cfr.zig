@@ -404,6 +404,12 @@ pub const SolveContext = struct {
     }
 
     fn computeShowdownCFV(self: *const SolveContext, reach: []const f32, out: []f32, payoff: f32) void {
+        // Showdown CFV depends on sorted_indices / rank_map / first_rank /
+        // last_rank, which are only meaningful at a full 5-card board.
+        // Partial-board strengths are computed transiently in the walk but
+        // must never reach a showdown — pin the invariant here so future
+        // refactors can't silently introduce wrong tie-breaks.
+        std.debug.assert(boardCardCount(self.board_ctx.board) == 5);
         const solver = self.solver;
         var prefix_sum: [NUM_HANDS]f32 = undefined;
         var total_mass: f32 = 0;

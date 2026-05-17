@@ -162,10 +162,11 @@ pub const Evaluator = struct {
             return (PAIR_BASE << 26) | (pair1 << 13) | k_mask;
         }
 
-        // High card: 7 distinct ranks; strip the two lowest to keep the top 5.
+        // High card: strip the lowest ranks until at most the top 5 remain. The
+        // input may be a partial board (<7 cards), so we can't hard-code the
+        // strip count — mirror the flush path above.
         var bits = ranks;
-        bits &= bits - 1;
-        bits &= bits - 1;
+        while (@popCount(bits) > 5) bits &= bits - 1;
         return (HIGH_CARD_BASE << 26) | @as(u32, bits);
     }
 };
