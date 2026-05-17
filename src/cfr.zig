@@ -21,6 +21,12 @@ const MAX_ACTIONS: usize = 5;
 // into a river chance that saves once → 3.
 const MAX_CHANCE_DEPTH: usize = 3;
 
+// Upper bound on workers spawned by the `brWalk` chance-runout parallel
+// dispatch. Beyond ~8 workers the per-postflop tree gains diminish and
+// cache-line contention on the shared `node.strategy_sum` reads starts to
+// dominate, so we cap regardless of CPU count.
+const MAX_PARALLEL_WORKERS: usize = 8;
+
 // All board-derived solver state lives here. Carved out of `Solver` so the
 // mutable boundary is explicit: every field a chance-node walk mutates is in
 // this struct, and chance snapshot/restore is a flat memcpy of one of these.
@@ -300,6 +306,11 @@ pub const SolveContext = struct {
     board_ctx: *BoardContext,
     snapshots: [MAX_CHANCE_DEPTH]BoardContext,
     chance_depth: u8,
+    /// When true, `brWalk` may dispatch parallel workers at a chance node.
+    /// Workers spawned by such a dispatch set this to false on their own
+    /// contexts so recursive chance descents stay serial (no exponential
+    /// thread explosion).
+    allow_parallel: bool,
 
     /// Default ctor: a context that mutates the solver's own board_ctx in place.
     pub fn initOnSolver(solver: *Solver) SolveContext {
@@ -308,6 +319,7 @@ pub const SolveContext = struct {
             .board_ctx = &solver.board_ctx,
             .snapshots = undefined,
             .chance_depth = 0,
+            .allow_parallel = true,
         };
     }
 
@@ -320,6 +332,7 @@ pub const SolveContext = struct {
             .board_ctx = board_ctx,
             .snapshots = undefined,
             .chance_depth = 0,
+            .allow_parallel = true,
         };
     }
 
@@ -835,50 +848,86 @@ fn brWalk(
             return;
         }
 
-        @memset(out_cfv, 0);
         ctx.pushSnapshot();
         const saved_board = ctx.board_ctx.board;
+        const saved_board_ctx = ctx.board_ctx.*;
         const num_board_cards = boardCardCount(saved_board);
         const card_to_fill_idx: usize = if (num_board_cards == 3) @as(usize, 3) else @as(usize, 4);
 
+        // Filter to legal cards up front so the parallel dispatch can carve
+        // the workload evenly without per-worker reblocker checks.
+        var legal_cards: [52]u32 = undefined;
+        var n_legal: usize = 0;
         const deck = card_mod.makeDeck();
-        var runout_cfv: [NUM_HANDS]f32 = undefined;
-
         for (deck) |c| {
-            if (boardContains(saved_board, c)) continue;
-
-            var new_board = saved_board;
-            new_board[card_to_fill_idx] = c;
-            ctx.reinitForBoard(new_board);
-
-            // Mask reach for hands containing the dealt card so terminals /
-            // recursive calls don't accumulate mass on illegal hands.
-            var masked_p1: [NUM_HANDS]f32 = undefined;
-            var masked_p2: [NUM_HANDS]f32 = undefined;
-            for (0..NUM_HANDS) |i| {
-                const h = hands[i];
-                const keep = !handHitsCard(h, c);
-                masked_p1[i] = if (keep) p1_reach[i] else 0;
-                masked_p2[i] = if (keep) p2_reach[i] else 0;
+            if (!boardContains(saved_board, c)) {
+                legal_cards[n_legal] = c;
+                n_legal += 1;
             }
+        }
 
-            const chance_edge = &node.edges[0];
-            if (chance_edge.child) |child| {
-                brWalk(ctx, child, &masked_p1, &masked_p2, br_isp1, &runout_cfv);
-            } else {
-                // Post-allin runout terminal: showdown on the completed board.
-                var dummy: [NUM_HANDS]f32 = undefined;
-                if (br_isp1) {
-                    ctx.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &runout_cfv, &dummy);
-                } else {
-                    ctx.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &dummy, &runout_cfv);
-                }
+        const cpu_count: usize = std.Thread.getCpuCount() catch 1;
+        const n_workers: usize = blk: {
+            if (!ctx.allow_parallel) break :blk 1;
+            const want = @min(cpu_count, MAX_PARALLEL_WORKERS);
+            break :blk @min(want, n_legal);
+        };
+
+        if (n_workers <= 1) {
+            // Serial path: run the worker body once over the full legal slice.
+            @memset(out_cfv, 0);
+            brChanceWorker(ctx, node, saved_board, card_to_fill_idx, legal_cards[0..n_legal], p1_reach, p2_reach, br_isp1, out_cfv);
+        } else {
+            // Parallel path: per-worker BoardContext + SolveContext + output slot.
+            var worker_boards: [MAX_PARALLEL_WORKERS]BoardContext = undefined;
+            var worker_ctxs: [MAX_PARALLEL_WORKERS]SolveContext = undefined;
+            var worker_outs: [MAX_PARALLEL_WORKERS][NUM_HANDS]f32 = undefined;
+            var threads: [MAX_PARALLEL_WORKERS]std.Thread = undefined;
+            var jobs: [MAX_PARALLEL_WORKERS]BrChanceJob = undefined;
+
+            var t: usize = 0;
+            while (t < n_workers) : (t += 1) {
+                const start = (t * n_legal) / n_workers;
+                const end = ((t + 1) * n_legal) / n_workers;
+
+                worker_boards[t] = saved_board_ctx;
+                worker_ctxs[t] = SolveContext.initOnBoardContext(ctx.solver, &worker_boards[t]);
+                worker_ctxs[t].allow_parallel = false;
+
+                jobs[t] = .{
+                    .ctx = &worker_ctxs[t],
+                    .node = node,
+                    .saved_board = saved_board,
+                    .card_to_fill_idx = card_to_fill_idx,
+                    .legal_cards = legal_cards[start..end],
+                    .p1_reach = p1_reach,
+                    .p2_reach = p2_reach,
+                    .br_isp1 = br_isp1,
+                    .out_cfv = &worker_outs[t],
+                };
+
+                threads[t] = std.Thread.spawn(.{}, BrChanceJob.run, .{&jobs[t]}) catch {
+                    // Spawn failed: run synchronously inline so we don't lose the slice.
+                    BrChanceJob.run(&jobs[t]);
+                    // Join any threads already spawned, then bail out of the loop.
+                    var j: usize = 0;
+                    while (j < t) : (j += 1) threads[j].join();
+                    break;
+                };
             }
+            // If we exited the spawn loop normally, t == n_workers. If a spawn
+            // failed, the catch block joined earlier threads, ran the failing
+            // slice synchronously, and broke; t names the next index to skip.
+            const joined_target = if (t == n_workers) n_workers else t;
+            var j: usize = 0;
+            while (j < joined_target) : (j += 1) threads[j].join();
 
+            // Aggregate worker slots into out_cfv.
             for (0..NUM_HANDS) |i| {
-                const h = hands[i];
-                if (handHitsCard(h, c)) continue;
-                out_cfv[i] += runout_cfv[i];
+                var sum: f32 = 0;
+                var k: usize = 0;
+                while (k < n_workers) : (k += 1) sum += worker_outs[k][i];
+                out_cfv[i] = sum;
             }
         }
 
@@ -1000,6 +1049,81 @@ fn brWalk(
     }
 }
 
+// One unit of parallel work for `brWalk`'s chance-node enumeration: iterate a
+// slice of legal cards, accumulate per-card runout CFVs into a worker-private
+// output buffer. The chance-edge structure and root-side state come in via the
+// `node`/`saved_board` fields. Each worker holds its own `*SolveContext` over
+// its own `BoardContext` (allocated in the dispatcher frame) so `reinitForBoard`
+// calls don't collide.
+const BrChanceJob = struct {
+    ctx: *SolveContext,
+    node: *Node,
+    saved_board: [5]Card,
+    card_to_fill_idx: usize,
+    legal_cards: []const u32,
+    p1_reach: []const f32,
+    p2_reach: []const f32,
+    br_isp1: bool,
+    out_cfv: *[NUM_HANDS]f32,
+
+    fn run(self: *BrChanceJob) void {
+        @memset(self.out_cfv, 0);
+        brChanceWorker(self.ctx, self.node, self.saved_board, self.card_to_fill_idx, self.legal_cards, self.p1_reach, self.p2_reach, self.br_isp1, self.out_cfv);
+    }
+};
+
+// Per-card runout body shared by the serial and parallel paths of `brWalk`.
+// Accumulates into `out_cfv` (additive — caller is responsible for zeroing or
+// for one-shot writes). Performs no per-hand averaging; that's a single final
+// pass back in `brWalk` after slot aggregation.
+fn brChanceWorker(
+    ctx: *SolveContext,
+    node: *Node,
+    saved_board: [5]Card,
+    card_to_fill_idx: usize,
+    legal_cards: []const u32,
+    p1_reach: []const f32,
+    p2_reach: []const f32,
+    br_isp1: bool,
+    out_cfv: []f32,
+) void {
+    const hands = ctx.solver.hand_table.all_hands;
+    var runout_cfv: [NUM_HANDS]f32 = undefined;
+
+    for (legal_cards) |c| {
+        var new_board = saved_board;
+        new_board[card_to_fill_idx] = c;
+        ctx.reinitForBoard(new_board);
+
+        var masked_p1: [NUM_HANDS]f32 = undefined;
+        var masked_p2: [NUM_HANDS]f32 = undefined;
+        for (0..NUM_HANDS) |i| {
+            const h = hands[i];
+            const keep = !handHitsCard(h, c);
+            masked_p1[i] = if (keep) p1_reach[i] else 0;
+            masked_p2[i] = if (keep) p2_reach[i] else 0;
+        }
+
+        const chance_edge = &node.edges[0];
+        if (chance_edge.child) |child| {
+            brWalk(ctx, child, &masked_p1, &masked_p2, br_isp1, &runout_cfv);
+        } else {
+            var dummy: [NUM_HANDS]f32 = undefined;
+            if (br_isp1) {
+                ctx.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &runout_cfv, &dummy);
+            } else {
+                ctx.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &dummy, &runout_cfv);
+            }
+        }
+
+        for (0..NUM_HANDS) |i| {
+            const h = hands[i];
+            if (handHitsCard(h, c)) continue;
+            out_cfv[i] += runout_cfv[i];
+        }
+    }
+}
+
 // Public strategy-extraction API. `node` must be a non-chance decision node.
 // `out` must be sized `node.edges.len * NUM_HANDS`, laid out as
 // `out[action * NUM_HANDS + hand_idx]`, matching the internal regret /
@@ -1029,17 +1153,50 @@ pub fn averageStrategy(node: *const Node, out: []f32) void {
 
 pub fn bestResponse(self: *Solver, root: *Node, br_isp1: bool, out_cfv: []f32) void {
     var ctx = SolveContext.initOnSolver(self);
-    brWalk(&ctx, root, &self.p1_reach, &self.p2_reach, br_isp1, out_cfv);
+    bestResponseWith(&ctx, root, br_isp1, out_cfv);
 }
+
+/// Ctx-taking BR entry point. The reach vectors live on the Solver (immutable)
+/// so a caller-owned SolveContext over a separate BoardContext can run on its
+/// own thread without colliding with another worker.
+pub fn bestResponseWith(ctx: *SolveContext, root: *Node, br_isp1: bool, out_cfv: []f32) void {
+    brWalk(ctx, root, &ctx.solver.p1_reach, &ctx.solver.p2_reach, br_isp1, out_cfv);
+}
+
+const BrJob = struct {
+    ctx: *SolveContext,
+    root: *Node,
+    br_isp1: bool,
+    out_cfv: []f32,
+
+    fn run(self: BrJob) void {
+        bestResponseWith(self.ctx, self.root, self.br_isp1, self.out_cfv);
+    }
+};
 
 // Sum of best-response values for both players, weighted by their reach. At a
 // Nash equilibrium this is zero (zero-sum game); any positive value is how
 // much can be extracted by exploiting the current average strategies.
-pub fn exploitability(self: *Solver, root: *Node) f32 {
+//
+// The two BR walks are independent and run on two threads. Each thread gets
+// its own SolveContext over its own BoardContext copy so neither side's chance
+// enumeration corrupts the other's board state.
+pub fn exploitability(self: *Solver, root: *Node) !f32 {
     var br_p1: [NUM_HANDS]f32 = undefined;
     var br_p2: [NUM_HANDS]f32 = undefined;
-    bestResponse(self, root, true, &br_p1);
-    bestResponse(self, root, false, &br_p2);
+
+    var board_a: BoardContext = self.board_ctx;
+    var board_b: BoardContext = self.board_ctx;
+    var ctx_a = SolveContext.initOnBoardContext(self, &board_a);
+    var ctx_b = SolveContext.initOnBoardContext(self, &board_b);
+
+    const job_a = BrJob{ .ctx = &ctx_a, .root = root, .br_isp1 = true, .out_cfv = &br_p1 };
+    const job_b = BrJob{ .ctx = &ctx_b, .root = root, .br_isp1 = false, .out_cfv = &br_p2 };
+
+    const thread_a = try std.Thread.spawn(.{}, BrJob.run, .{job_a});
+    const thread_b = try std.Thread.spawn(.{}, BrJob.run, .{job_b});
+    thread_a.join();
+    thread_b.join();
 
     var v_p1: f32 = 0;
     var v_p2: f32 = 0;
@@ -1370,7 +1527,7 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     // CFR+ with linear averaging converges much faster than vanilla CFR.
     // Vanilla baseline landed near 0.75 after 200 iters; CFR+ comes in around
     // 0.015 in the same budget.
-    const expl = exploitability(&solver, root);
+    const expl = try exploitability(&solver, root);
     try std.testing.expect(@abs(expl) < 0.05);
 }
 
@@ -1510,7 +1667,7 @@ test "Solver.solve: polarized vs condensed river" {
     var prng = std.Random.DefaultPrng.init(42);
     solve(&solver, root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
-    const expl = exploitability(&solver, root);
+    const expl = try exploitability(&solver, root);
     // Vanilla CFR baseline left this in the single-digit range; CFR+ with
     // linear averaging brings it under 0.05 in the same 200-iter budget.
     try std.testing.expect(expl < 0.05);
