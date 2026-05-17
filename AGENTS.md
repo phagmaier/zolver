@@ -31,8 +31,10 @@ The core engine uses **CFR+ with linear-weighted averaging**, on top of **Chance
 #### CFR+ Regret Matching
 After each per-iteration regret update, cumulative regrets are clipped to non-negative (`R⁺ = max(R + Δ, 0)`). This is the standard RM+ rule and is the dominant source of the convergence improvement vs vanilla CFR.
 
-#### BoardSnapshot (Cheap Chance Restore)
-Chance nodes used to call `reinitForBoard` twice per visit — once to install the sampled runout, once to restore the original board on the way out. Both invocations re-evaluated all 1326 hand strengths and re-sorted them. The restore path is now backed by `BoardSnapshot` (a copy of `hand_strengths`, `blocked`, `sorted_indices`, `rank_map`, `first_rank`, `last_rank`): we snapshot once before mutating, do the recursive walk, then `restoreBoard` is a flat memcpy. `brWalk` benefits even more — it snapshots once before its enumeration loop and restores once at the end, regardless of how many runouts were enumerated.
+#### BoardContext + SolveContext (mutable boundary + cheap chance restore)
+All board-derived solver state — `board`, `hand_strengths`, `blocked`, `sorted_indices`, `rank_map`, `first_rank`, `last_rank` — lives in `BoardContext`. `Solver` keeps the immutable bits (evaluator, hand_table, root reaches, collision tables, stack/pot baseline) and embeds one default `BoardContext`. Chance restore is a flat memcpy of `BoardContext`: snapshot once before mutating, walk, restore on the way out. `brWalk` benefits even more — it snapshots once before its enumeration loop and restores once at the end, regardless of how many runouts were enumerated.
+
+`SolveContext` is the per-walker handle: it owns a pointer to a `BoardContext`, a fixed `snapshots: [MAX_CHANCE_DEPTH]BoardContext` stack, and a `chance_depth` counter. `walk` / `brWalk` / `allInEquityLeaf` all take `*SolveContext` and use `pushSnapshot` / `popSnapshot` instead of stack-locals, so chance save/restore goes through a shared, bounded budget. The root path (`Solver.solve`, `Solver.bestResponse`, `Solver.exploitability`) builds a default `SolveContext.initOnSolver(...)` that mutates the solver's own board_ctx. Parallel workers will use `SolveContext.initOnBoardContext(&shared_solver, &worker_board)` so each thread mutates its own `BoardContext` while sharing the immutable Solver core. A `two SolveContexts on separate BoardContexts isolate board state` test pins this contract.
 
 #### Linear-Weighted Strategy Averaging
 Each iteration's contribution to `strategy_sum` is multiplied by `iter + 1`, so the time-averaged strategy that `averageStrategy` returns is dominated by later, near-equilibrium iterations rather than the early uniform-mixture rounds. `iter_weight` is passed top-down through `walk` from `solve`.
@@ -79,20 +81,20 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 - **Performance:** `zig build test` took ~66s after the Phase 4 verification tests were added. Turn-start solves converge in seconds; tests that enumerate all-in leaf runouts or exact exploitability are the main runtime cost.
 - **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts and truncated chance leaves is verified by `node.zig` structural tests. Snapshot/restore round-trip is verified directly. Chance enumeration is checked for private-hand blocker denominators in both `allInEquityLeaf` and `brWalk`, and the walker leaf path is tested directly. `subgame.zig` verifies fresh solver construction from dense reaches, Flop chance-seed collection, Turn re-solver construction, Turn full-vs-truncated all-in response consistency, bounded compact truncated polarized/condensed exploitability, and truncated Flop tree-size reduction. `cfr.zig` verifies that the all-in equity leaf matches exact full-runout chance enumeration on AA-vs-KK.
-- **Correctness:** All 47 tests pass with `zig build test`.
+- **Correctness:** All 48 tests pass with `zig build test`.
 
 ## Known Gaps & Cautions
 
 - **Memory Scaling:** While fast, a full Flop tree with all runouts stored would be very large. **Subgame Decomposition** is required to solve Flops with limited RAM.
 - **HandTable.getIndex:** Still $O(N)$. Fine for current tests, but could be a future bottleneck if used in a hot loop (like `Solver.init`).
-- **Walk Stack Footprint:** `walk` allocates large per-call buffers on the stack (`strategy`, `child_cfv_p1/p2`, `new_p1/p2_reach`), plus ~18 KB of `BoardSnapshot` on the chance branch. `MAX_ACTIONS` is now the real max of 5, but heap-backed scratch buffers are still likely cleaner before parallel worker stacks are introduced.
+- **Walk Stack Footprint:** `walk` still allocates large per-call buffers on the stack (`strategy`, `child_cfv_p1/p2`, `new_p1/p2_reach`) — `MAX_ACTIONS` is the real max of 5 so the worst frame is ~90 KB. The chance-branch `BoardSnapshot` (~18 KB per frame) is gone: snapshots now live in the `SolveContext`'s fixed `[MAX_CHANCE_DEPTH]BoardContext` stack. The remaining non-chance scratch buffers are fine on the main thread but worth heap-backing before parallel worker stacks are introduced.
 - **Street Conventions:** `Street.FLOP/TURN/RIVER` is interpreted by `walk` as "decisions on a board with 3/4/5 cards revealed respectively"; chance nodes deal one card per street transition. Tests now follow that convention; new test setups should keep street and board-card count aligned.
 
 ## Roadmap
 
 Priority order, engine first, user-facing last:
 
-1.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a per-worker context. The existing `BoardSnapshot` is a natural unit for that.
+1.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. The per-worker boundary is now `SolveContext`: spin up N workers, each with its own `BoardContext` (initialized via `SolveContext.initOnBoardContext(&shared_solver, &worker_board)`), and they can independently traverse chance nodes without colliding. Open design choice for Step 3 is regret/strategy_sum coordination (atomics on `Node.regrets` vs. per-worker delta buffers merged at iteration boundaries).
 2.  **Accuracy tuning / leaf models** — Phase 4 has basic bounds, but full-topology truncated exploitability is still expensive to run as a unit test. Future work can add slower benchmarks and compare all-in equity against a check-down or learned leaf model.
 3.  **Small cleanups when convenient:** make `HandTable.getIndex` non-linear if it ever lands in a hot loop, and consider heap-backed scratch buffers for `walk`/`brWalk`.
 4.  **CLI/UI (last):** Parse user-supplied ranges/boards, run a solve, print per-action probabilities via `averageStrategy`. Range input format: investigate whether a community standard exists (PioSOLVER text format, GTO+ JSON, etc.) before defining our own. Otherwise spec a minimal format. Also support file upload of a preflop range.
