@@ -4,6 +4,7 @@ pub const range = @import("range.zig");
 pub const card = @import("card.zig");
 pub const evaluator = @import("evaluator.zig");
 pub const cfr = @import("cfr.zig");
+pub const subgame = @import("subgame.zig");
 
 test {
     _ = gamestate;
@@ -12,4 +13,5 @@ test {
     _ = card;
     _ = evaluator;
     _ = cfr;
+    _ = subgame;
 }

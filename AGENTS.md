@@ -69,11 +69,17 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 - **Pre-River All-in Runouts:** A call of an all-in pre-river is *not* terminal. `getCallGameState` marks it as a chance state, and `applyChance` chains additional chance steps (one per pending street) until the river is dealt — at which point the post-chance state is `isTerm = true`. This produces a chain like `(call edge) → chance(turn) → chance(river) → terminal showdown` for a FLOP all-in. The chance-terminal showdown is handled inside `walk` / `brWalk` by calling `terminalShowdown` on the chance edge whose child is `null`. CS-CFR samples one runout per chain visit during `walk`; `brWalk` enumerates fully for exactness.
 - **Subgame Decomposition:** The solver can traverse any street, and it can now build truncated trees that stop at a configured chance boundary and use all-in equity leaves. The remaining intended path is to add orchestration for solving Flops once and then re-solving Turn/River subgames independently.
 
+### Subgame Manager (src/subgame.zig)
+
+`Subgame` owns a fresh CFR instance, arena-backed tree, root `GameState`, board, root reach vectors, and last CFV buffers. It is the reusable "GameState + ReachProbs → fresh solver" wrapper. `Subgame.init(..., .{ .truncate_after = .FLOP/.TURN })` builds a truncated tree; passing default options builds a full street tree.
+
+`SubgameManager` currently owns one cached truncated Flop solution plus its first chance-boundary seeds. `solveFlop` builds/solves a Flop tree truncated at Turn and then walks average strategies to collect `ChanceSeed` entries. `solveTurn(seed_index, turn_card, ...)` masks private hands containing that public Turn card, applies the chance transition, and spins up a fresh Turn `Subgame` truncated at River. `solveRiverFromSeed` is the generic helper for resolving a River subgame from a Turn chance seed.
+
 ## Current State
 
 - **Performance:** `zig build test` takes roughly the same order of time as the prior ~26s baseline; the exact number should be re-measured after substantial leaf-model changes because all-in leaf tests enumerate runouts. Turn-start solves converge in seconds.
-- **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts and truncated chance leaves is verified by `node.zig` structural tests. Snapshot/restore round-trip is verified directly. Chance enumeration is checked for private-hand blocker denominators in both `allInEquityLeaf` and `brWalk`, and the walker leaf path is tested directly.
-- **Correctness:** All 38 tests pass with `zig build test`.
+- **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts and truncated chance leaves is verified by `node.zig` structural tests. Snapshot/restore round-trip is verified directly. Chance enumeration is checked for private-hand blocker denominators in both `allInEquityLeaf` and `brWalk`, and the walker leaf path is tested directly. `subgame.zig` verifies fresh solver construction from dense reaches plus Flop chance-seed collection and Turn re-solver construction.
+- **Correctness:** All 40 tests pass with `zig build test`.
 
 ## Known Gaps & Cautions
 
@@ -86,9 +92,9 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 Priority order, engine first, user-facing last:
 
-1.  **SubgameManager + Reach Propagation** — the next major piece. The leaf evaluator and truncated tree boundary are in place; the missing layer is orchestration for flop solve, turn-on-demand, and river-on-demand.
+1.  **Subgame Verification + Bounds** — compare truncated/re-solved lines against full-tree baselines and add a memory-size sanity test for truncated Flop trees.
 2.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a per-worker context. The existing `BoardSnapshot` is a natural unit for that.
-3.  **Small cleanups when convenient:** make `HandTable.getIndex` non-linear if it ever lands in a hot loop, and consider heap-backed scratch buffers for `walk`/`brWalk`.
+3.  **Small cleanups when convenient:** make `HandTable.getIndex` non-linear if it ever lands in a hot loop, consider heap-backed scratch buffers for `walk`/`brWalk`, and decide how callers should select among multiple chance seeds on the same street.
 4.  **CLI/UI (last):** Parse user-supplied ranges/boards, run a solve, print per-action probabilities via `averageStrategy`. Range input format: investigate whether a community standard exists (PioSOLVER text format, GTO+ JSON, etc.) before defining our own. Otherwise spec a minimal format. Also support file upload of a preflop range.
 
 ## Plan: Subgame Decomposition (current major track)
@@ -161,31 +167,29 @@ When the builder would emit a chance node that crosses past `truncate_after`, it
 - `node.zig` verifies that a flop check-check transition becomes a leaf chance node with one terminal `Action.CHANCE` edge.
 - `cfr.zig` verifies that `walk` dispatches a truncated chance leaf to `allInEquityLeaf`.
 
-### Phase 3 — SubgameManager (composition) — Next
+### Phase 3 — SubgameManager (composition) ✅ Done
 
-A new module / type that orchestrates "solve flop now, solve turn-on-demand, solve river-on-demand":
+Implemented in `src/subgame.zig` as a small owner/wrapper around fresh CFR instances:
 
 ```zig
 pub const SubgameManager = struct {
-    flop_solver: Solver,        // truncated at turn
-    flop_root:   *Node,
-    // ... arena/allocators ...
+    flop: ?Subgame,                         // truncated at turn
+    chance_seeds: std.ArrayList(ChanceSeed),
 
-    pub fn solveFlop(self: *SubgameManager, iters: usize, random: std.Random) void;
-
-    // Build + solve a turn subgame on a specific turn card.
-    // Uses the flop's converged strategies to derive reach at the chance node.
-    pub fn solveTurn(self: *SubgameManager, turn_card: Card, iters: usize, random: std.Random) !TurnSolution;
-
-    pub fn solveRiver(self: *SubgameManager, turn_card: Card, river_card: Card, iters: usize, random: std.Random) !RiverSolution;
+    pub fn solveFlop(..., iters: usize, random: std.Random) !void;
+    pub fn solveTurn(self: *SubgameManager, seed_index: usize, turn_card: Card, iters: usize, random: std.Random) !Subgame;
 };
+
+pub fn solveRiverFromSeed(..., seed: *const ChanceSeed, turn_board: [5]Card, river_card: Card, ...) !Subgame;
 ```
 
-**Reach propagation:** to seed the Turn subgame, walk the flop tree with `averageStrategy` to compute the reach vectors at each (flop) chance node. The Turn root's reach = (chance-node reach) with hands containing the dealt turn card zeroed out. This is a tree-walk pass over the converged solution, not a re-solve — cheap.
+`Subgame.init` is the lower-level re-solver API: it takes a `GameState`, board, dense `ReachProbs`, and optional truncation boundary, then builds a fresh tree and `Solver`.
 
-**Turn subgame solve:** a fresh `Solver` instance, rooted at the dealt turn board, truncated at river. Use the propagated reaches as `p1_reach` / `p2_reach`. Solve with CFR+ as today.
+**Reach propagation:** the manager walks the solved Flop tree using `averageStrategy` and records first chance-boundary `ChanceSeed`s. A seed stores the chance `GameState` and dense reaches at that point. Resolving a public Turn/River masks hands containing the dealt card before building the child subgame.
 
-**River subgame solve:** identical pattern, no truncation needed (river has no further streets), uses the turn solution's chance-node reach.
+**Turn subgame solve:** `solveTurn` uses the selected Flop seed, fills the Turn card, applies the chance transition to get a Turn root state, builds a fresh Turn tree truncated at River, then solves with CFR+.
+
+**River subgame solve:** use `Subgame.collectChanceSeeds` on a solved Turn `Subgame`, then pass the selected seed to `solveRiverFromSeed`; the River tree is full because no later street remains.
 
 ### Phase 4 — Verification
 
@@ -207,14 +211,13 @@ The hard part. Cheap leaf evaluators introduce error. We need to bound how bad t
 
 ### Files Likely to Change Next
 
-- `src/subgame.zig` (new) — `SubgameManager` and reach propagation.
-- `src/root.zig` — register the new module + reference in the `test {}` block (otherwise its tests won't run, per the gotcha at the top of this doc).
-- `src/cfr.zig` / `src/node.zig` — likely small API adjustments once reach propagation needs exact hooks into average strategies and chance-leaf locations.
+- `src/subgame.zig` — verification helpers, chance-seed selection ergonomics, and any adjustments needed by CLI callers.
+- `src/cfr.zig` / `src/node.zig` — possible API adjustments if verification needs tree-size metrics or lower-level strategy hooks.
 - `AGENTS.md` — update Current State and Roadmap after each large implementation.
 
 ### Estimated Effort
 
 - Phase 1 (leaf evaluator): done.
 - Phase 2 (truncated tree): done.
-- Phase 3 (SubgameManager): ~one session — most of the new design lives here.
+- Phase 3 (SubgameManager): done.
 - Phase 4 (verification + bounds): ~one session — easy to underestimate; budget time for tuning leaf models if accuracy is bad.
