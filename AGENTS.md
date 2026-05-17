@@ -73,13 +73,13 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 `Subgame` owns a fresh CFR instance, arena-backed tree, root `GameState`, board, root reach vectors, and last CFV buffers. It is the reusable "GameState + ReachProbs → fresh solver" wrapper. `Subgame.init(..., .{ .truncate_after = .FLOP/.TURN })` builds a truncated tree; passing default options builds a full street tree.
 
-`SubgameManager` currently owns one cached truncated Flop solution plus its first chance-boundary seeds. `solveFlop` builds/solves a Flop tree truncated at Turn and then walks average strategies to collect `ChanceSeed` entries. `solveTurn(seed_index, turn_card, ...)` masks private hands containing that public Turn card, applies the chance transition, and spins up a fresh Turn `Subgame` truncated at River. `solveRiverFromSeed` is the generic helper for resolving a River subgame from a Turn chance seed.
+`SubgameManager` currently owns one cached truncated Flop solution plus its first chance-boundary seeds. `solveFlop` builds/solves a Flop tree truncated at Turn and then walks average strategies to collect `ChanceSeed` entries. Each seed carries a fixed-size action path, so callers can use `findSeedByPath(&.{ .CHECK, .CHECK })` / `solveTurnByPath(...)` instead of relying on array order. `solveTurn(seed_index, turn_card, ...)` masks private hands containing that public Turn card, applies the chance transition, and spins up a fresh Turn `Subgame` truncated at River. `solveRiverFromSeed` is the generic helper for resolving a River subgame from a Turn chance seed.
 
 ## Current State
 
 - **Performance:** `zig build test` took ~66s after the Phase 4 verification tests were added. Turn-start solves converge in seconds; tests that enumerate all-in leaf runouts or exact exploitability are the main runtime cost.
 - **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts and truncated chance leaves is verified by `node.zig` structural tests. Snapshot/restore round-trip is verified directly. Chance enumeration is checked for private-hand blocker denominators in both `allInEquityLeaf` and `brWalk`, and the walker leaf path is tested directly. `subgame.zig` verifies fresh solver construction from dense reaches, Flop chance-seed collection, Turn re-solver construction, Turn full-vs-truncated all-in response consistency, bounded compact truncated polarized/condensed exploitability, and truncated Flop tree-size reduction. `cfr.zig` verifies that the all-in equity leaf matches exact full-runout chance enumeration on AA-vs-KK.
-- **Correctness:** All 44 tests pass with `zig build test`.
+- **Correctness:** All 45 tests pass with `zig build test`.
 
 ## Known Gaps & Cautions
 
@@ -94,7 +94,7 @@ Priority order, engine first, user-facing last:
 
 1.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a per-worker context. The existing `BoardSnapshot` is a natural unit for that.
 2.  **Accuracy tuning / leaf models** — Phase 4 has basic bounds, but full-topology truncated exploitability is still expensive to run as a unit test. Future work can add slower benchmarks and compare all-in equity against a check-down or learned leaf model.
-3.  **Small cleanups when convenient:** make `HandTable.getIndex` non-linear if it ever lands in a hot loop, consider heap-backed scratch buffers for `walk`/`brWalk`, and decide how callers should select among multiple chance seeds on the same street.
+3.  **Small cleanups when convenient:** make `HandTable.getIndex` non-linear if it ever lands in a hot loop, consider heap-backed scratch buffers for `walk`/`brWalk`, and decide whether same-action paths with different bet sizes need richer public seed labels.
 4.  **CLI/UI (last):** Parse user-supplied ranges/boards, run a solve, print per-action probabilities via `averageStrategy`. Range input format: investigate whether a community standard exists (PioSOLVER text format, GTO+ JSON, etc.) before defining our own. Otherwise spec a minimal format. Also support file upload of a preflop range.
 
 ## Plan: Subgame Decomposition (current major track)
@@ -211,7 +211,7 @@ Basic fast-running bounds are in place. Cheap leaf evaluators still introduce mo
 
 ### Files Likely to Change Next
 
-- `src/subgame.zig` — chance-seed selection ergonomics and any adjustments needed by CLI callers.
+- `src/subgame.zig` — richer chance-seed labels if action paths alone become ambiguous for CLI callers.
 - `src/cfr.zig` / `src/node.zig` — possible API adjustments for slower benchmark tooling or lower-level strategy hooks.
 - `AGENTS.md` — update Current State and Roadmap after each large implementation.
 

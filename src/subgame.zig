@@ -5,6 +5,7 @@ const card_mod = @import("card.zig");
 const Card = card_mod.Card;
 const cfr = @import("cfr.zig");
 const gamestate_mod = @import("gamestate.zig");
+const Action = gamestate_mod.Action;
 const GameState = gamestate_mod.GameState;
 const Street = gamestate_mod.Street;
 const node_mod = @import("node.zig");
@@ -14,6 +15,35 @@ const range_mod = @import("range.zig");
 const Range = range_mod.Range;
 
 pub const NUM_HANDS = cfr.NUM_HANDS;
+pub const MAX_ACTION_PATH: usize = 16;
+
+pub const ActionPath = struct {
+    actions: [MAX_ACTION_PATH]Action,
+    len: u8,
+
+    pub fn empty() ActionPath {
+        return .{
+            .actions = undefined,
+            .len = 0,
+        };
+    }
+
+    pub fn with(self: *const ActionPath, action: Action) !ActionPath {
+        if (self.len >= MAX_ACTION_PATH) return error.ActionPathTooLong;
+        var next = self.*;
+        next.actions[next.len] = action;
+        next.len += 1;
+        return next;
+    }
+
+    pub fn slice(self: *const ActionPath) []const Action {
+        return self.actions[0..self.len];
+    }
+
+    pub fn eql(self: *const ActionPath, expected: []const Action) bool {
+        return std.mem.eql(Action, self.slice(), expected);
+    }
+};
 
 pub const ReachProbs = struct {
     p1: [NUM_HANDS]f32,
@@ -113,13 +143,14 @@ pub const Subgame = struct {
     pub fn collectChanceSeeds(self: *Subgame, allocator: Allocator) !std.ArrayList(ChanceSeed) {
         var seeds = std.ArrayList(ChanceSeed).empty;
         errdefer seeds.deinit(allocator);
-        try collectChanceSeedsRecursive(allocator, self.root, self.root_state, &self.root_reach.p1, &self.root_reach.p2, &seeds);
+        try collectChanceSeedsRecursive(allocator, self.root, self.root_state, ActionPath.empty(), &self.root_reach.p1, &self.root_reach.p2, &seeds);
         return seeds;
     }
 };
 
 pub const ChanceSeed = struct {
     state: GameState,
+    path: ActionPath,
     reach: ReachProbs,
 
     pub fn buildNextStreetSubgame(
@@ -187,10 +218,18 @@ pub const SubgameManager = struct {
             self.allocator,
             flop.root,
             flop.root_state,
+            ActionPath.empty(),
             &flop.root_reach.p1,
             &flop.root_reach.p2,
             &self.chance_seeds,
         );
+    }
+
+    pub fn findSeedByPath(self: *const SubgameManager, path: []const Action) ?usize {
+        for (self.chance_seeds.items, 0..) |*seed, i| {
+            if (seed.path.eql(path)) return i;
+        }
+        return null;
     }
 
     pub fn solveTurn(
@@ -212,6 +251,17 @@ pub const SubgameManager = struct {
         errdefer turn.deinit();
         turn.solve(iterations, random);
         return turn;
+    }
+
+    pub fn solveTurnByPath(
+        self: *SubgameManager,
+        path: []const Action,
+        turn_card: Card,
+        iterations: usize,
+        random: std.Random,
+    ) !Subgame {
+        const seed_index = self.findSeedByPath(path) orelse return error.InvalidChanceSeed;
+        return self.solveTurn(seed_index, turn_card, iterations, random);
     }
 };
 
@@ -252,6 +302,7 @@ fn collectChanceSeedsRecursive(
     allocator: Allocator,
     node: *const Node,
     state: GameState,
+    path: ActionPath,
     p1_reach: []const f32,
     p2_reach: []const f32,
     seeds: *std.ArrayList(ChanceSeed),
@@ -259,6 +310,7 @@ fn collectChanceSeedsRecursive(
     if (node.is_chance) {
         var seed = ChanceSeed{
             .state = state,
+            .path = path,
             .reach = undefined,
         };
         std.debug.assert(state.is_chance);
@@ -293,7 +345,8 @@ fn collectChanceSeedsRecursive(
             }
         }
 
-        try collectChanceSeedsRecursive(allocator, edge.child.?, next_state, &next_p1, &next_p2, seeds);
+        const next_path = try path.with(edge.action);
+        try collectChanceSeedsRecursive(allocator, edge.child.?, next_state, next_path, &next_p1, &next_p2, seeds);
     }
 }
 
@@ -461,9 +514,11 @@ test "SubgameManager collects flop chance seeds and resolves a turn subgame" {
     var prng = std.Random.DefaultPrng.init(42);
     try manager.solveFlop(GameState.init(.FLOP, true, 50, 100, 100), board, &reach, 0, prng.random());
     try std.testing.expect(manager.chance_seeds.items.len > 0);
+    const check_check_seed = manager.findSeedByPath(&.{ .CHECK, .CHECK }).?;
+    try std.testing.expect(manager.chance_seeds.items[check_check_seed].path.eql(&.{ .CHECK, .CHECK }));
 
     const turn_card = card_mod.makeCard(12, 0);
-    var turn = try manager.solveTurn(0, turn_card, 0, prng.random());
+    var turn = try manager.solveTurnByPath(&.{ .CHECK, .CHECK }, turn_card, 0, prng.random());
     defer turn.deinit();
 
     try std.testing.expectEqual(Street.TURN, turn.root_state.street);
@@ -477,6 +532,41 @@ test "SubgameManager collects flop chance seeds and resolves a turn subgame" {
     const river_leaf = p2_check.child.?;
     try std.testing.expect(river_leaf.is_chance);
     try std.testing.expect(river_leaf.is_leaf);
+}
+
+test "SubgameManager finds chance seeds by deterministic action path" {
+    const allocator = std.testing.allocator;
+
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        0,
+        0,
+    };
+
+    const table = range_mod.HandTable.init();
+    const aa_idx = table.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = table.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+
+    var reach = ReachProbs.zero();
+    reach.p1[aa_idx] = 1.0;
+    reach.p2[kk_idx] = 1.0;
+
+    var manager = SubgameManager.init(allocator);
+    defer manager.deinit();
+
+    var prng = std.Random.DefaultPrng.init(42);
+    try manager.solveFlop(GameState.init(.FLOP, true, 50, 100, 100), board, &reach, 0, prng.random());
+
+    const check_check = manager.findSeedByPath(&.{ .CHECK, .CHECK }).?;
+    try std.testing.expect(manager.chance_seeds.items[check_check].state.is_chance);
+    try std.testing.expect(manager.chance_seeds.items[check_check].path.eql(&.{ .CHECK, .CHECK }));
+
+    const bet_call = manager.findSeedByPath(&.{ .BET, .CALL }).?;
+    try std.testing.expect(manager.chance_seeds.items[bet_call].state.is_chance);
+    try std.testing.expect(manager.chance_seeds.items[bet_call].state.pot > 50);
+    try std.testing.expect(manager.chance_seeds.items[bet_call].path.eql(&.{ .BET, .CALL }));
 }
 
 test "verification: turn re-solve matches full turn all-in response strategy" {
