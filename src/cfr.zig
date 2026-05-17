@@ -1709,3 +1709,81 @@ test "brWalk: chance averaging uses per-hand legal river count" {
     const expected = @as(f32, 125.0) * @as(f32, 40.0) / @as(f32, 46.0);
     try std.testing.expectApproxEqAbs(expected, cfv[aa_idx], 1e-3);
 }
+
+test "verification: all-in equity leaf matches exact full-runout chance tree" {
+    const allocator = std.testing.allocator;
+
+    // Flop entry: the exact tree enumerates turn and river chance nodes after
+    // an all-in call; the truncated tree replaces that with allInEquityLeaf.
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        0,
+        0,
+    };
+
+    var p1 = try Range.initEmpty(allocator, 0);
+    defer p1.deinit(allocator);
+    var p2 = try Range.initEmpty(allocator, 0);
+    defer p2.deinit(allocator);
+
+    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    defer solver.deinit();
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+    solver.p1_reach[aa_idx] = 1.0;
+    solver.p2_reach[kk_idx] = 1.0;
+
+    var river_edges = [_]Edge{.{
+        .action = .CHANCE,
+        .amount = 250,
+        .stack1 = 0,
+        .stack2 = 0,
+        .child = null,
+    }};
+    var river_chance = Node{
+        .is_chance = true,
+        .is_leaf = false,
+        .isp1 = true,
+        .regrets = &.{},
+        .strategy_sum = &.{},
+        .edges = river_edges[0..],
+    };
+    var turn_edges = [_]Edge{.{
+        .action = .CHANCE,
+        .amount = 250,
+        .stack1 = 0,
+        .stack2 = 0,
+        .child = &river_chance,
+    }};
+    var turn_chance = Node{
+        .is_chance = true,
+        .is_leaf = false,
+        .isp1 = true,
+        .regrets = &.{},
+        .strategy_sum = &.{},
+        .edges = turn_edges[0..],
+    };
+
+    var exact_p1: [NUM_HANDS]f32 = undefined;
+    var exact_p2: [NUM_HANDS]f32 = undefined;
+    brWalk(&solver, &turn_chance, &solver.p1_reach, &solver.p2_reach, true, &exact_p1);
+    brWalk(&solver, &turn_chance, &solver.p1_reach, &solver.p2_reach, false, &exact_p2);
+
+    const leaf_edge = Edge{
+        .action = .CHANCE,
+        .amount = 250,
+        .stack1 = 0,
+        .stack2 = 0,
+        .child = null,
+    };
+    var leaf_p1: [NUM_HANDS]f32 = undefined;
+    var leaf_p2: [NUM_HANDS]f32 = undefined;
+    solver.allInEquityLeaf(&leaf_edge, &solver.p1_reach, &solver.p2_reach, &leaf_p1, &leaf_p2);
+
+    try std.testing.expectApproxEqAbs(exact_p1[aa_idx], leaf_p1[aa_idx], 1e-3);
+    try std.testing.expectApproxEqAbs(exact_p2[kk_idx], leaf_p2[kk_idx], 1e-3);
+}

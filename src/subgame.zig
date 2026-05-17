@@ -107,7 +107,7 @@ pub const Subgame = struct {
     }
 
     pub fn exploitability(self: *Subgame) f32 {
-        return self.solver.exploitability(self.root);
+        return cfr.exploitability(&self.solver, self.root);
     }
 
     pub fn collectChanceSeeds(self: *Subgame, allocator: Allocator) !std.ArrayList(ChanceSeed) {
@@ -377,6 +377,36 @@ fn findFirst(edges: []Edge, action: gamestate_mod.Action) ?*Edge {
     return null;
 }
 
+fn actionIndex(edges: []Edge, action: gamestate_mod.Action) ?usize {
+    for (edges, 0..) |edge, i| {
+        if (edge.action == action) return i;
+    }
+    return null;
+}
+
+fn findSeedByState(seeds: []const ChanceSeed, pot: f32, stack1: f32, stack2: f32) ?usize {
+    for (seeds, 0..) |seed, i| {
+        if (approxEq(seed.state.pot, pot) and
+            approxEq(seed.state.stack1, stack1) and
+            approxEq(seed.state.stack2, stack2))
+        {
+            return i;
+        }
+    }
+    return null;
+}
+
+fn countEdges(edges: []const Edge) usize {
+    var total: usize = 0;
+    for (edges) |*edge| {
+        total += 1;
+        if (edge.child) |child| {
+            total += countEdges(child.edges);
+        }
+    }
+    return total;
+}
+
 test "Subgame.init builds a fresh CFR instance from GameState and ReachProbs" {
     const allocator = std.testing.allocator;
 
@@ -447,4 +477,233 @@ test "SubgameManager collects flop chance seeds and resolves a turn subgame" {
     const river_leaf = p2_check.child.?;
     try std.testing.expect(river_leaf.is_chance);
     try std.testing.expect(river_leaf.is_leaf);
+}
+
+test "verification: turn re-solve matches full turn all-in response strategy" {
+    const allocator = std.testing.allocator;
+
+    const flop_board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        0,
+        0,
+    };
+    const turn_card = card_mod.makeCard(3, 3);
+
+    const table = range_mod.HandTable.init();
+    const aa_idx = table.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = table.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+
+    var reach = ReachProbs.zero();
+    reach.p1[aa_idx] = 1.0;
+    reach.p2[kk_idx] = 1.0;
+
+    var manager = SubgameManager.init(allocator);
+    defer manager.deinit();
+
+    var flop_prng = std.Random.DefaultPrng.init(42);
+    try manager.solveFlop(GameState.init(.FLOP, true, 50, 100, 100), flop_board, &reach, 0, flop_prng.random());
+
+    const seed_idx = findSeedByState(manager.chance_seeds.items, 50, 100, 100).?;
+    const seed = &manager.chance_seeds.items[seed_idx];
+
+    var full_turn = try seed.buildNextStreetSubgame(allocator, flop_board, turn_card, .{});
+    defer full_turn.deinit();
+    var trunc_turn = try seed.buildNextStreetSubgame(allocator, flop_board, turn_card, .{ .truncate_after = .TURN });
+    defer trunc_turn.deinit();
+
+    var full_prng = std.Random.DefaultPrng.init(43);
+    full_turn.solve(20, full_prng.random());
+    var trunc_prng = std.Random.DefaultPrng.init(43);
+    trunc_turn.solve(20, trunc_prng.random());
+
+    const full_allin = findFirst(full_turn.root.edges, .ALLIN).?;
+    const trunc_allin = findFirst(trunc_turn.root.edges, .ALLIN).?;
+    const full_p2_node = full_allin.child.?;
+    const trunc_p2_node = trunc_allin.child.?;
+
+    const full_strategy = try allocator.alloc(f32, full_p2_node.edges.len * NUM_HANDS);
+    defer allocator.free(full_strategy);
+    const trunc_strategy = try allocator.alloc(f32, trunc_p2_node.edges.len * NUM_HANDS);
+    defer allocator.free(trunc_strategy);
+    cfr.averageStrategy(full_p2_node, full_strategy);
+    cfr.averageStrategy(trunc_p2_node, trunc_strategy);
+
+    const full_fold = actionIndex(full_p2_node.edges, .FOLD).?;
+    const trunc_fold = actionIndex(trunc_p2_node.edges, .FOLD).?;
+    const full_call = actionIndex(full_p2_node.edges, .CALL).?;
+    const trunc_call = actionIndex(trunc_p2_node.edges, .CALL).?;
+
+    try std.testing.expectApproxEqAbs(
+        full_strategy[full_fold * NUM_HANDS + kk_idx],
+        trunc_strategy[trunc_fold * NUM_HANDS + kk_idx],
+        0.35,
+    );
+    try std.testing.expectApproxEqAbs(
+        full_strategy[full_call * NUM_HANDS + kk_idx],
+        trunc_strategy[trunc_call * NUM_HANDS + kk_idx],
+        0.35,
+    );
+}
+
+test "verification: polarized vs condensed compact truncated game exploitability is bounded" {
+    const allocator = std.testing.allocator;
+
+    const board = [5]Card{
+        card_mod.makeCard(12, 0),
+        card_mod.makeCard(11, 0),
+        card_mod.makeCard(0, 1),
+        card_mod.makeCard(1, 2),
+        0,
+    };
+
+    const table = range_mod.HandTable.init();
+    var reach = ReachProbs.zero();
+    const aa = table.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(12, 2))).?;
+    const kk = table.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 1), card_mod.makeCard(11, 2))).?;
+    const air = table.getIndex(range_mod.Hand.init(card_mod.makeCard(5, 0), card_mod.makeCard(0, 3))).?;
+    reach.p1[aa] = 0.2;
+    reach.p1[kk] = 0.2;
+    reach.p1[air] = 0.6;
+
+    const aq = table.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(10, 2))).?;
+    const aj = table.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(9, 2))).?;
+    const at = table.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 1), card_mod.makeCard(8, 2))).?;
+    reach.p2[aq] = 0.33;
+    reach.p2[aj] = 0.33;
+    reach.p2[at] = 0.34;
+
+    var p1_range = try rangeFromDense(allocator, &reach.p1);
+    defer p1_range.deinit(allocator);
+    var p2_range = try rangeFromDense(allocator, &reach.p2);
+    defer p2_range.deinit(allocator);
+
+    var solver = try cfr.Solver.init(board, &p1_range, &p2_range, 500, 500, 100);
+    defer solver.deinit();
+
+    var check_leaf_edges = [_]Edge{.{
+        .action = .CHANCE,
+        .amount = 100,
+        .stack1 = 500,
+        .stack2 = 500,
+        .child = null,
+    }};
+    var check_leaf = Node{
+        .is_chance = true,
+        .is_leaf = true,
+        .isp1 = true,
+        .regrets = &.{},
+        .strategy_sum = &.{},
+        .edges = check_leaf_edges[0..],
+    };
+
+    var call_leaf_edges = [_]Edge{.{
+        .action = .CHANCE,
+        .amount = 1100,
+        .stack1 = 0,
+        .stack2 = 0,
+        .child = null,
+    }};
+    var call_leaf = Node{
+        .is_chance = true,
+        .is_leaf = true,
+        .isp1 = true,
+        .regrets = &.{},
+        .strategy_sum = &.{},
+        .edges = call_leaf_edges[0..],
+    };
+
+    var p2_regrets: [2 * NUM_HANDS]f32 = undefined;
+    var p2_strategy_sum: [2 * NUM_HANDS]f32 = undefined;
+    @memset(&p2_regrets, 0);
+    @memset(&p2_strategy_sum, 0);
+    var p2_edges = [_]Edge{
+        .{
+            .action = .FOLD,
+            .amount = 600,
+            .stack1 = 0,
+            .stack2 = 500,
+            .child = null,
+        },
+        .{
+            .action = .CALL,
+            .amount = 1100,
+            .stack1 = 0,
+            .stack2 = 0,
+            .child = &call_leaf,
+        },
+    };
+    var p2_node = Node{
+        .is_chance = false,
+        .is_leaf = false,
+        .isp1 = false,
+        .regrets = p2_regrets[0..],
+        .strategy_sum = p2_strategy_sum[0..],
+        .edges = p2_edges[0..],
+    };
+
+    var root_regrets: [2 * NUM_HANDS]f32 = undefined;
+    var root_strategy_sum: [2 * NUM_HANDS]f32 = undefined;
+    @memset(&root_regrets, 0);
+    @memset(&root_strategy_sum, 0);
+    var root_edges = [_]Edge{
+        .{
+            .action = .CHECK,
+            .amount = 100,
+            .stack1 = 500,
+            .stack2 = 500,
+            .child = &check_leaf,
+        },
+        .{
+            .action = .ALLIN,
+            .amount = 600,
+            .stack1 = 0,
+            .stack2 = 500,
+            .child = &p2_node,
+        },
+    };
+    var root = Node{
+        .is_chance = false,
+        .is_leaf = false,
+        .isp1 = true,
+        .regrets = root_regrets[0..],
+        .strategy_sum = root_strategy_sum[0..],
+        .edges = root_edges[0..],
+    };
+
+    var prng = std.Random.DefaultPrng.init(42);
+    var cfv_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_p2: [NUM_HANDS]f32 = undefined;
+    cfr.solve(&solver, &root, 200, prng.random(), &cfv_p1, &cfv_p2);
+
+    try std.testing.expect(cfr.exploitability(&solver, &root) < 1.0);
+}
+
+test "verification: truncated flop tree stays far smaller than full flop topology" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const allocator = da.allocator();
+
+    var full_arena = std.heap.ArenaAllocator.init(allocator);
+    defer full_arena.deinit();
+    var trunc_arena = std.heap.ArenaAllocator.init(allocator);
+    defer trunc_arena.deinit();
+
+    var full_state = GameState.init(.FLOP, true, 50, 100, 100);
+    var trunc_state = full_state;
+
+    var full_edges = std.ArrayList(Edge).empty;
+    defer full_edges.deinit(allocator);
+    var trunc_edges = std.ArrayList(Edge).empty;
+    defer trunc_edges.deinit(allocator);
+
+    try node_mod.buildTree(&full_state, &full_edges, full_arena.allocator(), allocator, 1, 1);
+    try node_mod.buildTreeTruncated(&trunc_state, &trunc_edges, trunc_arena.allocator(), allocator, 1, 1, .FLOP);
+
+    const full_count = countEdges(full_edges.items);
+    const trunc_count = countEdges(trunc_edges.items);
+
+    try std.testing.expect(trunc_count < full_count);
+    try std.testing.expect(trunc_count < 250);
 }

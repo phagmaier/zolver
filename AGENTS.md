@@ -67,7 +67,7 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 - **Chance Nodes:** Street transitions produce a `Node` with `is_chance = true`. Normal chance nodes have exactly one outgoing edge tagged `Action.CHANCE`; truncated chance leaves additionally set `is_leaf = true` and terminate through the all-in equity evaluator.
 - **Pre-River All-in Runouts:** A call of an all-in pre-river is *not* terminal. `getCallGameState` marks it as a chance state, and `applyChance` chains additional chance steps (one per pending street) until the river is dealt — at which point the post-chance state is `isTerm = true`. This produces a chain like `(call edge) → chance(turn) → chance(river) → terminal showdown` for a FLOP all-in. The chance-terminal showdown is handled inside `walk` / `brWalk` by calling `terminalShowdown` on the chance edge whose child is `null`. CS-CFR samples one runout per chain visit during `walk`; `brWalk` enumerates fully for exactness.
-- **Subgame Decomposition:** The solver can traverse any street, and it can now build truncated trees that stop at a configured chance boundary and use all-in equity leaves. The remaining intended path is to add orchestration for solving Flops once and then re-solving Turn/River subgames independently.
+- **Subgame Decomposition:** The solver can traverse any street, build truncated trees that stop at a configured chance boundary, and use all-in equity leaves. `SubgameManager` now adds the orchestration layer for solving a Flop once, collecting chance seeds, and spinning up fresh Turn/River re-solves.
 
 ### Subgame Manager (src/subgame.zig)
 
@@ -77,9 +77,9 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 ## Current State
 
-- **Performance:** `zig build test` takes roughly the same order of time as the prior ~26s baseline; the exact number should be re-measured after substantial leaf-model changes because all-in leaf tests enumerate runouts. Turn-start solves converge in seconds.
-- **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts and truncated chance leaves is verified by `node.zig` structural tests. Snapshot/restore round-trip is verified directly. Chance enumeration is checked for private-hand blocker denominators in both `allInEquityLeaf` and `brWalk`, and the walker leaf path is tested directly. `subgame.zig` verifies fresh solver construction from dense reaches plus Flop chance-seed collection and Turn re-solver construction.
-- **Correctness:** All 40 tests pass with `zig build test`.
+- **Performance:** `zig build test` took ~66s after the Phase 4 verification tests were added. Turn-start solves converge in seconds; tests that enumerate all-in leaf runouts or exact exploitability are the main runtime cost.
+- **Verification:** Convergence is verified on AA-vs-KK toy games (River and Turn) and a "Polarized vs Condensed" range test, with exploitability asserted `< 0.05` after 200 CFR+ iterations. Behavioral correctness is checked by asserting KK folds to a bet on the AA-vs-KK river via `averageStrategy`. Tree structure for pre-river all-in runouts and truncated chance leaves is verified by `node.zig` structural tests. Snapshot/restore round-trip is verified directly. Chance enumeration is checked for private-hand blocker denominators in both `allInEquityLeaf` and `brWalk`, and the walker leaf path is tested directly. `subgame.zig` verifies fresh solver construction from dense reaches, Flop chance-seed collection, Turn re-solver construction, Turn full-vs-truncated all-in response consistency, bounded compact truncated polarized/condensed exploitability, and truncated Flop tree-size reduction. `cfr.zig` verifies that the all-in equity leaf matches exact full-runout chance enumeration on AA-vs-KK.
+- **Correctness:** All 44 tests pass with `zig build test`.
 
 ## Known Gaps & Cautions
 
@@ -92,8 +92,8 @@ The betting tree lives in `src/gamestate.zig` (state machine) and `src/node.zig`
 
 Priority order, engine first, user-facing last:
 
-1.  **Subgame Verification + Bounds** — compare truncated/re-solved lines against full-tree baselines and add a memory-size sanity test for truncated Flop trees.
-2.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a per-worker context. The existing `BoardSnapshot` is a natural unit for that.
+1.  **Parallelization** — Zig threading on the sampled `walk` iterations or the independent runouts in `bestResponse`. `reinitForBoard` mutates solver-wide state, so parallel chance enumeration needs thread-local strength/sort buffers or a per-worker context. The existing `BoardSnapshot` is a natural unit for that.
+2.  **Accuracy tuning / leaf models** — Phase 4 has basic bounds, but full-topology truncated exploitability is still expensive to run as a unit test. Future work can add slower benchmarks and compare all-in equity against a check-down or learned leaf model.
 3.  **Small cleanups when convenient:** make `HandTable.getIndex` non-linear if it ever lands in a hot loop, consider heap-backed scratch buffers for `walk`/`brWalk`, and decide how callers should select among multiple chance seeds on the same street.
 4.  **CLI/UI (last):** Parse user-supplied ranges/boards, run a solve, print per-action probabilities via `averageStrategy`. Range input format: investigate whether a community standard exists (PioSOLVER text format, GTO+ JSON, etc.) before defining our own. Otherwise spec a minimal format. Also support file upload of a preflop range.
 
@@ -191,15 +191,15 @@ pub fn solveRiverFromSeed(..., seed: *const ChanceSeed, turn_board: [5]Card, riv
 
 **River subgame solve:** use `Subgame.collectChanceSeeds` on a solved Turn `Subgame`, then pass the selected seed to `solveRiverFromSeed`; the River tree is full because no later street remains.
 
-### Phase 4 — Verification
+### Phase 4 — Verification ✅ Done
 
-The hard part. Cheap leaf evaluators introduce error. We need to bound how bad the approximation is.
+Basic fast-running bounds are in place. Cheap leaf evaluators still introduce model error, so deeper accuracy characterization should live in benchmark-style tests rather than the normal unit suite.
 
 **Tests:**
-1. **Equity oracle on AA-vs-KK:** A full-tree solve and a truncated-tree solve should agree on root CFV to within ~5% on a heads-up all-in-only game.
-2. **Turn re-solve consistency:** Solve the full game (turn-start, no truncation) and a truncated flop + Turn re-solve, on the *same* game. Strategies at the turn-decision node should be close.
-3. **Polarized vs condensed truncated:** Run the existing polarized/condensed test in truncated form; exploitability won't hit `< 0.05` (the leaf approximation introduces a floor) but should remain bounded.
-4. **Memory test:** Assert the truncated flop tree's total `Edge` count is below some threshold (sanity check that truncation actually trimmed it).
+1. **Equity oracle on AA-vs-KK:** `cfr.zig` compares `allInEquityLeaf` against exact full turn+river chance enumeration for AA-vs-KK after an all-in call; values match to `1e-3`.
+2. **Turn re-solve consistency:** `subgame.zig` solves a full Turn subgame and a Flop-seeded truncated Turn re-solve on the same AA-vs-KK line, then compares KK's facing-all-in fold/call strategy within a broad tolerance.
+3. **Polarized vs condensed truncated:** a compact truncated game using polarized/condensed ranges asserts bounded exploitability after CFR+. The full betting topology was too slow for a default unit test.
+4. **Memory test:** `subgame.zig` counts full vs truncated Flop tree edges with tiny regret-vector allocations and asserts the truncated topology is smaller and below a fixed threshold.
 
 ### Decisions Made
 
@@ -211,8 +211,8 @@ The hard part. Cheap leaf evaluators introduce error. We need to bound how bad t
 
 ### Files Likely to Change Next
 
-- `src/subgame.zig` — verification helpers, chance-seed selection ergonomics, and any adjustments needed by CLI callers.
-- `src/cfr.zig` / `src/node.zig` — possible API adjustments if verification needs tree-size metrics or lower-level strategy hooks.
+- `src/subgame.zig` — chance-seed selection ergonomics and any adjustments needed by CLI callers.
+- `src/cfr.zig` / `src/node.zig` — possible API adjustments for slower benchmark tooling or lower-level strategy hooks.
 - `AGENTS.md` — update Current State and Roadmap after each large implementation.
 
 ### Estimated Effort
@@ -220,4 +220,4 @@ The hard part. Cheap leaf evaluators introduce error. We need to bound how bad t
 - Phase 1 (leaf evaluator): done.
 - Phase 2 (truncated tree): done.
 - Phase 3 (SubgameManager): done.
-- Phase 4 (verification + bounds): ~one session — easy to underestimate; budget time for tuning leaf models if accuracy is bad.
+- Phase 4 (verification + bounds): done for fast unit coverage; deeper accuracy tuning remains future benchmark work.
