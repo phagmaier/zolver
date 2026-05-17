@@ -588,6 +588,99 @@ inline fn handsCompatible(a: range_mod.Hand, b: range_mod.Hand) bool {
     return a.card1 != b.card1 and a.card1 != b.card2 and a.card2 != b.card1 and a.card2 != b.card2;
 }
 
+// Per-worker delta buffers for parallel CFR. Each non-chance / non-leaf node
+// gets its own delta slice (same shape as `node.regrets` / `strategy_sum`)
+// keyed by `*Node`. During a parallel `solve`, workers write into their own
+// `WorkerDeltas` while reading the shared `node.regrets` snapshot from the
+// previous iteration's merge. After all workers finish the iteration the main
+// thread sums every worker's deltas into the shared tree and applies the
+// CFR+ non-negative clamp.
+// Per-worker delta entry for a single decision node. The walk writes here with
+// `=` (each node is visited once per walk), so no zero-reset is needed between
+// iterations: next iter's walk overwrites with fresh values.
+pub const NodeDelta = struct {
+    node: *Node,
+    regret: []f32,
+    strategy_sum: []f32,
+};
+
+pub const WorkerDeltas = struct {
+    arena: std.heap.ArenaAllocator,
+    // Lookup by *Node, used by `walk` to find its slot once per node visit.
+    regret_delta: std.AutoHashMap(*Node, []f32),
+    strategy_sum_delta: std.AutoHashMap(*Node, []f32),
+    // Pre-flattened list of all decision-node slots, used by `mergeDeltas` to
+    // avoid hashmap lookups in the hot per-iter aggregation loop.
+    flat: []NodeDelta,
+
+    pub fn init(parent_allocator: Allocator, root: *Node) !WorkerDeltas {
+        var arena = std.heap.ArenaAllocator.init(parent_allocator);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+        var rd = std.AutoHashMap(*Node, []f32).init(alloc);
+        var ssd = std.AutoHashMap(*Node, []f32).init(alloc);
+        var flat = std.ArrayList(NodeDelta).empty;
+        try registerDeltaNodes(root, &rd, &ssd, &flat, alloc);
+        return .{ .arena = arena, .regret_delta = rd, .strategy_sum_delta = ssd, .flat = flat.items };
+    }
+
+    pub fn deinit(self: *WorkerDeltas) void {
+        self.arena.deinit();
+    }
+};
+
+fn registerDeltaNodes(
+    node: *Node,
+    rd: *std.AutoHashMap(*Node, []f32),
+    ssd: *std.AutoHashMap(*Node, []f32),
+    flat: *std.ArrayList(NodeDelta),
+    alloc: Allocator,
+) !void {
+    if (node.is_leaf) return;
+    if (!node.is_chance and node.regrets.len > 0) {
+        const n = node.regrets.len;
+        const r = try alloc.alloc(f32, n);
+        @memset(r, 0);
+        try rd.put(node, r);
+        const s = try alloc.alloc(f32, n);
+        @memset(s, 0);
+        try ssd.put(node, s);
+        try flat.append(alloc, .{ .node = node, .regret = r, .strategy_sum = s });
+    }
+    for (node.edges) |edge| {
+        if (edge.child) |child| try registerDeltaNodes(child, rd, ssd, flat, alloc);
+    }
+}
+
+// Sum every worker's deltas into the shared tree, applying the CFR+ non-
+// negative clamp on regret. Each worker's slot is zeroed in the same pass so
+// the next iteration's walks can `+=` from a clean baseline without a separate
+// reset step. Uses the flat per-worker NodeDelta list — workers all register
+// in the same tree-walk order, so the flat-list indices align across workers.
+fn mergeDeltas(workers: []const *WorkerDeltas) void {
+    if (workers.len == 0) return;
+    const n_nodes = workers[0].flat.len;
+    var node_idx: usize = 0;
+    while (node_idx < n_nodes) : (node_idx += 1) {
+        const target = workers[0].flat[node_idx].node;
+        const len = target.regrets.len;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            var r_sum: f32 = 0;
+            var s_sum: f32 = 0;
+            for (workers) |w| {
+                r_sum += w.flat[node_idx].regret[i];
+                s_sum += w.flat[node_idx].strategy_sum[i];
+                w.flat[node_idx].regret[i] = 0;
+                w.flat[node_idx].strategy_sum[i] = 0;
+            }
+            const updated = target.regrets[i] + r_sum;
+            target.regrets[i] = if (updated > 0) updated else 0;
+            target.strategy_sum[i] += s_sum;
+        }
+    }
+}
+
 // CFR+ with linear-weighted strategy averaging. Cumulative regrets are clipped
 // to non-negative inside `walk`, and each iteration's contribution to
 // `strategy_sum` is weighted by `iter + 1` so later (more-converged) iterations
@@ -596,19 +689,119 @@ inline fn handsCompatible(a: range_mod.Hand, b: range_mod.Hand) bool {
 // per-hand counterfactual values from the *last* iteration's walk.
 pub fn solve(
     self: *Solver,
+    allocator: Allocator,
     root: *Node,
     iterations: usize,
     random: std.Random,
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
-) void {
-    var ctx = SolveContext.initOnSolver(self);
+) !void {
+    const cpu_count: usize = std.Thread.getCpuCount() catch 1;
+    const n_workers: usize = @min(cpu_count, MAX_PARALLEL_WORKERS);
+
+    if (n_workers <= 1 or iterations == 0) {
+        // Serial fallback. No deltas, no thread spawn.
+        var ctx = SolveContext.initOnSolver(self);
+        var iter: usize = 0;
+        while (iter < iterations) : (iter += 1) {
+            const iter_weight: f32 = @floatFromInt(iter + 1);
+            walk(&ctx, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, null);
+        }
+        return;
+    }
+
+    // Parallel path. Per-worker state lives on the dispatcher's stack /
+    // dispatcher-managed heap so worker threads only need pointers.
+    var worker_boards: [MAX_PARALLEL_WORKERS]BoardContext = undefined;
+    var worker_ctxs: [MAX_PARALLEL_WORKERS]SolveContext = undefined;
+    var worker_deltas: [MAX_PARALLEL_WORKERS]WorkerDeltas = undefined;
+    var worker_prngs: [MAX_PARALLEL_WORKERS]std.Random.DefaultPrng = undefined;
+    var worker_out_p1: [MAX_PARALLEL_WORKERS][NUM_HANDS]f32 = undefined;
+    var worker_out_p2: [MAX_PARALLEL_WORKERS][NUM_HANDS]f32 = undefined;
+    var worker_ptrs: [MAX_PARALLEL_WORKERS]*WorkerDeltas = undefined;
+
+    // Seed each worker's PRNG deterministically from the caller's `random` so
+    // results are reproducible given a fixed input seed.
+    const base_seed: u64 = random.int(u64);
+
+    var initialized: usize = 0;
+    errdefer for (0..initialized) |t| worker_deltas[t].deinit();
+    var t: usize = 0;
+    while (t < n_workers) : (t += 1) {
+        worker_boards[t] = self.board_ctx;
+        worker_ctxs[t] = SolveContext.initOnBoardContext(self, &worker_boards[t]);
+        worker_ctxs[t].allow_parallel = false;
+        worker_deltas[t] = try WorkerDeltas.init(allocator, root);
+        initialized = t + 1;
+        worker_prngs[t] = std.Random.DefaultPrng.init(base_seed +% t);
+        worker_ptrs[t] = &worker_deltas[t];
+    }
+    defer for (0..n_workers) |i| worker_deltas[i].deinit();
+
+    // `iterations` is the number of strategy updates — same semantics as the
+    // serial loop. Each update spawns N parallel walks that contribute lower-
+    // variance samples to the per-update delta, then merges. Total walk work
+    // is N× serial; wall clock in release builds is dominated by the parallel
+    // execution of those walks. In debug builds the per-iter merge/reset
+    // overhead is visible; that's expected and not a release concern.
     var iter: usize = 0;
     while (iter < iterations) : (iter += 1) {
         const iter_weight: f32 = @floatFromInt(iter + 1);
-        walk(&ctx, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight);
+
+        var threads: [MAX_PARALLEL_WORKERS]std.Thread = undefined;
+        var jobs: [MAX_PARALLEL_WORKERS]WalkJob = undefined;
+
+        var spawned: usize = 0;
+        var s: usize = 0;
+        while (s < n_workers) : (s += 1) {
+            jobs[s] = .{
+                .ctx = &worker_ctxs[s],
+                .root = root,
+                .p1_reach = &self.p1_reach,
+                .p2_reach = &self.p2_reach,
+                .out_cfv_p1 = &worker_out_p1[s],
+                .out_cfv_p2 = &worker_out_p2[s],
+                .random = worker_prngs[s].random(),
+                .iter_weight = iter_weight,
+                .deltas = &worker_deltas[s],
+            };
+            if (std.Thread.spawn(.{}, WalkJob.run, .{&jobs[s]})) |th| {
+                threads[s] = th;
+                spawned += 1;
+            } else |_| {
+                // Spawn failed: run this slice synchronously and bail out of
+                // further spawns for this iter.
+                WalkJob.run(&jobs[s]);
+                break;
+            }
+        }
+        var j: usize = 0;
+        while (j < spawned) : (j += 1) threads[j].join();
+
+        mergeDeltas(worker_ptrs[0..n_workers]);
     }
+
+    // Return the last iter's worker-0 CFVs (the public out-buffers are an
+    // observational hook, not a load-bearing equilibrium value).
+    @memcpy(out_cfv_p1, &worker_out_p1[0]);
+    @memcpy(out_cfv_p2, &worker_out_p2[0]);
 }
+
+const WalkJob = struct {
+    ctx: *SolveContext,
+    root: *Node,
+    p1_reach: []const f32,
+    p2_reach: []const f32,
+    out_cfv_p1: *[NUM_HANDS]f32,
+    out_cfv_p2: *[NUM_HANDS]f32,
+    random: std.Random,
+    iter_weight: f32,
+    deltas: *WorkerDeltas,
+
+    fn run(self: *WalkJob) void {
+        walk(self.ctx, self.root, self.p1_reach, self.p2_reach, self.out_cfv_p1, self.out_cfv_p2, self.random, self.iter_weight, self.deltas);
+    }
+};
 
 // Single recursive pass. Computes per-hand CFV for both players, then updates
 // the acting player's regrets and strategy_sum using vanilla CFR's update rule.
@@ -624,6 +817,7 @@ fn walk(
     out_cfv_p2: []f32,
     random: std.Random,
     iter_weight: f32,
+    deltas: ?*WorkerDeltas,
 ) void {
     const hands = ctx.solver.hand_table.all_hands;
 
@@ -673,7 +867,7 @@ fn walk(
         // rather than another decision node.
         const chance_edge = &node.edges[0];
         if (chance_edge.child) |child| {
-            walk(ctx, child, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight);
+            walk(ctx, child, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, deltas);
         } else {
             ctx.terminalShowdown(chance_edge, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2);
         }
@@ -756,7 +950,7 @@ fn walk(
         const cfv_p2_slot = child_cfv_p2[off .. off + NUM_HANDS];
 
         if (edge.child) |child| {
-            walk(ctx, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot, random, iter_weight);
+            walk(ctx, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot, random, iter_weight, deltas);
         } else {
             switch (edge.action) {
                 .FOLD => ctx.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot),
@@ -798,7 +992,40 @@ fn walk(
     // CFR+ regret matching: cumulative regret is clipped to non-negative after
     // each increment. Strategy averaging is linearly weighted by iter_weight so
     // late iterations (near-equilibrium) dominate over early uniform play.
-    if (actor_isp1) {
+    //
+    // Parallel path: when `deltas` is non-null, write the per-worker delta
+    // instead of mutating the shared `node.regrets` / `node.strategy_sum`. The
+    // CFR+ clamp is applied later in `mergeDeltas` against the merged sum, not
+    // per-walk (otherwise N workers clamping independently would lose mass).
+    if (deltas) |d| {
+        // Workers `+=` into their delta slots. `mergeDeltas` zeros the slots
+        // after reading, so each iteration starts from zero without a separate
+        // reset pass. (CS-CFR samples different chance paths each iter, so we
+        // can't rely on the same set of decision nodes being touched.)
+        const r_delta = d.regret_delta.get(node).?;
+        const s_delta = d.strategy_sum_delta.get(node).?;
+        if (actor_isp1) {
+            var a: usize = 0;
+            while (a < n_actions) : (a += 1) {
+                const off = a * NUM_HANDS;
+                var i: usize = 0;
+                while (i < NUM_HANDS) : (i += 1) {
+                    r_delta[off + i] += child_cfv_p1[off + i] - out_cfv_p1[i];
+                    s_delta[off + i] += iter_weight * p1_reach[i] * strategy[off + i];
+                }
+            }
+        } else {
+            var a: usize = 0;
+            while (a < n_actions) : (a += 1) {
+                const off = a * NUM_HANDS;
+                var i: usize = 0;
+                while (i < NUM_HANDS) : (i += 1) {
+                    r_delta[off + i] += child_cfv_p2[off + i] - out_cfv_p2[i];
+                    s_delta[off + i] += iter_weight * p2_reach[i] * strategy[off + i];
+                }
+            }
+        }
+    } else if (actor_isp1) {
         var a: usize = 0;
         while (a < n_actions) : (a += 1) {
             const off = a * NUM_HANDS;
@@ -1516,7 +1743,7 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     var prng = std.Random.DefaultPrng.init(42);
-    solve(&solver, root, 200, prng.random(), &cfv_p1, &cfv_p2);
+    try solve(&solver, temp_allocator, root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
     // AA always beats KK on this board. At NE p2 folds to any p1 bet and p1
     // can also just check it down — either way p1's root CFV is exactly +25
@@ -1573,7 +1800,7 @@ test "averageStrategy: KK folds to p1's bet on AA-vs-KK river" {
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     var prng = std.Random.DefaultPrng.init(42);
-    solve(&solver, root, 500, prng.random(), &cfv_p1, &cfv_p2);
+    try solve(&solver, temp_allocator, root, 500, prng.random(), &cfv_p1, &cfv_p2);
 
     // Find a p1 BET edge at the root; descend into p2's facing-bet node.
     var bet_edge: ?*Edge = null;
@@ -1665,7 +1892,7 @@ test "Solver.solve: polarized vs condensed river" {
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     var prng = std.Random.DefaultPrng.init(42);
-    solve(&solver, root, 200, prng.random(), &cfv_p1, &cfv_p2);
+    try solve(&solver, temp_allocator, root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
     const expl = try exploitability(&solver, root);
     // Vanilla CFR baseline left this in the single-digit range; CFR+ with
@@ -1720,7 +1947,7 @@ test "Solver.solve: turn-start AA vs KK — chance node enumeration" {
 
     // Just run a few iterations to verify it doesn't crash and handles chance.
     var prng = std.Random.DefaultPrng.init(42);
-    solve(&solver, root, 10, prng.random(), &cfv_p1, &cfv_p2);
+    try solve(&solver, temp_allocator, root, 10, prng.random(), &cfv_p1, &cfv_p2);
 
     // AA still mostly beats KK, though some river cards could change that.
     // We just want to see it run through the chance nodes.
@@ -1773,7 +2000,7 @@ test "walk: truncated chance leaf uses all-in equity evaluator" {
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     var prng = std.Random.DefaultPrng.init(42);
     var ctx = SolveContext.initOnSolver(&solver);
-    walk(&ctx, &leaf_node, &solver.p1_reach, &solver.p2_reach, &cfv_p1, &cfv_p2, prng.random(), 1.0);
+    walk(&ctx, &leaf_node, &solver.p1_reach, &solver.p2_reach, &cfv_p1, &cfv_p2, prng.random(), 1.0, null);
 
     const expected = @as(f32, 125.0) * @as(f32, 40.0) / @as(f32, 46.0);
     try std.testing.expectApproxEqAbs(expected, cfv_p1[aa_idx], 1e-3);

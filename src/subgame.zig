@@ -149,8 +149,8 @@ pub const Subgame = struct {
         self.arena.deinit();
     }
 
-    pub fn solve(self: *Subgame, iterations: usize, random: std.Random) void {
-        cfr.solve(&self.solver, self.root, iterations, random, &self.cfv_p1, &self.cfv_p2);
+    pub fn solve(self: *Subgame, iterations: usize, random: std.Random) !void {
+        try cfr.solve(&self.solver, self.allocator, self.root, iterations, random, &self.cfv_p1, &self.cfv_p2);
     }
 
     pub fn exploitability(self: *Subgame) !f32 {
@@ -223,7 +223,7 @@ pub const SubgameManager = struct {
 
         var flop = try Subgame.init(self.allocator, root_state, board, reach, .{ .truncate_after = .FLOP });
         errdefer flop.deinit();
-        flop.solve(iterations, random);
+        try flop.solve(iterations, random);
 
         self.flop = flop;
         try self.refreshChanceSeeds();
@@ -269,7 +269,7 @@ pub const SubgameManager = struct {
             .{ .truncate_after = .TURN },
         );
         errdefer turn.deinit();
-        turn.solve(iterations, random);
+        try turn.solve(iterations, random);
         return turn;
     }
 
@@ -315,7 +315,7 @@ pub fn solveRiverFromSeed(
 ) !Subgame {
     var river = try seed.buildNextStreetSubgame(allocator, turn_board, river_card, .{});
     errdefer river.deinit();
-    river.solve(iterations, random);
+    try river.solve(iterations, random);
     return river;
 }
 
@@ -655,9 +655,9 @@ test "verification: turn re-solve matches full turn all-in response strategy" {
     defer trunc_turn.deinit();
 
     var full_prng = std.Random.DefaultPrng.init(43);
-    full_turn.solve(20, full_prng.random());
+    try full_turn.solve(20, full_prng.random());
     var trunc_prng = std.Random.DefaultPrng.init(43);
-    trunc_turn.solve(20, trunc_prng.random());
+    try trunc_turn.solve(20, trunc_prng.random());
 
     const full_allin = findFirst(full_turn.root.edges, .ALLIN).?;
     const trunc_allin = findFirst(trunc_turn.root.edges, .ALLIN).?;
@@ -816,7 +816,7 @@ test "verification: polarized vs condensed compact truncated game exploitability
     var prng = std.Random.DefaultPrng.init(42);
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
-    cfr.solve(&solver, &root, 200, prng.random(), &cfv_p1, &cfv_p2);
+    try cfr.solve(&solver, allocator, &root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
     try std.testing.expect(try cfr.exploitability(&solver, &root) < 1.0);
 }
