@@ -27,6 +27,54 @@ const MAX_CHANCE_DEPTH: usize = 3;
 // dominate, so we cap regardless of CPU count.
 const MAX_PARALLEL_WORKERS: usize = 8;
 
+// Upper bound on recursion depth in `walk` / `brWalk`. With current betting
+// rules the deepest reachable path is bounded by 3 streets × (≤2 bets +
+// 1 response) + chance/showdown nodes, which empirically tops out around 15.
+// 32 leaves plenty of headroom; the assert at function entry catches any
+// future tree-shape change before it silently corrupts scratch slots.
+const MAX_WALK_DEPTH: usize = 32;
+
+// Per-walk-frame scratch buffers, pre-allocated on the heap so the walk
+// recursion no longer puts ~100 KB on the call stack per depth. One
+// `WalkScratch` (= `MAX_WALK_DEPTH` frames) is owned by each `SolveContext`
+// — workers don't share scratch with the dispatcher or with each other.
+//
+// Field naming reflects walk's usage; brWalk reuses the same memory for its
+// equivalents (avg_strategy ↔ strategy, BR-branch full child_cfv ↔
+// child_cfv_p1, opponent-branch single child_cfv ↔ br_child_cfv, dummy ↔
+// br_dummy). walk and brWalk never execute concurrently on the same context.
+const ScratchFrame = struct {
+    strategy: [MAX_ACTIONS * NUM_HANDS]f32,
+    child_cfv_p1: [MAX_ACTIONS * NUM_HANDS]f32,
+    child_cfv_p2: [MAX_ACTIONS * NUM_HANDS]f32,
+    new_p1_reach: [NUM_HANDS]f32,
+    new_p2_reach: [NUM_HANDS]f32,
+    masked_p1_reach: [NUM_HANDS]f32,
+    masked_p2_reach: [NUM_HANDS]f32,
+    // brWalk-only single-action scratch (opponent decision branch + dummy
+    // sink for irrelevant-player CFV writes at terminal helpers).
+    br_child_cfv: [NUM_HANDS]f32,
+    br_dummy: [NUM_HANDS]f32,
+};
+
+pub const WalkScratch = struct {
+    frames: []ScratchFrame,
+
+    /// Use for SolveContexts that will only call terminal helpers (no
+    /// recursive walk/brWalk descent). Costs nothing — empty slice.
+    pub const empty: WalkScratch = .{ .frames = &.{} };
+
+    pub fn init(allocator: Allocator) !WalkScratch {
+        const frames = try allocator.alloc(ScratchFrame, MAX_WALK_DEPTH);
+        return .{ .frames = frames };
+    }
+
+    pub fn deinit(self: *WalkScratch, allocator: Allocator) void {
+        if (self.frames.len > 0) allocator.free(self.frames);
+        self.frames = &.{};
+    }
+};
+
 // Per-iter wall-clock breakdown for the parallel `cfr.solve` path. `join_ns`
 // dominates the walk-time budget — the main thread is blocked in
 // `threads[j].join()` while workers run, so it captures max(walk_time) plus
@@ -383,7 +431,8 @@ pub const Solver = struct {
         out_cfv_p1: []f32,
         out_cfv_p2: []f32,
     ) void {
-        var ctx = SolveContext.initOnSolver(self);
+        var empty_scratch = WalkScratch.empty;
+        var ctx = SolveContext.initOnSolver(self, &empty_scratch);
         ctx.terminalFold(edge, folder_isp1, p1_reach, p2_reach, out_cfv_p1, out_cfv_p2);
     }
 
@@ -395,7 +444,8 @@ pub const Solver = struct {
         out_cfv_p1: []f32,
         out_cfv_p2: []f32,
     ) void {
-        var ctx = SolveContext.initOnSolver(self);
+        var empty_scratch = WalkScratch.empty;
+        var ctx = SolveContext.initOnSolver(self, &empty_scratch);
         ctx.terminalShowdown(edge, p1_reach, p2_reach, out_cfv_p1, out_cfv_p2);
     }
 
@@ -407,7 +457,8 @@ pub const Solver = struct {
         out_cfv_p1: []f32,
         out_cfv_p2: []f32,
     ) void {
-        var ctx = SolveContext.initOnSolver(self);
+        var empty_scratch = WalkScratch.empty;
+        var ctx = SolveContext.initOnSolver(self, &empty_scratch);
         ctx.allInEquityLeaf(edge, p1_reach, p2_reach, out_cfv_p1, out_cfv_p2);
     }
 };
@@ -429,28 +480,33 @@ pub const SolveContext = struct {
     /// contexts so recursive chance descents stay serial (no exponential
     /// thread explosion).
     allow_parallel: bool,
+    /// Heap-resident per-frame scratch for walk / brWalk. Indexed by
+    /// recursion depth. Caller owns the lifetime; SolveContext just borrows.
+    scratch: *WalkScratch,
 
     /// Default ctor: a context that mutates the solver's own board_ctx in place.
-    pub fn initOnSolver(solver: *Solver) SolveContext {
+    pub fn initOnSolver(solver: *Solver, scratch: *WalkScratch) SolveContext {
         return .{
             .solver = solver,
             .board_ctx = &solver.board_ctx,
             .snapshots = undefined,
             .chance_depth = 0,
             .allow_parallel = true,
+            .scratch = scratch,
         };
     }
 
     /// Worker-style ctor: same Solver (immutable across workers) but a
     /// caller-owned BoardContext so multiple contexts can mutate board state
     /// without colliding. Caller is responsible for the BoardContext lifetime.
-    pub fn initOnBoardContext(solver: *Solver, board_ctx: *BoardContext) SolveContext {
+    pub fn initOnBoardContext(solver: *Solver, board_ctx: *BoardContext, scratch: *WalkScratch) SolveContext {
         return .{
             .solver = solver,
             .board_ctx = board_ctx,
             .snapshots = undefined,
             .chance_depth = 0,
             .allow_parallel = true,
+            .scratch = scratch,
         };
     }
 
@@ -889,12 +945,15 @@ pub fn solve(
         @min(self.max_workers, MAX_PARALLEL_WORKERS);
 
     if (n_workers <= 1 or iterations == 0) {
-        // Serial fallback. No deltas, no thread spawn.
-        var ctx = SolveContext.initOnSolver(self);
+        // Serial fallback. No deltas, no thread spawn. Still needs a scratch
+        // since `walk` reads its frame buffers unconditionally.
+        var serial_scratch = try WalkScratch.init(allocator);
+        defer serial_scratch.deinit(allocator);
+        var ctx = SolveContext.initOnSolver(self, &serial_scratch);
         var iter: usize = 0;
         while (iter < iterations) : (iter += 1) {
             const iter_weight: f32 = @floatFromInt(iter + 1);
-            walk(&ctx, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, null);
+            walk(&ctx, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, null, 0);
         }
         return;
     }
@@ -904,6 +963,7 @@ pub fn solve(
     var worker_boards: [MAX_PARALLEL_WORKERS]BoardContext = undefined;
     var worker_ctxs: [MAX_PARALLEL_WORKERS]SolveContext = undefined;
     var worker_deltas: [MAX_PARALLEL_WORKERS]WorkerDeltas = undefined;
+    var worker_scratches: [MAX_PARALLEL_WORKERS]WalkScratch = undefined;
     var worker_prngs: [MAX_PARALLEL_WORKERS]std.Random.DefaultPrng = undefined;
     var worker_out_p1: [MAX_PARALLEL_WORKERS][NUM_HANDS]f32 = undefined;
     var worker_out_p2: [MAX_PARALLEL_WORKERS][NUM_HANDS]f32 = undefined;
@@ -913,19 +973,31 @@ pub fn solve(
     // results are reproducible given a fixed input seed.
     const base_seed: u64 = random.int(u64);
 
-    var initialized: usize = 0;
-    errdefer for (0..initialized) |t| worker_deltas[t].deinit();
+    // Track scratch / delta init separately so an error mid-loop frees only
+    // what was actually allocated (the two allocations within one iteration
+    // can each fail independently).
+    var scratches_init: usize = 0;
+    var deltas_init: usize = 0;
+    errdefer {
+        for (0..deltas_init) |i| worker_deltas[i].deinit();
+        for (0..scratches_init) |i| worker_scratches[i].deinit(allocator);
+    }
     var t: usize = 0;
     while (t < n_workers) : (t += 1) {
         worker_boards[t] = self.board_ctx;
-        worker_ctxs[t] = SolveContext.initOnBoardContext(self, &worker_boards[t]);
+        worker_scratches[t] = try WalkScratch.init(allocator);
+        scratches_init = t + 1;
+        worker_ctxs[t] = SolveContext.initOnBoardContext(self, &worker_boards[t], &worker_scratches[t]);
         worker_ctxs[t].allow_parallel = false;
         worker_deltas[t] = try WorkerDeltas.init(allocator, root);
-        initialized = t + 1;
+        deltas_init = t + 1;
         worker_prngs[t] = std.Random.DefaultPrng.init(base_seed +% t);
         worker_ptrs[t] = &worker_deltas[t];
     }
-    defer for (0..n_workers) |i| worker_deltas[i].deinit();
+    defer {
+        for (0..n_workers) |i| worker_deltas[i].deinit();
+        for (0..n_workers) |i| worker_scratches[i].deinit(allocator);
+    }
 
     // Persistent worker pool: spawn once, dispatch each iter via an epoch
     // bump on a shared condvar. Replaces the previous per-iter spawn/join
@@ -976,11 +1048,13 @@ pub fn solve(
             pool.job_cv.broadcast(io);
             threads[0].join();
         }
-        var ctx2 = SolveContext.initOnSolver(self);
+        // Reuse worker_scratches[0] for the serial fallback — already
+        // allocated, will be freed by the outer defer.
+        var ctx2 = SolveContext.initOnSolver(self, &worker_scratches[0]);
         var iter2: usize = 0;
         while (iter2 < iterations) : (iter2 += 1) {
             const iter_weight: f32 = @floatFromInt(iter2 + 1);
-            walk(&ctx2, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, null);
+            walk(&ctx2, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, null, 0);
         }
         return;
     }
@@ -1066,7 +1140,7 @@ const WalkJob = struct {
     deltas: *WorkerDeltas,
 
     fn run(self: *WalkJob) void {
-        walk(self.ctx, self.root, self.p1_reach, self.p2_reach, self.out_cfv_p1, self.out_cfv_p2, self.random, self.iter_weight, self.deltas);
+        walk(self.ctx, self.root, self.p1_reach, self.p2_reach, self.out_cfv_p1, self.out_cfv_p2, self.random, self.iter_weight, self.deltas, 0);
     }
 };
 
@@ -1142,8 +1216,11 @@ fn walk(
     random: std.Random,
     iter_weight: f32,
     deltas: ?*WorkerDeltas,
+    depth: usize,
 ) void {
+    std.debug.assert(depth < MAX_WALK_DEPTH);
     const hands = ctx.solver.hand_table.all_hands;
+    const frame = &ctx.scratch.frames[depth];
 
     if (node.is_chance) {
         if (node.is_leaf) {
@@ -1174,13 +1251,11 @@ fn walk(
         // new board. Zero their reach before recursing so downstream regret /
         // strategy_sum updates don't accumulate mass for hands that aren't in
         // the player's effective range on this runout.
-        var masked_p1_reach: [NUM_HANDS]f32 = undefined;
-        var masked_p2_reach: [NUM_HANDS]f32 = undefined;
         for (0..NUM_HANDS) |i| {
             const h = hands[i];
             const keep = !handHitsCard(h, c);
-            masked_p1_reach[i] = if (keep) p1_reach[i] else 0;
-            masked_p2_reach[i] = if (keep) p2_reach[i] else 0;
+            frame.masked_p1_reach[i] = if (keep) p1_reach[i] else 0;
+            frame.masked_p2_reach[i] = if (keep) p2_reach[i] else 0;
         }
 
         // Recurse into the single chance child (Action.CHANCE).
@@ -1191,9 +1266,9 @@ fn walk(
         // rather than another decision node.
         const chance_edge = &node.edges[0];
         if (chance_edge.child) |child| {
-            walk(ctx, child, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, deltas);
+            walk(ctx, child, &frame.masked_p1_reach, &frame.masked_p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, deltas, depth + 1);
         } else {
-            ctx.terminalShowdown(chance_edge, &masked_p1_reach, &masked_p2_reach, out_cfv_p1, out_cfv_p2);
+            ctx.terminalShowdown(chance_edge, &frame.masked_p1_reach, &frame.masked_p2_reach, out_cfv_p1, out_cfv_p2);
         }
 
         // The sample is drawn uniformly from public cards. Per-hand CFVs need
@@ -1221,7 +1296,6 @@ fn walk(
     const actor_isp1 = node.isp1;
 
     // --- 1. Regret matching → current strategy (per-hand). ---
-    var strategy: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
     {
         var i: usize = 0;
         while (i < NUM_HANDS) : (i += 1) {
@@ -1235,50 +1309,45 @@ fn walk(
                 a = 0;
                 while (a < n_actions) : (a += 1) {
                     const r = node.regrets[a * NUM_HANDS + i];
-                    strategy[a * NUM_HANDS + i] = if (r > 0) r / pos_sum else 0;
+                    frame.strategy[a * NUM_HANDS + i] = if (r > 0) r / pos_sum else 0;
                 }
             } else {
                 const uniform: f32 = 1.0 / @as(f32, @floatFromInt(n_actions));
                 a = 0;
                 while (a < n_actions) : (a += 1) {
-                    strategy[a * NUM_HANDS + i] = uniform;
+                    frame.strategy[a * NUM_HANDS + i] = uniform;
                 }
             }
         }
     }
 
     // --- 2. Recurse into each child, filling per-action CFV slots. ---
-    var child_cfv_p1: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
-    var child_cfv_p2: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
-    var new_p1_reach: [NUM_HANDS]f32 = undefined;
-    var new_p2_reach: [NUM_HANDS]f32 = undefined;
-
     for (node.edges, 0..) |*edge, a| {
         const off = a * NUM_HANDS;
         // Only the actor's reach gets scaled by their strategy on this action.
         if (actor_isp1) {
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                new_p1_reach[i] = p1_reach[i] * strategy[off + i];
-                new_p2_reach[i] = p2_reach[i];
+                frame.new_p1_reach[i] = p1_reach[i] * frame.strategy[off + i];
+                frame.new_p2_reach[i] = p2_reach[i];
             }
         } else {
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                new_p1_reach[i] = p1_reach[i];
-                new_p2_reach[i] = p2_reach[i] * strategy[off + i];
+                frame.new_p1_reach[i] = p1_reach[i];
+                frame.new_p2_reach[i] = p2_reach[i] * frame.strategy[off + i];
             }
         }
 
-        const cfv_p1_slot = child_cfv_p1[off .. off + NUM_HANDS];
-        const cfv_p2_slot = child_cfv_p2[off .. off + NUM_HANDS];
+        const cfv_p1_slot = frame.child_cfv_p1[off .. off + NUM_HANDS];
+        const cfv_p2_slot = frame.child_cfv_p2[off .. off + NUM_HANDS];
 
         if (edge.child) |child| {
-            walk(ctx, child, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot, random, iter_weight, deltas);
+            walk(ctx, child, &frame.new_p1_reach, &frame.new_p2_reach, cfv_p1_slot, cfv_p2_slot, random, iter_weight, deltas, depth + 1);
         } else {
             switch (edge.action) {
-                .FOLD => ctx.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot),
-                .CHECK, .CALL => ctx.terminalShowdown(edge, &new_p1_reach, &new_p2_reach, cfv_p1_slot, cfv_p2_slot),
+                .FOLD => ctx.terminalFold(edge, actor_isp1, &frame.new_p1_reach, &frame.new_p2_reach, cfv_p1_slot, cfv_p2_slot),
+                .CHECK, .CALL => ctx.terminalShowdown(edge, &frame.new_p1_reach, &frame.new_p2_reach, cfv_p1_slot, cfv_p2_slot),
                 else => unreachable,
             }
         }
@@ -1296,8 +1365,8 @@ fn walk(
             const off = a * NUM_HANDS;
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                out_cfv_p1[i] += strategy[off + i] * child_cfv_p1[off + i];
-                out_cfv_p2[i] += child_cfv_p2[off + i];
+                out_cfv_p1[i] += frame.strategy[off + i] * frame.child_cfv_p1[off + i];
+                out_cfv_p2[i] += frame.child_cfv_p2[off + i];
             }
         }
     } else {
@@ -1306,8 +1375,8 @@ fn walk(
             const off = a * NUM_HANDS;
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                out_cfv_p1[i] += child_cfv_p1[off + i];
-                out_cfv_p2[i] += strategy[off + i] * child_cfv_p2[off + i];
+                out_cfv_p1[i] += frame.child_cfv_p1[off + i];
+                out_cfv_p2[i] += frame.strategy[off + i] * frame.child_cfv_p2[off + i];
             }
         }
     }
@@ -1334,8 +1403,8 @@ fn walk(
                 const off = a * NUM_HANDS;
                 var i: usize = 0;
                 while (i < NUM_HANDS) : (i += 1) {
-                    r_delta[off + i] += child_cfv_p1[off + i] - out_cfv_p1[i];
-                    s_delta[off + i] += iter_weight * p1_reach[i] * strategy[off + i];
+                    r_delta[off + i] += frame.child_cfv_p1[off + i] - out_cfv_p1[i];
+                    s_delta[off + i] += iter_weight * p1_reach[i] * frame.strategy[off + i];
                 }
             }
         } else {
@@ -1344,8 +1413,8 @@ fn walk(
                 const off = a * NUM_HANDS;
                 var i: usize = 0;
                 while (i < NUM_HANDS) : (i += 1) {
-                    r_delta[off + i] += child_cfv_p2[off + i] - out_cfv_p2[i];
-                    s_delta[off + i] += iter_weight * p2_reach[i] * strategy[off + i];
+                    r_delta[off + i] += frame.child_cfv_p2[off + i] - out_cfv_p2[i];
+                    s_delta[off + i] += iter_weight * p2_reach[i] * frame.strategy[off + i];
                 }
             }
         }
@@ -1355,9 +1424,9 @@ fn walk(
             const off = a * NUM_HANDS;
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                const updated = node.regrets[off + i] + (child_cfv_p1[off + i] - out_cfv_p1[i]);
+                const updated = node.regrets[off + i] + (frame.child_cfv_p1[off + i] - out_cfv_p1[i]);
                 node.regrets[off + i] = if (updated > 0) updated else 0;
-                node.strategy_sum[off + i] += iter_weight * p1_reach[i] * strategy[off + i];
+                node.strategy_sum[off + i] += iter_weight * p1_reach[i] * frame.strategy[off + i];
             }
         }
     } else {
@@ -1366,9 +1435,9 @@ fn walk(
             const off = a * NUM_HANDS;
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
-                const updated = node.regrets[off + i] + (child_cfv_p2[off + i] - out_cfv_p2[i]);
+                const updated = node.regrets[off + i] + (frame.child_cfv_p2[off + i] - out_cfv_p2[i]);
                 node.regrets[off + i] = if (updated > 0) updated else 0;
-                node.strategy_sum[off + i] += iter_weight * p2_reach[i] * strategy[off + i];
+                node.strategy_sum[off + i] += iter_weight * p2_reach[i] * frame.strategy[off + i];
             }
         }
     }
@@ -1380,21 +1449,24 @@ fn walk(
 // into out_cfv. Used to measure exploitability.
 fn brWalk(
     ctx: *SolveContext,
+    allocator: Allocator,
     node: *Node,
     p1_reach: []const f32,
     p2_reach: []const f32,
     br_isp1: bool,
     out_cfv: []f32,
+    depth: usize,
 ) void {
+    std.debug.assert(depth < MAX_WALK_DEPTH);
     const hands = ctx.solver.hand_table.all_hands;
+    const frame = &ctx.scratch.frames[depth];
 
     if (node.is_chance) {
         if (node.is_leaf) {
-            var dummy: [NUM_HANDS]f32 = undefined;
             if (br_isp1) {
-                ctx.allInEquityLeaf(&node.edges[0], p1_reach, p2_reach, out_cfv, &dummy);
+                ctx.allInEquityLeaf(&node.edges[0], p1_reach, p2_reach, out_cfv, &frame.br_dummy);
             } else {
-                ctx.allInEquityLeaf(&node.edges[0], p1_reach, p2_reach, &dummy, out_cfv);
+                ctx.allInEquityLeaf(&node.edges[0], p1_reach, p2_reach, &frame.br_dummy, out_cfv);
             }
             return;
         }
@@ -1427,58 +1499,74 @@ fn brWalk(
         if (n_workers <= 1) {
             // Serial path: run the worker body once over the full legal slice.
             @memset(out_cfv, 0);
-            brChanceWorker(ctx, node, saved_board, card_to_fill_idx, legal_cards[0..n_legal], p1_reach, p2_reach, br_isp1, out_cfv);
+            brChanceWorker(ctx, allocator, node, saved_board, card_to_fill_idx, legal_cards[0..n_legal], p1_reach, p2_reach, br_isp1, out_cfv, depth);
         } else {
-            // Parallel path: per-worker BoardContext + SolveContext + output slot.
+            // Parallel path: per-worker BoardContext + SolveContext + scratch + output slot.
+            // brWalk is exploitability-only and rare; per-call heap allocation
+            // for the worker scratches is the simplest correct option (each
+            // worker recurses from depth 0 into its own scratch).
             var worker_boards: [MAX_PARALLEL_WORKERS]BoardContext = undefined;
             var worker_ctxs: [MAX_PARALLEL_WORKERS]SolveContext = undefined;
+            var worker_scratches: [MAX_PARALLEL_WORKERS]WalkScratch = undefined;
             var worker_outs: [MAX_PARALLEL_WORKERS][NUM_HANDS]f32 = undefined;
             var threads: [MAX_PARALLEL_WORKERS]std.Thread = undefined;
             var jobs: [MAX_PARALLEL_WORKERS]BrChanceJob = undefined;
 
-            var t: usize = 0;
-            while (t < n_workers) : (t += 1) {
-                const start = (t * n_legal) / n_workers;
-                const end = ((t + 1) * n_legal) / n_workers;
-
-                worker_boards[t] = saved_board_ctx;
-                worker_ctxs[t] = SolveContext.initOnBoardContext(ctx.solver, &worker_boards[t]);
-                worker_ctxs[t].allow_parallel = false;
-
-                jobs[t] = .{
-                    .ctx = &worker_ctxs[t],
-                    .node = node,
-                    .saved_board = saved_board,
-                    .card_to_fill_idx = card_to_fill_idx,
-                    .legal_cards = legal_cards[start..end],
-                    .p1_reach = p1_reach,
-                    .p2_reach = p2_reach,
-                    .br_isp1 = br_isp1,
-                    .out_cfv = &worker_outs[t],
-                };
-
-                threads[t] = std.Thread.spawn(.{}, BrChanceJob.run, .{&jobs[t]}) catch {
-                    // Spawn failed: run synchronously inline so we don't lose the slice.
-                    BrChanceJob.run(&jobs[t]);
-                    // Join any threads already spawned, then bail out of the loop.
-                    var j: usize = 0;
-                    while (j < t) : (j += 1) threads[j].join();
-                    break;
-                };
+            // Allocate all worker scratches up front. On allocation failure
+            // fall back to serial — it's an exploitability path, correctness
+            // matters more than parallel speedup.
+            var allocated: usize = 0;
+            errdefer for (0..allocated) |i| worker_scratches[i].deinit(allocator);
+            while (allocated < n_workers) {
+                worker_scratches[allocated] = WalkScratch.init(allocator) catch break;
+                allocated += 1;
             }
-            // If we exited the spawn loop normally, t == n_workers. If a spawn
-            // failed, the catch block joined earlier threads, ran the failing
-            // slice synchronously, and broke; t names the next index to skip.
-            const joined_target = if (t == n_workers) n_workers else t;
-            var j: usize = 0;
-            while (j < joined_target) : (j += 1) threads[j].join();
+            if (allocated < n_workers) {
+                for (0..allocated) |i| worker_scratches[i].deinit(allocator);
+                @memset(out_cfv, 0);
+                brChanceWorker(ctx, allocator, node, saved_board, card_to_fill_idx, legal_cards[0..n_legal], p1_reach, p2_reach, br_isp1, out_cfv, depth);
+            } else {
+                defer for (0..n_workers) |i| worker_scratches[i].deinit(allocator);
 
-            // Aggregate worker slots into out_cfv.
-            for (0..NUM_HANDS) |i| {
-                var sum: f32 = 0;
-                var k: usize = 0;
-                while (k < n_workers) : (k += 1) sum += worker_outs[k][i];
-                out_cfv[i] = sum;
+                var t: usize = 0;
+                while (t < n_workers) : (t += 1) {
+                    const start = (t * n_legal) / n_workers;
+                    const end = ((t + 1) * n_legal) / n_workers;
+
+                    worker_boards[t] = saved_board_ctx;
+                    worker_ctxs[t] = SolveContext.initOnBoardContext(ctx.solver, &worker_boards[t], &worker_scratches[t]);
+                    worker_ctxs[t].allow_parallel = false;
+
+                    jobs[t] = .{
+                        .ctx = &worker_ctxs[t],
+                        .allocator = allocator,
+                        .node = node,
+                        .saved_board = saved_board,
+                        .card_to_fill_idx = card_to_fill_idx,
+                        .legal_cards = legal_cards[start..end],
+                        .p1_reach = p1_reach,
+                        .p2_reach = p2_reach,
+                        .br_isp1 = br_isp1,
+                        .out_cfv = &worker_outs[t],
+                    };
+
+                    threads[t] = std.Thread.spawn(.{}, BrChanceJob.run, .{&jobs[t]}) catch {
+                        BrChanceJob.run(&jobs[t]);
+                        var j: usize = 0;
+                        while (j < t) : (j += 1) threads[j].join();
+                        break;
+                    };
+                }
+                const joined_target = if (t == n_workers) n_workers else t;
+                var j: usize = 0;
+                while (j < joined_target) : (j += 1) threads[j].join();
+
+                for (0..NUM_HANDS) |i| {
+                    var sum: f32 = 0;
+                    var k: usize = 0;
+                    while (k < n_workers) : (k += 1) sum += worker_outs[k][i];
+                    out_cfv[i] = sum;
+                }
             }
         }
 
@@ -1501,34 +1589,33 @@ fn brWalk(
     if (actor_isp1 == br_isp1) {
         // BR player's decision: walk every action with unchanged reach, then
         // pick the per-hand max. Opponent's reach doesn't change here either,
-        // since BR plays a pure (per-hand) strategy.
-        var child_cfv: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
-        var dummy: [NUM_HANDS]f32 = undefined;
+        // since BR plays a pure (per-hand) strategy. Reuses the walk frame's
+        // child_cfv_p1 (same shape: MAX_ACTIONS × NUM_HANDS) and br_dummy.
         for (node.edges, 0..) |*edge, a| {
             const off = a * NUM_HANDS;
-            const slot = child_cfv[off .. off + NUM_HANDS];
+            const slot = frame.child_cfv_p1[off .. off + NUM_HANDS];
             if (edge.child) |child| {
-                brWalk(ctx, child, p1_reach, p2_reach, br_isp1, slot);
+                brWalk(ctx, allocator, child, p1_reach, p2_reach, br_isp1, slot, depth + 1);
             } else if (br_isp1) {
                 switch (edge.action) {
-                    .FOLD => ctx.terminalFold(edge, actor_isp1, p1_reach, p2_reach, slot, &dummy),
-                    .CHECK, .CALL => ctx.terminalShowdown(edge, p1_reach, p2_reach, slot, &dummy),
+                    .FOLD => ctx.terminalFold(edge, actor_isp1, p1_reach, p2_reach, slot, &frame.br_dummy),
+                    .CHECK, .CALL => ctx.terminalShowdown(edge, p1_reach, p2_reach, slot, &frame.br_dummy),
                     else => unreachable,
                 }
             } else {
                 switch (edge.action) {
-                    .FOLD => ctx.terminalFold(edge, actor_isp1, p1_reach, p2_reach, &dummy, slot),
-                    .CHECK, .CALL => ctx.terminalShowdown(edge, p1_reach, p2_reach, &dummy, slot),
+                    .FOLD => ctx.terminalFold(edge, actor_isp1, p1_reach, p2_reach, &frame.br_dummy, slot),
+                    .CHECK, .CALL => ctx.terminalShowdown(edge, p1_reach, p2_reach, &frame.br_dummy, slot),
                     else => unreachable,
                 }
             }
         }
         var i: usize = 0;
         while (i < NUM_HANDS) : (i += 1) {
-            var best: f32 = child_cfv[i];
+            var best: f32 = frame.child_cfv_p1[i];
             var a: usize = 1;
             while (a < n_actions) : (a += 1) {
-                const v = child_cfv[a * NUM_HANDS + i];
+                const v = frame.child_cfv_p1[a * NUM_HANDS + i];
                 if (v > best) best = v;
             }
             out_cfv[i] = best;
@@ -1536,7 +1623,8 @@ fn brWalk(
     } else {
         // Opponent's decision: normalize strategy_sum → average strategy, scale
         // opponent's reach by it per action, and sum the child CFVs.
-        var avg_strategy: [MAX_ACTIONS * NUM_HANDS]f32 = undefined;
+        // Reuses frame.strategy (same shape as avg_strategy) and the single-
+        // action br_child_cfv / br_dummy slots.
         {
             var i: usize = 0;
             while (i < NUM_HANDS) : (i += 1) {
@@ -1546,56 +1634,51 @@ fn brWalk(
                 if (sum > 0) {
                     a = 0;
                     while (a < n_actions) : (a += 1) {
-                        avg_strategy[a * NUM_HANDS + i] = node.strategy_sum[a * NUM_HANDS + i] / sum;
+                        frame.strategy[a * NUM_HANDS + i] = node.strategy_sum[a * NUM_HANDS + i] / sum;
                     }
                 } else {
                     const uniform: f32 = 1.0 / @as(f32, @floatFromInt(n_actions));
                     a = 0;
-                    while (a < n_actions) : (a += 1) avg_strategy[a * NUM_HANDS + i] = uniform;
+                    while (a < n_actions) : (a += 1) frame.strategy[a * NUM_HANDS + i] = uniform;
                 }
             }
         }
 
         @memset(out_cfv, 0);
-        var new_p1_reach: [NUM_HANDS]f32 = undefined;
-        var new_p2_reach: [NUM_HANDS]f32 = undefined;
-        var child_cfv: [NUM_HANDS]f32 = undefined;
-        var dummy: [NUM_HANDS]f32 = undefined;
-
         for (node.edges, 0..) |*edge, a| {
             const off = a * NUM_HANDS;
             if (br_isp1) {
                 var i: usize = 0;
                 while (i < NUM_HANDS) : (i += 1) {
-                    new_p1_reach[i] = p1_reach[i];
-                    new_p2_reach[i] = p2_reach[i] * avg_strategy[off + i];
+                    frame.new_p1_reach[i] = p1_reach[i];
+                    frame.new_p2_reach[i] = p2_reach[i] * frame.strategy[off + i];
                 }
             } else {
                 var i: usize = 0;
                 while (i < NUM_HANDS) : (i += 1) {
-                    new_p1_reach[i] = p1_reach[i] * avg_strategy[off + i];
-                    new_p2_reach[i] = p2_reach[i];
+                    frame.new_p1_reach[i] = p1_reach[i] * frame.strategy[off + i];
+                    frame.new_p2_reach[i] = p2_reach[i];
                 }
             }
 
             if (edge.child) |child| {
-                brWalk(ctx, child, &new_p1_reach, &new_p2_reach, br_isp1, &child_cfv);
+                brWalk(ctx, allocator, child, &frame.new_p1_reach, &frame.new_p2_reach, br_isp1, &frame.br_child_cfv, depth + 1);
             } else if (br_isp1) {
                 switch (edge.action) {
-                    .FOLD => ctx.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, &child_cfv, &dummy),
-                    .CHECK, .CALL => ctx.terminalShowdown(edge, &new_p1_reach, &new_p2_reach, &child_cfv, &dummy),
+                    .FOLD => ctx.terminalFold(edge, actor_isp1, &frame.new_p1_reach, &frame.new_p2_reach, &frame.br_child_cfv, &frame.br_dummy),
+                    .CHECK, .CALL => ctx.terminalShowdown(edge, &frame.new_p1_reach, &frame.new_p2_reach, &frame.br_child_cfv, &frame.br_dummy),
                     else => unreachable,
                 }
             } else {
                 switch (edge.action) {
-                    .FOLD => ctx.terminalFold(edge, actor_isp1, &new_p1_reach, &new_p2_reach, &dummy, &child_cfv),
-                    .CHECK, .CALL => ctx.terminalShowdown(edge, &new_p1_reach, &new_p2_reach, &dummy, &child_cfv),
+                    .FOLD => ctx.terminalFold(edge, actor_isp1, &frame.new_p1_reach, &frame.new_p2_reach, &frame.br_dummy, &frame.br_child_cfv),
+                    .CHECK, .CALL => ctx.terminalShowdown(edge, &frame.new_p1_reach, &frame.new_p2_reach, &frame.br_dummy, &frame.br_child_cfv),
                     else => unreachable,
                 }
             }
 
             var i: usize = 0;
-            while (i < NUM_HANDS) : (i += 1) out_cfv[i] += child_cfv[i];
+            while (i < NUM_HANDS) : (i += 1) out_cfv[i] += frame.br_child_cfv[i];
         }
     }
 }
@@ -1608,6 +1691,7 @@ fn brWalk(
 // calls don't collide.
 const BrChanceJob = struct {
     ctx: *SolveContext,
+    allocator: Allocator,
     node: *Node,
     saved_board: [5]Card,
     card_to_fill_idx: usize,
@@ -1619,7 +1703,8 @@ const BrChanceJob = struct {
 
     fn run(self: *BrChanceJob) void {
         @memset(self.out_cfv, 0);
-        brChanceWorker(self.ctx, self.node, self.saved_board, self.card_to_fill_idx, self.legal_cards, self.p1_reach, self.p2_reach, self.br_isp1, self.out_cfv);
+        // Parallel workers own a fresh scratch — start from depth 0.
+        brChanceWorker(self.ctx, self.allocator, self.node, self.saved_board, self.card_to_fill_idx, self.legal_cards, self.p1_reach, self.p2_reach, self.br_isp1, self.out_cfv, 0);
     }
 };
 
@@ -1629,6 +1714,7 @@ const BrChanceJob = struct {
 // pass back in `brWalk` after slot aggregation.
 fn brChanceWorker(
     ctx: *SolveContext,
+    allocator: Allocator,
     node: *Node,
     saved_board: [5]Card,
     card_to_fill_idx: usize,
@@ -1637,40 +1723,42 @@ fn brChanceWorker(
     p2_reach: []const f32,
     br_isp1: bool,
     out_cfv: []f32,
+    depth: usize,
 ) void {
+    // Non-recursive itself, but recurses into brWalk per legal card. Uses
+    // frames[depth] for the masked-reach + per-runout CFV buffers, then
+    // recurses into brWalk at depth+1. Safe to share frames[depth] with the
+    // caller because brWalk's chance branch doesn't touch its own frame
+    // fields before delegating here.
+    std.debug.assert(depth < MAX_WALK_DEPTH);
     const hands = ctx.solver.hand_table.all_hands;
-    var runout_cfv: [NUM_HANDS]f32 = undefined;
+    const frame = &ctx.scratch.frames[depth];
 
     for (legal_cards) |c| {
         var new_board = saved_board;
         new_board[card_to_fill_idx] = c;
         ctx.reinitForBoard(new_board);
 
-        var masked_p1: [NUM_HANDS]f32 = undefined;
-        var masked_p2: [NUM_HANDS]f32 = undefined;
         for (0..NUM_HANDS) |i| {
             const h = hands[i];
             const keep = !handHitsCard(h, c);
-            masked_p1[i] = if (keep) p1_reach[i] else 0;
-            masked_p2[i] = if (keep) p2_reach[i] else 0;
+            frame.masked_p1_reach[i] = if (keep) p1_reach[i] else 0;
+            frame.masked_p2_reach[i] = if (keep) p2_reach[i] else 0;
         }
 
         const chance_edge = &node.edges[0];
         if (chance_edge.child) |child| {
-            brWalk(ctx, child, &masked_p1, &masked_p2, br_isp1, &runout_cfv);
+            brWalk(ctx, allocator, child, &frame.masked_p1_reach, &frame.masked_p2_reach, br_isp1, &frame.br_child_cfv, depth + 1);
+        } else if (br_isp1) {
+            ctx.terminalShowdown(chance_edge, &frame.masked_p1_reach, &frame.masked_p2_reach, &frame.br_child_cfv, &frame.br_dummy);
         } else {
-            var dummy: [NUM_HANDS]f32 = undefined;
-            if (br_isp1) {
-                ctx.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &runout_cfv, &dummy);
-            } else {
-                ctx.terminalShowdown(chance_edge, &masked_p1, &masked_p2, &dummy, &runout_cfv);
-            }
+            ctx.terminalShowdown(chance_edge, &frame.masked_p1_reach, &frame.masked_p2_reach, &frame.br_dummy, &frame.br_child_cfv);
         }
 
         for (0..NUM_HANDS) |i| {
             const h = hands[i];
             if (handHitsCard(h, c)) continue;
-            out_cfv[i] += runout_cfv[i];
+            out_cfv[i] += frame.br_child_cfv[i];
         }
     }
 }
@@ -1702,26 +1790,29 @@ pub fn averageStrategy(node: *const Node, out: []f32) void {
     }
 }
 
-pub fn bestResponse(self: *Solver, root: *Node, br_isp1: bool, out_cfv: []f32) void {
-    var ctx = SolveContext.initOnSolver(self);
-    bestResponseWith(&ctx, root, br_isp1, out_cfv);
+pub fn bestResponse(self: *Solver, allocator: Allocator, root: *Node, br_isp1: bool, out_cfv: []f32) !void {
+    var scratch = try WalkScratch.init(allocator);
+    defer scratch.deinit(allocator);
+    var ctx = SolveContext.initOnSolver(self, &scratch);
+    bestResponseWith(&ctx, allocator, root, br_isp1, out_cfv);
 }
 
 /// Ctx-taking BR entry point. The reach vectors live on the Solver (immutable)
 /// so a caller-owned SolveContext over a separate BoardContext can run on its
 /// own thread without colliding with another worker.
-pub fn bestResponseWith(ctx: *SolveContext, root: *Node, br_isp1: bool, out_cfv: []f32) void {
-    brWalk(ctx, root, &ctx.solver.p1_reach, &ctx.solver.p2_reach, br_isp1, out_cfv);
+pub fn bestResponseWith(ctx: *SolveContext, allocator: Allocator, root: *Node, br_isp1: bool, out_cfv: []f32) void {
+    brWalk(ctx, allocator, root, &ctx.solver.p1_reach, &ctx.solver.p2_reach, br_isp1, out_cfv, 0);
 }
 
 const BrJob = struct {
     ctx: *SolveContext,
+    allocator: Allocator,
     root: *Node,
     br_isp1: bool,
     out_cfv: []f32,
 
     fn run(self: BrJob) void {
-        bestResponseWith(self.ctx, self.root, self.br_isp1, self.out_cfv);
+        bestResponseWith(self.ctx, self.allocator, self.root, self.br_isp1, self.out_cfv);
     }
 };
 
@@ -1730,19 +1821,25 @@ const BrJob = struct {
 // much can be extracted by exploiting the current average strategies.
 //
 // The two BR walks are independent and run on two threads. Each thread gets
-// its own SolveContext over its own BoardContext copy so neither side's chance
-// enumeration corrupts the other's board state.
-pub fn exploitability(self: *Solver, root: *Node) !f32 {
+// its own SolveContext over its own BoardContext copy and its own WalkScratch
+// so neither side's chance enumeration corrupts the other's state.
+pub fn exploitability(self: *Solver, allocator: Allocator, root: *Node) !f32 {
     var br_p1: [NUM_HANDS]f32 = undefined;
     var br_p2: [NUM_HANDS]f32 = undefined;
 
     var board_a: BoardContext = self.board_ctx;
     var board_b: BoardContext = self.board_ctx;
-    var ctx_a = SolveContext.initOnBoardContext(self, &board_a);
-    var ctx_b = SolveContext.initOnBoardContext(self, &board_b);
 
-    const job_a = BrJob{ .ctx = &ctx_a, .root = root, .br_isp1 = true, .out_cfv = &br_p1 };
-    const job_b = BrJob{ .ctx = &ctx_b, .root = root, .br_isp1 = false, .out_cfv = &br_p2 };
+    var scratch_a = try WalkScratch.init(allocator);
+    defer scratch_a.deinit(allocator);
+    var scratch_b = try WalkScratch.init(allocator);
+    defer scratch_b.deinit(allocator);
+
+    var ctx_a = SolveContext.initOnBoardContext(self, &board_a, &scratch_a);
+    var ctx_b = SolveContext.initOnBoardContext(self, &board_b, &scratch_b);
+
+    const job_a = BrJob{ .ctx = &ctx_a, .allocator = allocator, .root = root, .br_isp1 = true, .out_cfv = &br_p1 };
+    const job_b = BrJob{ .ctx = &ctx_b, .allocator = allocator, .root = root, .br_isp1 = false, .out_cfv = &br_p2 };
 
     const thread_a = try std.Thread.spawn(.{}, BrJob.run, .{job_a});
     const thread_b = try std.Thread.spawn(.{}, BrJob.run, .{job_b});
@@ -1836,8 +1933,10 @@ test "two SolveContexts on separate BoardContexts isolate board state" {
     // board state. This is the shape parallel workers will take.
     var worker_b_board: BoardContext = BoardContext.compute(&solver.evaluator, &solver.hand_table, board_a);
 
-    const ctx_a = SolveContext.initOnSolver(&solver);
-    var ctx_b = SolveContext.initOnBoardContext(&solver, &worker_b_board);
+    var empty_scratch_a = WalkScratch.empty;
+    var empty_scratch_b = WalkScratch.empty;
+    const ctx_a = SolveContext.initOnSolver(&solver, &empty_scratch_a);
+    var ctx_b = SolveContext.initOnBoardContext(&solver, &worker_b_board, &empty_scratch_b);
 
     const ht = HandTable.init();
     const probe_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(0, 1), card_mod.makeCard(0, 2))).?;
@@ -2080,7 +2179,7 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     // CFR+ with linear averaging converges much faster than vanilla CFR.
     // Vanilla baseline landed near 0.75 after 200 iters; CFR+ comes in around
     // 0.015 in the same budget.
-    const expl = try exploitability(&solver, root);
+    const expl = try exploitability(&solver, temp_allocator, root);
     try std.testing.expect(@abs(expl) < 0.05);
 }
 
@@ -2220,7 +2319,7 @@ test "Solver.solve: polarized vs condensed river" {
     var prng = std.Random.DefaultPrng.init(42);
     try solve(&solver, temp_allocator, root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
-    const expl = try exploitability(&solver, root);
+    const expl = try exploitability(&solver, temp_allocator, root);
     // Vanilla CFR baseline left this in the single-digit range; CFR+ with
     // linear averaging brings it under 0.05 in the same 200-iter budget.
     try std.testing.expect(expl < 0.05);
@@ -2326,8 +2425,10 @@ test "walk: truncated chance leaf uses all-in equity evaluator" {
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     var prng = std.Random.DefaultPrng.init(42);
-    var ctx = SolveContext.initOnSolver(&solver);
-    walk(&ctx, &leaf_node, &solver.p1_reach, &solver.p2_reach, &cfv_p1, &cfv_p2, prng.random(), 1.0, null);
+    var scratch = try WalkScratch.init(std.testing.allocator);
+    defer scratch.deinit(std.testing.allocator);
+    var ctx = SolveContext.initOnSolver(&solver, &scratch);
+    walk(&ctx, &leaf_node, &solver.p1_reach, &solver.p2_reach, &cfv_p1, &cfv_p2, prng.random(), 1.0, null, 0);
 
     const expected = @as(f32, 125.0) * @as(f32, 40.0) / @as(f32, 46.0);
     try std.testing.expectApproxEqAbs(expected, cfv_p1[aa_idx], 1e-3);
@@ -2523,8 +2624,10 @@ test "brWalk: chance averaging uses per-hand legal river count" {
     };
 
     var cfv: [NUM_HANDS]f32 = undefined;
-    var ctx = SolveContext.initOnSolver(&solver);
-    brWalk(&ctx, &chance_node, &solver.p1_reach, &solver.p2_reach, true, &cfv);
+    var scratch = try WalkScratch.init(std.testing.allocator);
+    defer scratch.deinit(std.testing.allocator);
+    var ctx = SolveContext.initOnSolver(&solver, &scratch);
+    brWalk(&ctx, std.testing.allocator, &chance_node, &solver.p1_reach, &solver.p2_reach, true, &cfv, 0);
 
     const expected = @as(f32, 125.0) * @as(f32, 40.0) / @as(f32, 46.0);
     try std.testing.expectApproxEqAbs(expected, cfv[aa_idx], 1e-3);
@@ -2592,9 +2695,11 @@ test "verification: all-in equity leaf matches exact full-runout chance tree" {
 
     var exact_p1: [NUM_HANDS]f32 = undefined;
     var exact_p2: [NUM_HANDS]f32 = undefined;
-    var ctx = SolveContext.initOnSolver(&solver);
-    brWalk(&ctx, &turn_chance, &solver.p1_reach, &solver.p2_reach, true, &exact_p1);
-    brWalk(&ctx, &turn_chance, &solver.p1_reach, &solver.p2_reach, false, &exact_p2);
+    var scratch = try WalkScratch.init(std.testing.allocator);
+    defer scratch.deinit(std.testing.allocator);
+    var ctx = SolveContext.initOnSolver(&solver, &scratch);
+    brWalk(&ctx, std.testing.allocator, &turn_chance, &solver.p1_reach, &solver.p2_reach, true, &exact_p1, 0);
+    brWalk(&ctx, std.testing.allocator, &turn_chance, &solver.p1_reach, &solver.p2_reach, false, &exact_p2, 0);
 
     const leaf_edge = Edge{
         .action = .CHANCE,
@@ -2773,6 +2878,93 @@ test "Solver.solve: pool delivers bit-identical results across runs with same se
 
     // Full regret state across the tree — the load-bearing equilibrium data —
     // must be bit-identical between two independent solves.
+    try std.testing.expectEqual(regrets_a.len, regrets_b.len);
+    for (regrets_a, regrets_b) |a, b| try std.testing.expectEqual(a, b);
+}
+
+test "Solver.solve: turn-start with scratch pool — deeper recursion stays deterministic" {
+    // Regression for the heap-allocated WalkScratch: turn-start trees have
+    // chance-node recursion that exercises masked_p1_reach/masked_p2_reach
+    // slots at depth > 0, where any bug in the depth-indexing scheme (e.g.
+    // sharing the same frame index across recursive levels) would
+    // immediately corrupt downstream computations. Two solves with the
+    // same seed and worker count must still produce bit-identical CFVs and
+    // regrets at this deeper tree shape.
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena_a = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_a.deinit();
+    var arena_b = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_b.deinit();
+
+    // Turn board, river slot empty so the tree includes a turn → river
+    // chance node and recursive walk descends across the chance transition.
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        card_mod.makeCard(3, 3),
+        0,
+    };
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+
+    const runOnce = struct {
+        fn run(allocator: Allocator, arena_alloc: Allocator, b: [5]Card, aa: u16, kk: u16, out_p1: *[NUM_HANDS]f32, out_p2: *[NUM_HANDS]f32) ![]f32 {
+            var state = gamestate_mod.GameState.init(.TURN, true, 50, 100, 100);
+            var arr = std.ArrayList(Edge).empty;
+            defer arr.deinit(allocator);
+            try node_mod.buildTree(&state, &arr, arena_alloc, allocator, NUM_HANDS, NUM_HANDS);
+            const root = arr.items[0].child.?;
+
+            var p1 = try range_mod.Range.initEmpty(allocator, 1);
+            defer p1.deinit(allocator);
+            p1.active_indices[0] = aa;
+            p1.probs[0] = 1.0;
+            var p2 = try range_mod.Range.initEmpty(allocator, 1);
+            defer p2.deinit(allocator);
+            p2.active_indices[0] = kk;
+            p2.probs[0] = 1.0;
+
+            var solver = try Solver.init(std.testing.io, b, &p1, &p2, 100, 100, 50);
+            defer solver.deinit();
+            solver.max_workers = 4;
+
+            var prng = std.Random.DefaultPrng.init(0xBEEF);
+            try solve(&solver, allocator, root, 20, prng.random(), out_p1, out_p2);
+
+            _ = node_mod.assignIds(root);
+            var snapshot = std.ArrayList(f32).empty;
+            try collectRegrets(root, &snapshot, allocator);
+            return try snapshot.toOwnedSlice(allocator);
+        }
+
+        fn collectRegrets(node: *Node, out: *std.ArrayList(f32), allocator: Allocator) !void {
+            if (!node.is_leaf and !node.is_chance) {
+                try out.appendSlice(allocator, node.regrets);
+            }
+            for (node.edges) |e| {
+                if (e.child) |c| try collectRegrets(c, out, allocator);
+            }
+        }
+    };
+
+    var cfv_a_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_a_p2: [NUM_HANDS]f32 = undefined;
+    const regrets_a = try runOnce.run(temp_allocator, arena_a.allocator(), board, aa_idx, kk_idx, &cfv_a_p1, &cfv_a_p2);
+    defer temp_allocator.free(regrets_a);
+
+    var cfv_b_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_b_p2: [NUM_HANDS]f32 = undefined;
+    const regrets_b = try runOnce.run(temp_allocator, arena_b.allocator(), board, aa_idx, kk_idx, &cfv_b_p1, &cfv_b_p2);
+    defer temp_allocator.free(regrets_b);
+
+    try std.testing.expectEqual(cfv_a_p1[aa_idx], cfv_b_p1[aa_idx]);
+    try std.testing.expectEqual(cfv_a_p2[kk_idx], cfv_b_p2[kk_idx]);
     try std.testing.expectEqual(regrets_a.len, regrets_b.len);
     for (regrets_a, regrets_b) |a, b| try std.testing.expectEqual(a, b);
 }

@@ -155,7 +155,7 @@ pub const Subgame = struct {
     }
 
     pub fn exploitability(self: *Subgame) !f32 {
-        return cfr.exploitability(&self.solver, self.root);
+        return cfr.exploitability(&self.solver, self.allocator, self.root);
     }
 
     pub fn collectChanceSeeds(self: *Subgame, allocator: Allocator) !std.ArrayList(ChanceSeed) {
@@ -829,7 +829,7 @@ test "verification: polarized vs condensed compact truncated game exploitability
     var cfv_p2: [NUM_HANDS]f32 = undefined;
     try cfr.solve(&solver, allocator, &root, 200, prng.random(), &cfv_p1, &cfv_p2);
 
-    try std.testing.expect(try cfr.exploitability(&solver, &root) < 1.0);
+    try std.testing.expect(try cfr.exploitability(&solver, allocator, &root) < 1.0);
 }
 
 test "verification: truncated flop tree stays far smaller than full flop topology" {

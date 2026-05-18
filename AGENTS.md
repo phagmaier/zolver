@@ -70,10 +70,17 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 - `Solver.init` requires `io: std.Io` (used by the parallel-pool sync
   primitives and the optional `record_timings` accumulator). Binaries pass
   `init.io`; tests pass `std.testing.io`.
+- `walk` / `brWalk` are depth-indexed: callers pass `depth = 0`, recursion
+  advances. Per-frame scratch lives in `SolveContext.scratch` (heap-allocated
+  via `WalkScratch.init`). `MAX_WALK_DEPTH` is the hard ceiling — asserts at
+  function entry catch overflow. Contexts that only invoke terminal helpers
+  (no walk recursion) can use `WalkScratch.empty`.
+- `cfr.exploitability` and `cfr.bestResponse` now take an `Allocator`. Tests
+  use `std.testing.allocator`; production paths thread through the same
+  allocator already used for the rest of the solve.
 
 ## Known Gaps & Slop
 
-- **Memory**: Large `[NUM_HANDS]f32` buffers on the stack in `walk`/`brWalk` (~90KB per depth).
 - **UI/CLI**: No per-hand strategy export or CSV output.
 - **Subgame**: `SubgameManager` is functional but not exposed via CLI.
 - **Performance (followup)**: `brWalk` still uses per-iter `std.Thread.spawn` for
@@ -82,6 +89,5 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 ## Current Priorities
 
-1. **Stability**: Move walk scratch buffers from stack to a heap-allocated pool.
-2. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
-3. **Performance**: Extend the persistent worker pool to `brWalk`'s chance enumeration.
+1. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
+2. **Performance**: Extend the persistent worker pool to `brWalk`'s chance enumeration.
