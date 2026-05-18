@@ -83,11 +83,12 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 - **UI/CLI**: No per-hand strategy export or CSV output.
 - **Subgame**: `SubgameManager` is functional but not exposed via CLI.
-- **Performance (followup)**: `brWalk` still uses per-iter `std.Thread.spawn` for
-  chance-runout parallelism (see `BrChanceJob`). The main `cfr.solve` loop now
-  uses a persistent pool, but `brWalk` does not.
+- **Performance (deferred, low ROI)**: `brWalk`'s chance-runout parallelism
+  still uses `std.Thread.spawn` per dispatch. Only one dispatch happens per
+  top-level brWalk traversal (workers run with `allow_parallel = false`), so
+  per-`exploitability` spawn cost is ~16 spawns ≈ 5ms — not worth a pool
+  rewrite given exploitability is a verification path called rarely.
 
 ## Current Priorities
 
 1. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
-2. **Performance**: Extend the persistent worker pool to `brWalk`'s chance enumeration.
