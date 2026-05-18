@@ -175,10 +175,10 @@ fn runScenarioAtWorkers(
     const root = arr.items[0].child.?;
     const n_nodes = node_mod.assignIds(root);
 
-    var solver = try Solver.init(built.board, &built.p1, &built.p2, s.stack1, s.stack2, s.pot);
+    var solver = try Solver.init(io, built.board, &built.p1, &built.p2, s.stack1, s.stack2, s.pot);
     defer solver.deinit();
     solver.max_workers = max_workers;
-    solver.timings_io = io;
+    solver.record_timings = true;
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;

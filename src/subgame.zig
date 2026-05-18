@@ -97,6 +97,7 @@ pub const Subgame = struct {
     cfv_p2: [NUM_HANDS]f32,
 
     pub fn init(
+        io: std.Io,
         allocator: Allocator,
         root_state: GameState,
         board: [5]Card,
@@ -128,7 +129,7 @@ pub const Subgame = struct {
         var p2_range = try rangeFromDense(allocator, &reach.p2);
         defer p2_range.deinit(allocator);
 
-        var solver = try cfr.Solver.init(board, &p1_range, &p2_range, root_state.stack1, root_state.stack2, root_state.pot);
+        var solver = try cfr.Solver.init(io, board, &p1_range, &p2_range, root_state.stack1, root_state.stack2, root_state.pot);
         errdefer solver.deinit();
 
         return .{
@@ -173,6 +174,7 @@ pub const ChanceSeed = struct {
 
     pub fn buildNextStreetSubgame(
         self: *const ChanceSeed,
+        io: std.Io,
         allocator: Allocator,
         board: [5]Card,
         public_card: Card,
@@ -185,17 +187,19 @@ pub const ChanceSeed = struct {
         maskReachForCard(&next_reach, public_card);
 
         const post_chance = self.state.applyChance();
-        return Subgame.init(allocator, post_chance, next_board, &next_reach, options);
+        return Subgame.init(io, allocator, post_chance, next_board, &next_reach, options);
     }
 };
 
 pub const SubgameManager = struct {
+    io: std.Io,
     allocator: Allocator,
     flop: ?Subgame,
     chance_seeds: std.ArrayList(ChanceSeed),
 
-    pub fn init(allocator: Allocator) SubgameManager {
+    pub fn init(io: std.Io, allocator: Allocator) SubgameManager {
         return .{
+            .io = io,
             .allocator = allocator,
             .flop = null,
             .chance_seeds = .empty,
@@ -221,7 +225,7 @@ pub const SubgameManager = struct {
         self.flop = null;
         self.chance_seeds.clearRetainingCapacity();
 
-        var flop = try Subgame.init(self.allocator, root_state, board, reach, .{ .truncate_after = .FLOP });
+        var flop = try Subgame.init(self.io, self.allocator, root_state, board, reach, .{ .truncate_after = .FLOP });
         errdefer flop.deinit();
         try flop.solve(iterations, random);
 
@@ -263,6 +267,7 @@ pub const SubgameManager = struct {
         if (seed_index >= self.chance_seeds.items.len) return error.InvalidChanceSeed;
 
         var turn = try self.chance_seeds.items[seed_index].buildNextStreetSubgame(
+            self.io,
             self.allocator,
             flop.board,
             turn_card,
@@ -293,6 +298,7 @@ pub fn findSeedByPathIn(seeds: []const ChanceSeed, path: []const PathStep) ?usiz
 }
 
 pub fn solveRiverFromPath(
+    io: std.Io,
     allocator: Allocator,
     seeds: []const ChanceSeed,
     path: []const PathStep,
@@ -302,10 +308,11 @@ pub fn solveRiverFromPath(
     random: std.Random,
 ) !Subgame {
     const idx = findSeedByPathIn(seeds, path) orelse return error.InvalidChanceSeed;
-    return solveRiverFromSeed(allocator, &seeds[idx], turn_board, river_card, iterations, random);
+    return solveRiverFromSeed(io, allocator, &seeds[idx], turn_board, river_card, iterations, random);
 }
 
 pub fn solveRiverFromSeed(
+    io: std.Io,
     allocator: Allocator,
     seed: *const ChanceSeed,
     turn_board: [5]Card,
@@ -313,7 +320,7 @@ pub fn solveRiverFromSeed(
     iterations: usize,
     random: std.Random,
 ) !Subgame {
-    var river = try seed.buildNextStreetSubgame(allocator, turn_board, river_card, .{});
+    var river = try seed.buildNextStreetSubgame(io, allocator, turn_board, river_card, .{});
     errdefer river.deinit();
     try river.solve(iterations, random);
     return river;
@@ -508,7 +515,7 @@ test "Subgame.init builds a fresh CFR instance from GameState and ReachProbs" {
     reach.p2[kk_idx] = 1.0;
 
     const state = GameState.init(.RIVER, true, 50, 100, 100);
-    var subgame = try Subgame.init(allocator, state, board, &reach, .{});
+    var subgame = try Subgame.init(std.testing.io, allocator, state, board, &reach, .{});
     defer subgame.deinit();
 
     try std.testing.expect(subgame.root.edges.len > 0);
@@ -536,7 +543,7 @@ test "SubgameManager collects flop chance seeds and resolves a turn subgame" {
     reach.p1[aa_idx] = 1.0;
     reach.p2[kk_idx] = 1.0;
 
-    var manager = SubgameManager.init(allocator);
+    var manager = SubgameManager.init(std.testing.io, allocator);
     defer manager.deinit();
 
     var prng = std.Random.DefaultPrng.init(42);
@@ -585,7 +592,7 @@ test "SubgameManager finds chance seeds by deterministic action path" {
     reach.p1[aa_idx] = 1.0;
     reach.p2[kk_idx] = 1.0;
 
-    var manager = SubgameManager.init(allocator);
+    var manager = SubgameManager.init(std.testing.io, allocator);
     defer manager.deinit();
 
     var prng = std.Random.DefaultPrng.init(42);
@@ -637,7 +644,7 @@ test "verification: turn re-solve matches full turn all-in response strategy" {
     reach.p1[aa_idx] = 1.0;
     reach.p2[kk_idx] = 1.0;
 
-    var manager = SubgameManager.init(allocator);
+    var manager = SubgameManager.init(std.testing.io, allocator);
     defer manager.deinit();
 
     var flop_prng = std.Random.DefaultPrng.init(42);
@@ -649,9 +656,9 @@ test "verification: turn re-solve matches full turn all-in response strategy" {
     }).?;
     const seed = &manager.chance_seeds.items[seed_idx];
 
-    var full_turn = try seed.buildNextStreetSubgame(allocator, flop_board, turn_card, .{});
+    var full_turn = try seed.buildNextStreetSubgame(std.testing.io, allocator, flop_board, turn_card, .{});
     defer full_turn.deinit();
-    var trunc_turn = try seed.buildNextStreetSubgame(allocator, flop_board, turn_card, .{ .truncate_after = .TURN });
+    var trunc_turn = try seed.buildNextStreetSubgame(std.testing.io, allocator, flop_board, turn_card, .{ .truncate_after = .TURN });
     defer trunc_turn.deinit();
 
     var full_prng = std.Random.DefaultPrng.init(43);
@@ -720,7 +727,7 @@ test "verification: polarized vs condensed compact truncated game exploitability
     var p2_range = try rangeFromDense(allocator, &reach.p2);
     defer p2_range.deinit(allocator);
 
-    var solver = try cfr.Solver.init(board, &p1_range, &p2_range, 500, 500, 100);
+    var solver = try cfr.Solver.init(std.testing.io, board, &p1_range, &p2_range, 500, 500, 100);
     defer solver.deinit();
 
     var check_leaf_edges = [_]Edge{.{

@@ -187,9 +187,9 @@ fn cmdSolve(init: std.process.Init, allocator: std.mem.Allocator, args: []const 
     const n_nodes = node_mod.assignIds(root);
 
     // Run CFR.
-    var solver = try Solver.init(board, &p1, &p2, sa.stack.?, sa.stack.?, sa.pot.?);
+    var solver = try Solver.init(init.io, board, &p1, &p2, sa.stack.?, sa.stack.?, sa.pot.?);
     defer solver.deinit();
-    solver.timings_io = init.io;
+    solver.record_timings = true;
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;

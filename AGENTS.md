@@ -67,16 +67,21 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 - `BoardContext` contains all board-mutable state; `SolveContext` is per-worker.
 - `allInEquityLeaf` is the default model for truncated chance nodes.
 - Showdown/fold CFVs use O(N) prefix-sweeps with collision correction.
+- `Solver.init` requires `io: std.Io` (used by the parallel-pool sync
+  primitives and the optional `record_timings` accumulator). Binaries pass
+  `init.io`; tests pass `std.testing.io`.
 
 ## Known Gaps & Slop
 
-- **Performance**: Thread spawning overhead in `cfr.solve` (~1.5ms/iter). Needs a thread pool.
 - **Memory**: Large `[NUM_HANDS]f32` buffers on the stack in `walk`/`brWalk` (~90KB per depth).
 - **UI/CLI**: No per-hand strategy export or CSV output.
 - **Subgame**: `SubgameManager` is functional but not exposed via CLI.
+- **Performance (followup)**: `brWalk` still uses per-iter `std.Thread.spawn` for
+  chance-runout parallelism (see `BrChanceJob`). The main `cfr.solve` loop now
+  uses a persistent pool, but `brWalk` does not.
 
 ## Current Priorities
 
-1. **Performance**: Replace thread spawning with a permanent thread pool in `Solver`.
-2. **Stability**: Move walk scratch buffers from stack to a heap-allocated pool.
-3. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
+1. **Stability**: Move walk scratch buffers from stack to a heap-allocated pool.
+2. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
+3. **Performance**: Extend the persistent worker pool to `brWalk`'s chance enumeration.

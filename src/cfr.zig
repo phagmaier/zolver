@@ -230,16 +230,22 @@ pub const Solver = struct {
     // harness to sweep parallel scaling without changing the call site.
     max_workers: usize,
 
-    // Optional per-iter timing accumulator for the parallel `cfr.solve` path.
-    // Reset to zero in `init`; updated only when both a parallel iter runs
-    // AND `timings_io` is non-null (since 0.16 timestamps need an Io vtable).
-    // Read after `cfr.solve` returns to attribute wall-clock to spawn / join
-    // (≈ walk wall-clock — workers run while main blocks in join) / merge.
-    // Tests leave `timings_io` null and pay zero overhead.
+    // Io vtable used by the parallel `cfr.solve` path for the worker-pool
+    // synchronization primitives (Mutex/Condition) and for the optional
+    // per-iter timing accumulator below. Required; callers pass either
+    // `init.io` (binaries) or `std.testing.io` (tests).
+    io: std.Io,
+
+    // Per-iter timing accumulator for the parallel path. Reset to zero in
+    // `init`; updated only when a parallel iter runs. Read after `cfr.solve`
+    // returns to attribute wall-clock to spawn / join / merge.
+    // `record_timings = false` leaves the accumulator at zero and skips the
+    // timestamp syscalls in the inner loop.
     timings: ParallelTimings,
-    timings_io: ?std.Io,
+    record_timings: bool,
 
     pub fn init(
+        io: std.Io,
         board: [5]Card,
         p1: *const Range,
         p2: *const Range,
@@ -262,8 +268,9 @@ pub const Solver = struct {
             .runout_cache_root = .{ 0, 0, 0, 0, 0 },
             .runout_cache_alloc = null,
             .max_workers = 0,
+            .io = io,
             .timings = .{},
-            .timings_io = null,
+            .record_timings = false,
         };
 
         @memset(&self.p1_reach, 0);
@@ -920,28 +927,20 @@ pub fn solve(
     }
     defer for (0..n_workers) |i| worker_deltas[i].deinit();
 
-    // `iterations` is the number of strategy updates — same semantics as the
-    // serial loop. Each update spawns N parallel walks that contribute lower-
-    // variance samples to the per-update delta, then merges. Total walk work
-    // is N× serial; wall clock in release builds is dominated by the parallel
-    // execution of those walks. In debug builds the per-iter merge/reset
-    // overhead is visible; that's expected and not a release concern.
-    var iter: usize = 0;
-    while (iter < iterations) : (iter += 1) {
-        const iter_weight: f32 = @floatFromInt(iter + 1);
+    // Persistent worker pool: spawn once, dispatch each iter via an epoch
+    // bump on a shared condvar. Replaces the previous per-iter spawn/join
+    // (~0.3-1.3ms/iter at workers=2..8 in release).
+    var pool: ParallelPool = .{};
+    var workers: [MAX_PARALLEL_WORKERS]PoolWorker = undefined;
+    var threads: [MAX_PARALLEL_WORKERS]std.Thread = undefined;
 
-        var threads: [MAX_PARALLEL_WORKERS]std.Thread = undefined;
-        var jobs: [MAX_PARALLEL_WORKERS]WalkJob = undefined;
-
-        const t_iter_start: ?std.Io.Clock.Timestamp = if (self.timings_io) |io|
-            std.Io.Clock.Timestamp.now(io, .awake)
-        else
-            null;
-
-        var spawned: usize = 0;
-        var s: usize = 0;
-        while (s < n_workers) : (s += 1) {
-            jobs[s] = .{
+    const io = self.io;
+    var s: usize = 0;
+    while (s < n_workers) : (s += 1) {
+        workers[s] = .{
+            .pool = &pool,
+            .io = io,
+            .job = .{
                 .ctx = &worker_ctxs[s],
                 .root = root,
                 .p1_reach = &self.p1_reach,
@@ -949,36 +948,100 @@ pub fn solve(
                 .out_cfv_p1 = &worker_out_p1[s],
                 .out_cfv_p2 = &worker_out_p2[s],
                 .random = worker_prngs[s].random(),
-                .iter_weight = iter_weight,
+                .iter_weight = 0,
                 .deltas = &worker_deltas[s],
-            };
-            if (std.Thread.spawn(.{}, WalkJob.run, .{&jobs[s]})) |th| {
-                threads[s] = th;
-                spawned += 1;
-            } else |_| {
-                // Spawn failed: run this slice synchronously and bail out of
-                // further spawns for this iter.
-                WalkJob.run(&jobs[s]);
-                break;
-            }
+            },
+        };
+    }
+
+    // Spawn workers. If the OS refuses partway through, shut down the
+    // workers we did spawn and fall back to the serial loop — same outcome
+    // as the previous code's spawn-failure branch, just at a different scope.
+    var spawned: usize = 0;
+    while (spawned < n_workers) {
+        if (std.Thread.spawn(.{}, PoolWorker.run, .{&workers[spawned]})) |th| {
+            threads[spawned] = th;
+            spawned += 1;
+        } else |_| {
+            break;
         }
-        const t_after_spawn: ?std.Io.Clock.Timestamp = if (self.timings_io) |io|
+    }
+    pool.n_workers = spawned;
+
+    if (spawned <= 1) {
+        if (spawned == 1) {
+            pool.mutex.lockUncancelable(io);
+            pool.shutdown = true;
+            pool.mutex.unlock(io);
+            pool.job_cv.broadcast(io);
+            threads[0].join();
+        }
+        var ctx2 = SolveContext.initOnSolver(self);
+        var iter2: usize = 0;
+        while (iter2 < iterations) : (iter2 += 1) {
+            const iter_weight: f32 = @floatFromInt(iter2 + 1);
+            walk(&ctx2, root, &self.p1_reach, &self.p2_reach, out_cfv_p1, out_cfv_p2, random, iter_weight, null);
+        }
+        return;
+    }
+
+    // From here on, `spawned` workers are parked on `job_cv` waiting for the
+    // first epoch. Shutdown on any exit path joins them cleanly.
+    defer {
+        pool.mutex.lockUncancelable(io);
+        pool.shutdown = true;
+        pool.mutex.unlock(io);
+        pool.job_cv.broadcast(io);
+        for (0..spawned) |i| threads[i].join();
+    }
+
+    const actual_workers = spawned;
+    const record = self.record_timings;
+
+    // `iterations` is the number of strategy updates — same semantics as the
+    // serial loop. Each update dispatches N parallel walks that contribute
+    // lower-variance samples to the per-update delta, then merges.
+    var iter: usize = 0;
+    while (iter < iterations) : (iter += 1) {
+        const iter_weight: f32 = @floatFromInt(iter + 1);
+
+        const t_iter_start: ?std.Io.Clock.Timestamp = if (record)
             std.Io.Clock.Timestamp.now(io, .awake)
         else
             null;
 
-        var j: usize = 0;
-        while (j < spawned) : (j += 1) threads[j].join();
-        const t_after_join: ?std.Io.Clock.Timestamp = if (self.timings_io) |io|
+        // Workers are parked: safe to mutate their job's per-iter field
+        // without the pool lock. The lock + broadcast below publishes.
+        for (0..actual_workers) |w| workers[w].job.iter_weight = iter_weight;
+
+        pool.mutex.lockUncancelable(io);
+        pool.workers_done = 0;
+        pool.epoch += 1;
+        pool.mutex.unlock(io);
+        pool.job_cv.broadcast(io);
+
+        const t_after_spawn: ?std.Io.Clock.Timestamp = if (record)
             std.Io.Clock.Timestamp.now(io, .awake)
         else
             null;
 
-        mergeDeltas(worker_ptrs[0..n_workers]);
+        pool.mutex.lockUncancelable(io);
+        while (pool.workers_done < actual_workers) pool.done_cv.waitUncancelable(io, &pool.mutex);
+        pool.mutex.unlock(io);
 
-        if (self.timings_io) |_| {
-            const t_after_merge = std.Io.Clock.Timestamp.now(self.timings_io.?, .awake);
+        const t_after_join: ?std.Io.Clock.Timestamp = if (record)
+            std.Io.Clock.Timestamp.now(io, .awake)
+        else
+            null;
+
+        mergeDeltas(worker_ptrs[0..actual_workers]);
+
+        if (record) {
+            const t_after_merge = std.Io.Clock.Timestamp.now(io, .awake);
             self.timings.iter_count += 1;
+            // spawn_ns now measures the dispatch (lock + epoch bump + broadcast)
+            // rather than `std.Thread.spawn`; field name retained so the bench
+            // output stays comparable across the change.
             self.timings.spawn_ns += timestampDeltaNs(t_iter_start.?, t_after_spawn.?);
             self.timings.join_ns += timestampDeltaNs(t_after_spawn.?, t_after_join.?);
             self.timings.merge_ns += timestampDeltaNs(t_after_join.?, t_after_merge);
@@ -1004,6 +1067,63 @@ const WalkJob = struct {
 
     fn run(self: *WalkJob) void {
         walk(self.ctx, self.root, self.p1_reach, self.p2_reach, self.out_cfv_p1, self.out_cfv_p2, self.random, self.iter_weight, self.deltas);
+    }
+};
+
+// Coordinates the persistent worker pool used by `solve`. One instance lives
+// on the dispatcher's stack for the duration of a single `solve` call; the
+// pool is torn down before `solve` returns. Workers park on `job_cv` between
+// iterations and wake when `epoch` advances. `done_cv` is signaled when
+// `workers_done` reaches `n_workers`, releasing the dispatcher to merge.
+//
+// All state under `mutex` — no atomics needed; the lock pairing with the
+// condition variables provides the memory ordering for per-iter `WalkJob`
+// updates (the dispatcher writes `iter_weight` while workers are parked, then
+// the broadcast/wake pair publishes those writes).
+const ParallelPool = struct {
+    // `std.Io.Mutex`/`Condition` need an `Io` on every call — passed in
+    // alongside `pool` from the dispatcher's stack so workers don't have to
+    // chase a back-pointer to the Solver.
+    mutex: std.Io.Mutex = std.Io.Mutex.init,
+    job_cv: std.Io.Condition = std.Io.Condition.init,
+    done_cv: std.Io.Condition = std.Io.Condition.init,
+    epoch: u64 = 0,
+    workers_done: usize = 0,
+    n_workers: usize = 0,
+    shutdown: bool = false,
+};
+
+// One persistent worker. `job` is filled by the dispatcher before the pool
+// is started and only `job.iter_weight` is updated between epochs.
+const PoolWorker = struct {
+    pool: *ParallelPool,
+    io: std.Io,
+    job: WalkJob,
+
+    fn run(self: *PoolWorker) void {
+        var last_epoch: u64 = 0;
+        while (true) {
+            self.pool.mutex.lockUncancelable(self.io);
+            while (!self.pool.shutdown and self.pool.epoch == last_epoch) {
+                self.pool.job_cv.waitUncancelable(self.io, &self.pool.mutex);
+            }
+            if (self.pool.shutdown) {
+                self.pool.mutex.unlock(self.io);
+                return;
+            }
+            const my_epoch = self.pool.epoch;
+            self.pool.mutex.unlock(self.io);
+
+            WalkJob.run(&self.job);
+
+            last_epoch = my_epoch;
+            self.pool.mutex.lockUncancelable(self.io);
+            self.pool.workers_done += 1;
+            if (self.pool.workers_done == self.pool.n_workers) {
+                self.pool.done_cv.signal(self.io);
+            }
+            self.pool.mutex.unlock(self.io);
+        }
     }
 };
 
@@ -1662,7 +1782,7 @@ test "snapshotBoard / restoreBoard round-trips state through a different board" 
     var p2 = try range_mod.Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board_a, &p1, &p2, 1000, 1000, 100);
+    var solver = try Solver.init(std.testing.io, board_a, &p1, &p2, 1000, 1000, 100);
     defer solver.deinit();
 
     var snap: BoardContext = undefined;
@@ -1709,7 +1829,7 @@ test "two SolveContexts on separate BoardContexts isolate board state" {
     var p2 = try range_mod.Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board_a, &p1, &p2, 1000, 1000, 100);
+    var solver = try Solver.init(std.testing.io, board_a, &p1, &p2, 1000, 1000, 100);
     defer solver.deinit();
 
     // A separate BoardContext owned by "worker B" — same Solver, independent
@@ -1771,7 +1891,7 @@ test "Solver.init: blocker mask, strengths, densified ranges" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 1000, 1000, 100);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 1000, 1000, 100);
     defer solver.deinit();
 
     // Total hands collide-free with 5 board cards = C(47,2) = 1081 → 1326 - 1081 = 245 blocked.
@@ -1806,7 +1926,7 @@ test "terminalFold: p1 folds, payoff is folder's effective contribution" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 1000, 1000, 0);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 1000, 1000, 0);
     defer solver.deinit();
 
     // p1 holds 2h2d, p2 holds 3h3d — compatible, both unblocked.
@@ -1851,7 +1971,7 @@ test "terminalShowdown: AA beats KK on a junk board" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 1000, 1000, 0);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 1000, 1000, 0);
     defer solver.deinit();
 
     const ht = HandTable.init();
@@ -1943,7 +2063,7 @@ test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
     p2.active_indices[0] = kk_idx;
     p2.probs[0] = 1.0;
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
@@ -2000,7 +2120,7 @@ test "averageStrategy: KK folds to p1's bet on AA-vs-KK river" {
     p2.active_indices[0] = kk_idx;
     p2.probs[0] = 1.0;
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
@@ -2092,7 +2212,7 @@ test "Solver.solve: polarized vs condensed river" {
     p2.probs[2] = 0.34;
     p2.normalize();
 
-    var solver = try Solver.init(board, &p1, &p2, 500, 500, 100);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 500, 500, 100);
     defer solver.deinit();
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
@@ -2145,7 +2265,7 @@ test "Solver.solve: turn-start AA vs KK — chance node enumeration" {
     p2.active_indices[0] = kk_idx;
     p2.probs[0] = 1.0;
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
@@ -2183,7 +2303,7 @@ test "walk: truncated chance leaf uses all-in equity evaluator" {
     p2.active_indices[0] = kk_idx;
     p2.probs[0] = 1.0;
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     var leaf_edges = [_]Edge{.{
@@ -2231,7 +2351,7 @@ test "allInEquityLeaf: full 5-card board matches terminalShowdown" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 1000, 1000, 0);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 1000, 1000, 0);
     defer solver.deinit();
 
     const ht = HandTable.init();
@@ -2280,7 +2400,7 @@ test "allInEquityLeaf: flop chance — AA dominates KK and CFVs are zero-sum" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     const ht = HandTable.init();
@@ -2333,7 +2453,7 @@ test "allInEquityLeaf: turn chance — river-only enumeration runs and zero-sum 
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     const ht = HandTable.init();
@@ -2376,7 +2496,7 @@ test "brWalk: chance averaging uses per-hand legal river count" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     const ht = HandTable.init();
@@ -2428,7 +2548,7 @@ test "verification: all-in equity leaf matches exact full-runout chance tree" {
     var p2 = try Range.initEmpty(allocator, 0);
     defer p2.deinit(allocator);
 
-    var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+    var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
     defer solver.deinit();
 
     const ht = HandTable.init();
@@ -2520,7 +2640,7 @@ test "allInEquityLeaf: cached and un-cached paths produce identical CFVs" {
         var p2 = try Range.initEmpty(allocator, 0);
         defer p2.deinit(allocator);
 
-        var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+        var solver = try Solver.init(std.testing.io, board, &p1, &p2, 100, 100, 50);
         defer solver.deinit();
 
         const ht = HandTable.init();
@@ -2563,4 +2683,96 @@ test "allInEquityLeaf: cached and un-cached paths produce identical CFVs" {
             try std.testing.expectEqual(uncached_p2[i], cached_p2[i]);
         }
     }
+}
+
+test "Solver.solve: pool delivers bit-identical results across runs with same seed" {
+    // Regression for the persistent worker pool: two independent solves with
+    // the same seed, same worker count, and matching initial state must
+    // produce identical CFVs and identical post-solve regrets. If the pool
+    // ever introduces ordering nondeterminism (e.g. losing the lock-step
+    // semantics of the per-iter epoch broadcast → merge sequence), this
+    // test fails.
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena_a = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_a.deinit();
+    var arena_b = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_b.deinit();
+
+    const board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        card_mod.makeCard(3, 3),
+        card_mod.makeCard(2, 0),
+    };
+
+    const ht = HandTable.init();
+    const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+    const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+
+    const runOnce = struct {
+        fn run(allocator: Allocator, arena_alloc: Allocator, b: [5]Card, aa: u16, kk: u16, out_p1: *[NUM_HANDS]f32, out_p2: *[NUM_HANDS]f32) ![]f32 {
+            var state = gamestate_mod.GameState.init(.RIVER, true, 50, 100, 100);
+            var arr = std.ArrayList(Edge).empty;
+            defer arr.deinit(allocator);
+            try node_mod.buildTree(&state, &arr, arena_alloc, allocator, NUM_HANDS, NUM_HANDS);
+            const root = arr.items[0].child.?;
+
+            var p1 = try range_mod.Range.initEmpty(allocator, 1);
+            defer p1.deinit(allocator);
+            p1.active_indices[0] = aa;
+            p1.probs[0] = 1.0;
+            var p2 = try range_mod.Range.initEmpty(allocator, 1);
+            defer p2.deinit(allocator);
+            p2.active_indices[0] = kk;
+            p2.probs[0] = 1.0;
+
+            var solver = try Solver.init(std.testing.io, b, &p1, &p2, 100, 100, 50);
+            defer solver.deinit();
+            solver.max_workers = 4;
+
+            var prng = std.Random.DefaultPrng.init(0xCAFE);
+            try solve(&solver, allocator, root, 50, prng.random(), out_p1, out_p2);
+
+            // Snapshot the full regret state of the tree by walking it in
+            // assignIds order. assignIds is deterministic, so two runs that
+            // visit the same tree in the same order produce comparable
+            // flattened vectors regardless of allocator addresses.
+            _ = node_mod.assignIds(root);
+            var snapshot = std.ArrayList(f32).empty;
+            try collectRegrets(root, &snapshot, allocator);
+            return try snapshot.toOwnedSlice(allocator);
+        }
+
+        fn collectRegrets(node: *Node, out: *std.ArrayList(f32), allocator: Allocator) !void {
+            if (!node.is_leaf and !node.is_chance) {
+                try out.appendSlice(allocator, node.regrets);
+            }
+            for (node.edges) |e| {
+                if (e.child) |c| try collectRegrets(c, out, allocator);
+            }
+        }
+    };
+
+    var cfv_a_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_a_p2: [NUM_HANDS]f32 = undefined;
+    const regrets_a = try runOnce.run(temp_allocator, arena_a.allocator(), board, aa_idx, kk_idx, &cfv_a_p1, &cfv_a_p2);
+    defer temp_allocator.free(regrets_a);
+
+    var cfv_b_p1: [NUM_HANDS]f32 = undefined;
+    var cfv_b_p2: [NUM_HANDS]f32 = undefined;
+    const regrets_b = try runOnce.run(temp_allocator, arena_b.allocator(), board, aa_idx, kk_idx, &cfv_b_p1, &cfv_b_p2);
+    defer temp_allocator.free(regrets_b);
+
+    // Last-iter CFV out-buffers come from worker 0 in both runs — must match.
+    try std.testing.expectEqual(cfv_a_p1[aa_idx], cfv_b_p1[aa_idx]);
+    try std.testing.expectEqual(cfv_a_p2[kk_idx], cfv_b_p2[kk_idx]);
+
+    // Full regret state across the tree — the load-bearing equilibrium data —
+    // must be bit-identical between two independent solves.
+    try std.testing.expectEqual(regrets_a.len, regrets_b.len);
+    for (regrets_a, regrets_b) |a, b| try std.testing.expectEqual(a, b);
 }
