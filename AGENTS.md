@@ -159,33 +159,29 @@ Existing tests cover:
 
 Engine work comes before UI:
 
-1. Fix the bench metric: report samples/s (= iters/s × workers) or
-   wall-clock-to-fixed-sample-budget, not raw iters/s. Each parallel iter
-   does `n_workers` walks for variance reduction, so iters/s drops with
-   worker count even when sample throughput rises. The current sweep shows
-   ~3.6–6.4× sample-throughput speedup at 8 workers vs serial — that win is
-   invisible in iters/s.
-2. Reduce cache contention on shared regret/strategy_sum reads during
-   parallel walks. The per-iter `join_ns` (≈ max walk wall-clock) grows
-   12–26% from 2 → 8 workers on identical work, meaning workers are
-   slowing each other down via memory bandwidth / cache traffic, not via
-   spawn or merge. Concrete targets: per-worker regret snapshots taken
-   once at iter start, false-sharing-aware layout for `node.regrets` /
-   `node.strategy_sum`, NUMA-aware worker pinning.
-3. Replace `HandTable.getIndex` with a constant-time lookup if it becomes hot.
-   It is currently only used in setup/tests, so this is low priority.
-4. Add a minimal CLI/range input path after the engine API is stable.
-5. Extend `src/bench.zig` for truncated-subgame accuracy and alternate leaf
-   models (v2+ models).
+1. Add a minimal CLI/range input path. Engine is in a good shape (fast
+   leaf eval after the runout cache; parallel scaling confirmed to be
+   working at ~7× on the expensive flop workload). Investigate existing
+   range formats (PokerStove-style, GTO+ exports, etc.) before inventing
+   one.
+2. Extend `src/bench.zig` for truncated-subgame accuracy and alternate
+   leaf models (v2+ models beyond `allInEquityLeaf`).
+3. Replace `HandTable.getIndex` with a constant-time lookup if it
+   becomes hot. Currently only used in setup/tests, so low priority.
 
-**Deferred / deprioritized:**
+**Deferred / deprioritized (with reasons):**
 
-- Thread pooling for `cfr.solve` was on the priority list, but profile data
-  (`spawn_ns` ~1.5 ms/iter at 8 workers) shows spawn cost is a small share
-  of wall-clock for turn (~2%) and flop (~0.03%) workloads. Only
-  river-polarized would meaningfully benefit (~13% of wall-clock), and that
-  scenario is already cheap. Reconsider if a future workload spawns many
-  workers per cheap iter.
+- *Thread pooling for `cfr.solve`*: profile data (`spawn_ns` ~1.5 ms/iter
+  at 8 workers) shows spawn cost is a small share of wall-clock for turn
+  (~2%) and flop (~0.03%) workloads. Only river-polarized would
+  meaningfully benefit (~13%), and that scenario is already cheap.
+  Reconsider if a future workload spawns many workers per cheap iter.
+- *Reducing cache contention on shared regret/strategy_sum reads*: the
+  per-iter `join_ns` (≈ max walk wall-clock) grows 12-26% from 2 → 8
+  workers on identical work, but samples/s scaling on the expensive flop
+  workload is already ~7× of serial. Engineering effort to shave the
+  remaining 14% is small absolute win. Reconsider if profiling at higher
+  worker counts (16+, on bigger boxes) shows it dominates.
 
 **Parallel-CFR semantics (load-bearing):**
 
@@ -193,8 +189,11 @@ Each parallel iter spawns `n_workers` walks; each walk samples one chance
 path and writes its own deltas; `mergeDeltas` aggregates after the iter.
 Adding workers *does not* speed up a single iter — it adds more sample
 paths per iter for variance reduction. Wall-clock per iter grows with
-worker count (more total walk work plus cache contention) but per-sample
-throughput rises. Bench scenarios should be interpreted in that light.
+worker count (more total walk work plus mild cache contention) but
+per-sample throughput rises. Read `samples/s` (not `iters/s`) for the
+honest parallel scaling number; `iters/s` is the strategy-update rate.
+On a 16-core box at 8 workers: flop-trunc ~7×, turn-fullrange ~4.5×,
+river-polarized ~3.7× sample-throughput speedup vs serial.
 
 When completing a substantial change, update this file with durable new
 contracts, commands, caveats, or priorities. Do not add a blow-by-blow progress
