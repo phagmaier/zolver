@@ -269,21 +269,51 @@ fn applyPlusModifier(
                 try emitHand(.{ .pair = x }, weight, hand_table, weights);
             }
         },
-        .suited => |s| {
-            // "T9s+" → keep gap fixed, raise hi-rank.
-            const gap = s.hi - s.lo;
-            var hi: u8 = s.hi;
-            while (hi <= 12) : (hi += 1) {
-                try emitHand(.{ .suited = .{ .hi = hi, .lo = hi - gap } }, weight, hand_table, weights);
+        .suited => |s| try emitPlusSuited(s.hi, s.lo, weight, hand_table, weights, true),
+        .offsuit => |s| try emitPlusSuited(s.hi, s.lo, weight, hand_table, weights, false),
+    }
+}
+
+// PokerStove `+` semantics for non-pair tokens:
+//
+//   * Hi-rank == A (ace-high special case): hold A fixed, raise the low card.
+//     "AJs+" → {AJs, AQs, AKs}.  This is what users actually want when they
+//     write "ace-rag plus" — the alternative (gap-fixed) would give just AJs
+//     and make the `+` pointless.
+//
+//   * Hi-rank < A (gap-fixed): hold the lo-hi gap and raise the hi-rank.
+//     "T9s+" → {T9s, JTs, QJs, KQs, AKs}.  "KJs+" → {KJs, AQs} (gap 2).
+//
+// Users who want "K fixed, raise lo" (e.g. {KJs, KQs}) must list them out.
+fn emitPlusSuited(
+    hi: u8,
+    lo: u8,
+    weight: f32,
+    hand_table: *const HandTable,
+    weights: *[NUM_HANDS]f32,
+    is_suited: bool,
+) ParseError!void {
+    if (hi == 12) {
+        // Ace-high: raise lo to A-1.
+        var l: u8 = lo;
+        while (l < 12) : (l += 1) {
+            if (is_suited) {
+                try emitHand(.{ .suited = .{ .hi = 12, .lo = l } }, weight, hand_table, weights);
+            } else {
+                try emitHand(.{ .offsuit = .{ .hi = 12, .lo = l } }, weight, hand_table, weights);
             }
-        },
-        .offsuit => |s| {
-            const gap = s.hi - s.lo;
-            var hi: u8 = s.hi;
-            while (hi <= 12) : (hi += 1) {
-                try emitHand(.{ .offsuit = .{ .hi = hi, .lo = hi - gap } }, weight, hand_table, weights);
+        }
+    } else {
+        // Non-ace: gap-fixed, raise hi to A.
+        const gap = hi - lo;
+        var h: u8 = hi;
+        while (h <= 12) : (h += 1) {
+            if (is_suited) {
+                try emitHand(.{ .suited = .{ .hi = h, .lo = h - gap } }, weight, hand_table, weights);
+            } else {
+                try emitHand(.{ .offsuit = .{ .hi = h, .lo = h - gap } }, weight, hand_table, weights);
             }
-        },
+        }
     }
 }
 
@@ -513,6 +543,21 @@ test "parseRange: T9s+ enumerates connectors up to AKs" {
     defer r.deinit(testing.allocator);
     // T9s, JTs, QJs, KQs, AKs = 5 suited hands × 4 combos.
     try testing.expectEqual(@as(usize, 20), r.active_indices.len);
+}
+
+test "parseRange: ace-high + holds A and raises lo" {
+    // PokerStove convention: AJs+ → {AJs, AQs, AKs}, not just {AJs}.
+    const ht = HandTable.init();
+    {
+        var r = try parseRange("AJs+", &ht, testing.allocator);
+        defer r.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 12), r.active_indices.len); // 3 hands × 4 combos
+    }
+    {
+        var r = try parseRange("ATo+", &ht, testing.allocator);
+        defer r.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 48), r.active_indices.len); // 4 hands (ATo, AJo, AQo, AKo) × 12
+    }
 }
 
 test "parseRange: range modifier 22-77 expands ascending" {

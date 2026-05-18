@@ -33,7 +33,10 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 - Release build: `zig build -Doptimize=ReleaseFast`
 - Run all tests: `zig build test`
 - Run one file's tests while iterating: `zig test src/<file>.zig`
-- Run demo executable: `zig build run`
+- Run the CLI: `./zig-out/bin/Poker solve --board AhKsQd --pot 50
+  --stack 200 --p1 "JJ+, AKs" --p2 "TT+, AQs+" --iters 20 --truncate flop`
+  (build first with `zig build -Doptimize=ReleaseFast`).
+- Run benchmark: `zig build -Doptimize=ReleaseFast bench`.
 
 Use debug builds/tests by default because they catch leaks and safety issues.
 Use deterministic test RNGs, usually:
@@ -56,12 +59,15 @@ Zig 0.16 notes:
 - `src/card.zig` - compact card representation, deck construction, card text.
 - `src/evaluator.zig` - rank-histogram hand evaluator.
 - `src/range.zig` - `Hand`, `HandTable`, dense range probabilities.
+- `src/range_parser.zig` - PokerStove-style text → `Range` parser, plus
+  `parseBoard` / `parseCard` helpers.
 - `src/gamestate.zig` - betting state machine and street transitions.
 - `src/node.zig` - betting tree nodes/edges and full/truncated tree builders.
 - `src/cfr.zig` - CFR+ solver, chance sampling, terminal CFVs, BR/exploitability.
 - `src/subgame.zig` - `Subgame` and `SubgameManager` orchestration for truncated
   flop/turn solves and river re-solves.
-- `src/main.zig` - evaluator demo only; not yet a real CLI.
+- `src/main.zig` - `poker solve` CLI: parses range strings (or `@path`
+  files), builds the tree, runs CFR, prints a root-strategy summary.
 - `src/root.zig` - public module aggregator and test collector.
 
 ## Solver Invariants
@@ -159,15 +165,21 @@ Existing tests cover:
 
 Engine work comes before UI:
 
-1. Add a minimal CLI/range input path. Engine is in a good shape (fast
-   leaf eval after the runout cache; parallel scaling confirmed to be
-   working at ~7× on the expensive flop workload). Investigate existing
-   range formats (PokerStove-style, GTO+ exports, etc.) before inventing
-   one.
-2. Extend `src/bench.zig` for truncated-subgame accuracy and alternate
-   leaf models (v2+ models beyond `allInEquityLeaf`).
-3. Replace `HandTable.getIndex` with a constant-time lookup if it
-   becomes hot. Currently only used in setup/tests, so low priority.
+1. Extend `src/bench.zig` for truncated-subgame accuracy and alternate
+   leaf models (v2+ models beyond `allInEquityLeaf`). With the parser
+   in place we can encode realistic ranges in tests cheaply.
+2. Replace `HandTable.getIndex` with a constant-time lookup. The CLI
+   path now calls it once per combo at parse time, which is still
+   negligible (~1326 lookups), but it's worth doing if range parsing
+   ever moves into a hotter loop (e.g. batch solving from a CSV).
+3. Round out the CLI:
+   - Per-hand strategy dump (currently only reach-weighted root mass).
+   - `--seed` for reproducible runs (currently always seeds with 42).
+   - Stdin support for piping ranges (deferred — `std.fs` in 0.16 was
+     in flux when first cut landed).
+4. Subgame manager + CLI integration: expose the existing
+   `SubgameManager` workflow (truncated flop solve → seed selection →
+   turn/river re-solves) via CLI flags.
 
 **Deferred / deprioritized (with reasons):**
 
