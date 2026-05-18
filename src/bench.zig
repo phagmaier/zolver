@@ -145,6 +145,20 @@ const scenarios = [_]Scenario{
         .warmup = 0,
         .build = buildFullRangeFlop,
     },
+    // The user's real-world target: full-range flop, ~100bb effective stack.
+    // Larger stack -> more legal bet/raise/all-in branches than the 200-chip
+    // variant above. This is the scenario the perf work is gating on.
+    .{
+        .name = "flop-fullrange-100bb-trunc",
+        .street = .FLOP,
+        .truncate_after = .FLOP,
+        .pot = 10,
+        .stack1 = 1000,
+        .stack2 = 1000,
+        .iters = 1,
+        .warmup = 0,
+        .build = buildFullRangeFlop,
+    },
 };
 
 // Per-(scenario, worker-count) run. Each call fully reinitializes the solver

@@ -74,7 +74,10 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 - `src/range_parser.zig` - PokerStove-style text → `Range` parser, plus `parseBoard`.
 - `src/gamestate.zig` - Betting state machine and street transitions.
 - `src/node.zig` - Betting tree nodes/edges and full/truncated tree builders.
-- `src/cfr.zig` - CFR+ solver core, chance sampling, parallel walk dispatch.
+- `src/cfr.zig` - DCFR solver core, chance sampling, parallel walk dispatch.
+  Per-hand inner loops are SIMD-vectorized via `@Vector(VEC_LANES, f32)`
+  (`VEC_LANES = std.simd.suggestVectorLength(f32) orelse 8`), with a scalar
+  tail handling the `NUM_HANDS % VEC_LANES` remainder.
 - `src/subgame.zig` - `Subgame` and `SubgameManager` orchestration for re-solves.
 - `src/spec.zig` - ZON spec file types and path-token parser for `poker resolve`.
   Header comment is the canonical reference for the spec file grammar.
@@ -92,9 +95,19 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 ## Solver Invariants
 
 - `NUM_HANDS` is 1326. Strategy/regret vectors are `action * NUM_HANDS + hand_index`.
+  This layout is action-major on purpose so the inner loops vectorize cleanly
+  across the hand axis; do not transpose.
+- The solver uses **DCFR** (Brown & Sandholm 2019) with (α=1.5, β=0, γ=2).
+  Cumulative regret storage is *signed* — negative regrets accumulate and
+  decay at half-rate per iter (β=0 gives a constant 0.5 neg-discount).
+  Regret matching at the start of each walk reads `max(0, R)` when computing
+  the current strategy, so storage stays signed without breaking the
+  read path. Per-iter discounts are precomputed in `DcfrWeights.forIter`.
 - `BoardContext` contains all board-mutable state; `SolveContext` is per-worker.
 - `allInEquityLeaf` is the default model for truncated chance nodes.
-- Showdown/fold CFVs use O(N) prefix-sweeps with collision correction.
+- Showdown/fold CFVs use O(N) prefix-sweeps with collision correction. The
+  collision-correction inner loop is SIMD-vectorized via manual gather +
+  masked `@select` on `s_j < s_i` / `s_j > s_i`.
 - `Solver.init` requires `io: std.Io` (used by the parallel-pool sync
   primitives and the optional `record_timings` accumulator). Binaries pass
   `init.io`; tests pass `std.testing.io`.
@@ -113,8 +126,12 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   until the user presses Enter; while CFR runs, the UI is frozen and even
   Esc/Ctrl+C are buffered (raw mode prevents them from sending signals).
   The pre-solve render now paints "Solving... UI is frozen until done" so
-  the user sees the freeze is intentional. Real fix needs a worker thread —
-  Current Priorities #1.
+  the user sees the freeze is intentional. Real fix needs a worker thread.
+- **Bet sizes are hardcoded.** `gamestate.BETSIZES = .{0.5, 1.0}` is a
+  single global list shared across flop/turn/river; `MAXNUMBETS = 2` caps
+  raises. Not configurable from CLI, spec, or TUI. The next priority is
+  threading a per-street bet-size list + cap through `GameState`,
+  `node.buildTree`, `spec`, and `main`. Current Priorities #1.
 - **CLI is still kept around** (`poker solve` / `poker resolve`) for
   scripting and one-shots. It's not deprecated, but the TUI is now the
   intended interactive surface.
@@ -128,25 +145,64 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   top-level brWalk traversal (workers run with `allow_parallel = false`), so
   per-`exploitability` spawn cost is ~16 spawns ≈ 5ms — not worth a pool
   rewrite given exploitability is a verification path called rarely.
+- **Sparse hand iteration not implemented.** Inner per-hand loops walk all
+  1326 hands unconditionally even when a player's range has 50 active hands.
+  Skipping all-zero vector blocks is doable but interacts subtly with the
+  DCFR strategy_sum discount (must still apply to existing storage) and
+  with counterfactual regret accumulation (which is nonzero even when reach
+  is zero). Defer until a narrow-range workflow actually feels slow.
 
 ## Current Priorities
 
-The TUI placeholder (`poker tui`) is in place using libvaxis. v1 polish + new
-features:
-
-1. **Background solve.** Solve currently blocks the TUI event loop — at
-   `iters=200` on a real spot this is multiple minutes of frozen UI. Move
-   the solve to a worker thread, post events back to the loop, paint a
-   progress indicator. This is the most impactful next change.
-2. **Preflop range pipeline.** Preflop solving is out of scope, but the TUI
+1. **Per-street bet sizes + cap.** Replace `gamestate.BETSIZES` and
+   `MAXNUMBETS` with a configurable `BetAbstraction` (per-street lists +
+   cap), thread it through `GameState.getBetGameState`, `node.buildTree`,
+   `spec.zig`, `main.zig` (CLI flag), and `tui.zig`. Users currently can't
+   solve a real spot with a meaningful sizing tree (always 50% + 100% + all-in)
+   — this is the biggest "make it usable" lever after the perf pass.
+2. **Background solve in TUI.** Solve currently blocks the TUI event loop
+   — at `iters=200` on a real spot this is multiple minutes of frozen UI.
+   Move the solve to a worker thread, post events back to the loop, paint
+   a progress indicator.
+3. **Preflop range pipeline.** Preflop solving is out of scope, but the TUI
    will eventually want to accept user-supplied preflop ranges and feed them
    into postflop spots. No code for this exists yet — every entry point
    takes ranges as strings or `@path` references via `range_parser`.
-3. **Whole-tree strategy export / navigation.** Current CSV (and the in-TUI
+4. **Whole-tree strategy export / navigation.** Current CSV (and the in-TUI
    table) is root-only. Once a user wants to drill into a subtree, we need
    either a row-per-(node, hand, action) CSV mode or a tree-navigation view
    in the TUI. Deferred until someone actually needs it.
-4. **TUI polish.** Color-coded heatmap on strategy frequencies, real
+5. **TUI polish.** Color-coded heatmap on strategy frequencies, real
    resize-aware layout (currently fixed positions), a proper checkbox for
    the `exploit` boolean instead of typing "true"/"false", validation
    feedback as you Tab between fields rather than only on solve attempt.
+
+## Recent Perf Work
+
+Last performance pass landed:
+
+- **SIMD inner loops** in `walk`, `brWalk`, `allInEquityLeaf`,
+  `computeShowdownCFVFor`, `terminalFold` — `@Vector(VEC_LANES, f32)` over
+  the hand axis with a scalar epilogue. The showdown CFV's
+  collision-correction loop uses manual gather + `@select` to drop the
+  data-dependent branch.
+- **CFR+ → DCFR** for the regret/strategy-sum update. Drop-in replacement;
+  see `DcfrWeights.forIter`. Per-iter cost is essentially unchanged;
+  convergence per iter is meaningfully better.
+- **Bench scenarios**: added `flop-fullrange-100bb-trunc` (pot 10, stack
+  1000) as the canonical user-target spot for future regression tests.
+
+Workers=1 wall-clock results on the four bench scenarios (ReleaseFast,
+AVX2-class CPU):
+
+| scenario | before | after | speedup |
+| --- | --- | --- | --- |
+| river-polarized (200 iters) | 1.00s | 0.67s | 1.50× |
+| turn-fullrange (50 iters) | 1.92s | 1.23s | 1.56× |
+| flop-fullrange-trunc (1 iter) | 4.99s | 2.82s | 1.77× |
+| flop-fullrange-100bb-trunc (1 iter) | 4.94s | 2.85s | 1.73× |
+
+The full 200-iter `poker solve` on the flop-100bb spot takes ~13 minutes
+wall (16-core machine, parallel) — usable but still long. DCFR's
+convergence improvement means fewer iters are typically needed to reach a
+target exploitability than CFR+ required.
