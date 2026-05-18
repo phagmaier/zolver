@@ -72,7 +72,6 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 - **Performance**: Thread spawning overhead in `cfr.solve` (~1.5ms/iter). Needs a thread pool.
 - **Memory**: Large `[NUM_HANDS]f32` buffers on the stack in `walk`/`brWalk` (~90KB per depth).
-- **Efficiency**: `HandTable.getIndex` is linear (O(N)).
 - **UI/CLI**: No per-hand strategy export or CSV output.
 - **Subgame**: `SubgameManager` is functional but not exposed via CLI.
 
@@ -81,4 +80,3 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 1. **Performance**: Replace thread spawning with a permanent thread pool in `Solver`.
 2. **Stability**: Move walk scratch buffers from stack to a heap-allocated pool.
 3. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
-4. **Optimization**: Replace `HandTable.getIndex` with a O(1) lookup.
