@@ -31,10 +31,16 @@ pub const Edge = struct {
     }
 };
 
+pub const UNASSIGNED_ID: u32 = std.math.maxInt(u32);
+
 pub const Node = struct {
     is_chance: bool,
     is_leaf: bool,
     isp1: bool,
+    // Dense [0, n_nodes) id assigned post-build via `assignIds`. UNASSIGNED_ID
+    // until then — callers that index into per-id arrays must run assignIds
+    // first.
+    id: u32,
     regrets: []f32,
     strategy_sum: []f32,
     edges: []Edge,
@@ -44,6 +50,7 @@ pub const Node = struct {
         self.is_chance = false;
         self.is_leaf = false;
         self.isp1 = isp1;
+        self.id = UNASSIGNED_ID;
         self.regrets = &.{};
         self.strategy_sum = &.{};
         self.edges = &.{};
@@ -68,6 +75,25 @@ pub const Node = struct {
 
 pub fn buildTree(state: *GameState, arr: *std.ArrayList(Edge), arena: Allocator, temp_allocator: Allocator, numCards1: u16, numCards2: u16) !void {
     try buildTreeInternal(state, arr, arena, temp_allocator, numCards1, numCards2, null);
+}
+
+/// Walk the built tree DFS and assign dense sequential ids to every Node.
+/// Returns the total node count. Callers that index per-node arrays by
+/// `node.id` (e.g. WorkerDeltas) must call this once after `buildTree` /
+/// `buildTreeTruncated`. Safe to call multiple times; ids are simply
+/// reassigned in the same DFS order.
+pub fn assignIds(root: *Node) u32 {
+    var next: u32 = 0;
+    assignIdsRec(root, &next);
+    return next;
+}
+
+fn assignIdsRec(node: *Node, next: *u32) void {
+    node.id = next.*;
+    next.* += 1;
+    for (node.edges) |*edge| {
+        if (edge.child) |child| assignIdsRec(child, next);
+    }
 }
 
 pub fn buildTreeTruncated(
@@ -307,6 +333,49 @@ test "buildTree: pre-river all-in then call builds a chance chain to a terminal 
     try std.testing.expect(river_chance.edges[0].action == .CHANCE);
     // Showdown terminal: chance edge with no further child.
     try std.testing.expect(river_chance.edges[0].child == null);
+}
+
+test "assignIds: dense, unique, covers whole tree" {
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const temp_allocator = da.allocator();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var root_state = GameState.init(.FLOP, true, 100.0, 1000.0, 1000.0);
+    var arr = std.ArrayList(Edge).empty;
+    defer arr.deinit(temp_allocator);
+    try buildTree(&root_state, &arr, arena_allocator, temp_allocator, 8, 8);
+
+    const root = arr.items[0].child.?;
+    // Sanity: ids are unassigned before assignIds.
+    try std.testing.expect(root.id == UNASSIGNED_ID);
+
+    const n_nodes = assignIds(root);
+    try std.testing.expect(n_nodes > 0);
+
+    // Walk and collect ids. Each id must be in [0, n_nodes) and unique.
+    const seen = try temp_allocator.alloc(bool, n_nodes);
+    defer temp_allocator.free(seen);
+    @memset(seen, false);
+
+    var visited: u32 = 0;
+    try collectIds(root, seen, n_nodes, &visited);
+    try std.testing.expect(visited == n_nodes);
+    for (seen) |s| try std.testing.expect(s);
+}
+
+fn collectIds(node: *Node, seen: []bool, n_nodes: u32, visited: *u32) !void {
+    try std.testing.expect(node.id != UNASSIGNED_ID);
+    try std.testing.expect(node.id < n_nodes);
+    try std.testing.expect(!seen[node.id]);
+    seen[node.id] = true;
+    visited.* += 1;
+    for (node.edges) |*edge| {
+        if (edge.child) |child| try collectIds(child, seen, n_nodes, visited);
+    }
 }
 
 test "buildTree: river check-check is terminal, not a chance node" {
