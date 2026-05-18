@@ -31,6 +31,10 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 - **Zig 0.16 Style**: Adhere to `std.Io` for I/O and entropy. Use `ArenaAllocator`
   for tree-like data structures. Prefer `usize` for indices.
+- **External deps**: only one — [libvaxis](https://github.com/rockorager/libvaxis)
+  (TUI library), pinned in `build.zig.zon`. Linked into the exe but not into
+  the `Poker` module that hosts the test suite, so library code outside
+  `src/tui.zig` must not depend on it.
 - **No Performance Regressions**: Any change to `src/cfr.zig` or `src/evaluator.zig`
   must be benchmarked using `zig build -Doptimize=ReleaseFast bench`.
 - **Validation**: Every bug fix must include a regression test in the relevant
@@ -52,6 +56,14 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   iters, flop path, turn card, and optional river path + card. Path tokens are
   whitespace-separated: `x`=check, `c`=call, `f`=fold, `j`=allin, `b<pct>`=bet
   (sized from `gamestate.BETSIZES`, e.g. `b50`, `b100`).
+- Launch the TUI: `./zig-out/bin/Poker tui [spec.zon]`. Optional path
+  pre-fills the form. Keybindings: Tab/↑↓ navigate fields, Enter (or Ctrl+R)
+  solves, Ctrl+S saves the form back to `spec.zon` as ZON, Esc/Ctrl+C quits,
+  PgUp/PgDn scroll the strategy table. Requires a real TTY (`/dev/tty`).
+  The board field is the full runout (`AhKsQdTh` for a turn resolve,
+  `AhKsQdTh2s` for a river resolve); `flop path` becomes required when the
+  board has 4+ cards, `turn path` when it has 5. The TUI is the resolve
+  front-end only — 3-card flop-only solves go through `poker solve`.
 - Run benchmark: `zig build -Doptimize=ReleaseFast bench`.
 
 ## Module Map
@@ -68,9 +80,14 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   Header comment is the canonical reference for the spec file grammar.
 - `src/export.zig` - CSV writer for per-hand root strategy. Header comment
   documents the schema.
-- `src/main.zig` - `poker solve` / `poker resolve` CLI entry points and dispatch.
+- `src/tui.zig` - libvaxis-backed interactive form for editing a spec,
+  triggering the resolve, viewing the per-hand strategy, and saving the spec
+  back to disk as ZON.
+- `src/main.zig` - `poker solve` / `poker resolve` / `poker tui` CLI entry
+  points and dispatch.
 - `examples/turn.zon`, `examples/river.zon`, `examples/turn_with_export.zon` -
-  Sample `poker resolve` specs (the last enables CSV export + exploitability).
+  Sample specs (the last enables CSV export + exploitability). Any of these
+  works as input to `poker tui` too.
 
 ## Solver Invariants
 
@@ -92,12 +109,15 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 ## Known Gaps & Slop
 
-- **CLI is placeholder UX.** `poker resolve` exists to exercise
-  `SubgameManager` end-to-end (flop solve → seed lookup → turn re-solve, with
-  optional turn → river chain via `solveRiverFromPath`). It now supports
-  per-hand CSV export and an optional exploitability readout via
-  `spec.output`, but the plan is still to swap the CLI for a TUI/GUI; don't
-  invest heavily in CLI ergonomics.
+- **TUI blocks the event loop while solving.** The form remains responsive
+  until the user presses Enter; while CFR runs, the UI is frozen and even
+  Esc/Ctrl+C are buffered (raw mode prevents them from sending signals).
+  The pre-solve render now paints "Solving... UI is frozen until done" so
+  the user sees the freeze is intentional. Real fix needs a worker thread —
+  Current Priorities #1.
+- **CLI is still kept around** (`poker solve` / `poker resolve`) for
+  scripting and one-shots. It's not deprecated, but the TUI is now the
+  intended interactive surface.
 - **`card.get_card_str` returns uppercase suits** (`AHKSQD`), which doesn't
   match the parser's expected lowercase input (`AhKsQd`). Cosmetic only — the
   parser is case-insensitive on suits — but the `resolve` summary's "full
@@ -111,19 +131,22 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 ## Current Priorities
 
-`poker resolve` is in place with CSV export + optional exploitability. Next:
+The TUI placeholder (`poker tui`) is in place using libvaxis. v1 polish + new
+features:
 
-1. **Front-end.** TUI or GUI to replace the CLI. The spec-file format already
-   gives a clean separation between "describe the spot" and "run the solve";
-   a front-end can build the spec interactively and either shell out to the
-   binary or call into `src/spec.zig` + `src/subgame.zig` + `src/export.zig`
-   directly.
-2. **Preflop range pipeline.** Preflop solving is out of scope, but the
-   eventual front-end will need to accept user-supplied preflop ranges and
-   feed them into postflop spots. No code for this exists yet — `poker
-   solve` and `poker resolve` both take ranges directly as strings or
-   `@path` references via `range_parser`.
-3. **Whole-tree strategy export.** Current CSV is root-only. A future mode
-   could emit one row per (node, hand, action) for deeper analysis — useful
-   once the front-end can navigate the tree. Deferred until there's a
-   concrete consumer.
+1. **Background solve.** Solve currently blocks the TUI event loop — at
+   `iters=200` on a real spot this is multiple minutes of frozen UI. Move
+   the solve to a worker thread, post events back to the loop, paint a
+   progress indicator. This is the most impactful next change.
+2. **Preflop range pipeline.** Preflop solving is out of scope, but the TUI
+   will eventually want to accept user-supplied preflop ranges and feed them
+   into postflop spots. No code for this exists yet — every entry point
+   takes ranges as strings or `@path` references via `range_parser`.
+3. **Whole-tree strategy export / navigation.** Current CSV (and the in-TUI
+   table) is root-only. Once a user wants to drill into a subtree, we need
+   either a row-per-(node, hand, action) CSV mode or a tree-navigation view
+   in the TUI. Deferred until someone actually needs it.
+4. **TUI polish.** Color-coded heatmap on strategy frequencies, real
+   resize-aware layout (currently fixed positions), a proper checkbox for
+   the `exploit` boolean instead of typing "true"/"false", validation
+   feedback as you Tab between fields rather than only on solve attempt.

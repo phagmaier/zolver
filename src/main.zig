@@ -24,6 +24,7 @@ const cfr = @import("cfr.zig");
 const subgame_mod = @import("subgame.zig");
 const spec_mod = @import("spec.zig");
 const export_mod = @import("export.zig");
+const tui_mod = @import("tui.zig");
 
 const Range = range_mod.Range;
 const HandTable = range_mod.HandTable;
@@ -47,6 +48,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdSolve(init, allocator, args[2..]);
     } else if (std.mem.eql(u8, sub, "resolve")) {
         try cmdResolve(init, allocator, args[2..]);
+    } else if (std.mem.eql(u8, sub, "tui")) {
+        try tui_mod.run(init.io, allocator, init.environ_map, args[2..]);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage();
     } else {
@@ -63,6 +66,7 @@ fn printUsage() !void {
         \\Subcommands:
         \\  solve     Run CFR on a postflop spot.
         \\  resolve   Re-solve a turn or river subgame from a ZON spec file.
+        \\  tui       Interactive TUI front-end. Optional spec path: `poker tui [spec.zon]`.
         \\  help      Show this message.
         \\
         \\poker solve flags:
