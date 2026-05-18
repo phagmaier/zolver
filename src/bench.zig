@@ -147,7 +147,15 @@ const scenarios = [_]Scenario{
     },
 };
 
-fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario) !void {
+// Per-(scenario, worker-count) run. Each call fully reinitializes the solver
+// and rebuilds the tree so strategy / regret state starts fresh — otherwise a
+// worker-count sweep would conflate per-iter speedup with accumulated state.
+fn runScenarioAtWorkers(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    s: Scenario,
+    max_workers: usize,
+) !void {
     var built = try s.build(allocator);
     defer built.deinit(allocator);
 
@@ -169,6 +177,8 @@ fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario) !void {
 
     var solver = try Solver.init(built.board, &built.p1, &built.p2, s.stack1, s.stack2, s.pot);
     defer solver.deinit();
+    solver.max_workers = max_workers;
+    solver.timings_io = io;
 
     var cfv_p1: [NUM_HANDS]f32 = undefined;
     var cfv_p2: [NUM_HANDS]f32 = undefined;
@@ -178,6 +188,10 @@ fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario) !void {
         try cfr.solve(&solver, allocator, root, s.warmup, prng.random(), &cfv_p1, &cfv_p2);
     }
 
+    // Reset accumulator so per-(scenario, workers) runs report only their own
+    // iters — bench reuses the same Solver shape but a fresh one per run.
+    solver.timings = .{};
+
     const start = std.Io.Timestamp.now(io, .awake);
     try cfr.solve(&solver, allocator, root, s.iters, prng.random(), &cfv_p1, &cfv_p2);
     const end = std.Io.Timestamp.now(io, .awake);
@@ -186,10 +200,35 @@ fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario) !void {
     const elapsed_s: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
     const iters_per_s: f64 = @as(f64, @floatFromInt(s.iters)) / elapsed_s;
 
-    std.debug.print(
-        "{s:<26} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>9.2}\n",
-        .{ s.name, s.iters, n_nodes, elapsed_s, iters_per_s },
-    );
+    // Per-iter breakdown (parallel path only; serial path leaves timings at
+    // zero, so the breakdown line is skipped for workers=1).
+    if (solver.timings.iter_count > 0) {
+        const n = @as(f64, @floatFromInt(solver.timings.iter_count));
+        const spawn_us = @as(f64, @floatFromInt(solver.timings.spawn_ns)) / 1e3 / n;
+        const join_us = @as(f64, @floatFromInt(solver.timings.join_ns)) / 1e3 / n;
+        const merge_us = @as(f64, @floatFromInt(solver.timings.merge_ns)) / 1e3 / n;
+        std.debug.print(
+            "{s:<26} workers={d:<2} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>9.2}  spawn/join/merge us/iter = {d:>7.1} / {d:>9.1} / {d:>7.1}\n",
+            .{ s.name, max_workers, s.iters, n_nodes, elapsed_s, iters_per_s, spawn_us, join_us, merge_us },
+        );
+    } else {
+        std.debug.print(
+            "{s:<26} workers={d:<2} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>9.2}\n",
+            .{ s.name, max_workers, s.iters, n_nodes, elapsed_s, iters_per_s },
+        );
+    }
+}
+
+// Default sweep: run every scenario at workers={1, 2, 4, 8} so we can read
+// parallel scaling at a glance. Compare against the rule of thumb of 8x at
+// 8 workers — anything well below that means thread overhead or work
+// imbalance is starting to matter.
+const WORKER_SWEEP = [_]usize{ 1, 2, 4, 8 };
+
+fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario) !void {
+    for (WORKER_SWEEP) |w| {
+        try runScenarioAtWorkers(allocator, io, s, w);
+    }
 }
 
 pub fn main(init: std.process.Init) !void {

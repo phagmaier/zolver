@@ -96,6 +96,10 @@ Keep these contracts intact unless deliberately changing the solver design:
   `SolveContext`. Parallel workers must use separate `BoardContext`s and private
   `WorkerDeltas`; shared tree regrets/strategy sums are merged only after worker
   walks finish.
+- `Solver.max_workers` (0 = default cap) and `Solver.timings_io` (null = no
+  collection) are bench/diagnostic knobs. Tests leave both at defaults and pay
+  zero overhead. The bench's `WORKER_SWEEP` array runs each scenario across
+  worker counts and prints per-iter spawn/join/merge µs for the parallel path.
 - `Solver.runout_cache` is an eager, per-`Solver` array of pre-computed 5-card
   `BoardContext`s for every legal runout off the solver's root board. Built by
   `Solver.buildRunoutCacheIfNeeded`, which `cfr.solve` calls before dispatching
@@ -155,19 +159,42 @@ Existing tests cover:
 
 Engine work comes before UI:
 
-1. Characterize release-build parallel CFR performance against serial behavior.
-   Use `src/bench.zig` to identify if thread-spawning overhead or delta-merging
-   is the next bottleneck now that the runout cache is in place. Baseline
-   reference: `flop-fullrange-trunc` improved from ~15.0 s/iter to ~6.1 s/iter
-   on a 16-core box after the cache + unordered-pair switch.
-2. Investigate thread pooling for `cfr.solve`. Currently, worker threads are
-   spawned/joined every iteration, which may be "overkill" and slow for fast
-   subgame solves.
+1. Fix the bench metric: report samples/s (= iters/s × workers) or
+   wall-clock-to-fixed-sample-budget, not raw iters/s. Each parallel iter
+   does `n_workers` walks for variance reduction, so iters/s drops with
+   worker count even when sample throughput rises. The current sweep shows
+   ~3.6–6.4× sample-throughput speedup at 8 workers vs serial — that win is
+   invisible in iters/s.
+2. Reduce cache contention on shared regret/strategy_sum reads during
+   parallel walks. The per-iter `join_ns` (≈ max walk wall-clock) grows
+   12–26% from 2 → 8 workers on identical work, meaning workers are
+   slowing each other down via memory bandwidth / cache traffic, not via
+   spawn or merge. Concrete targets: per-worker regret snapshots taken
+   once at iter start, false-sharing-aware layout for `node.regrets` /
+   `node.strategy_sum`, NUMA-aware worker pinning.
 3. Replace `HandTable.getIndex` with a constant-time lookup if it becomes hot.
    It is currently only used in setup/tests, so this is low priority.
 4. Add a minimal CLI/range input path after the engine API is stable.
 5. Extend `src/bench.zig` for truncated-subgame accuracy and alternate leaf
    models (v2+ models).
+
+**Deferred / deprioritized:**
+
+- Thread pooling for `cfr.solve` was on the priority list, but profile data
+  (`spawn_ns` ~1.5 ms/iter at 8 workers) shows spawn cost is a small share
+  of wall-clock for turn (~2%) and flop (~0.03%) workloads. Only
+  river-polarized would meaningfully benefit (~13% of wall-clock), and that
+  scenario is already cheap. Reconsider if a future workload spawns many
+  workers per cheap iter.
+
+**Parallel-CFR semantics (load-bearing):**
+
+Each parallel iter spawns `n_workers` walks; each walk samples one chance
+path and writes its own deltas; `mergeDeltas` aggregates after the iter.
+Adding workers *does not* speed up a single iter — it adds more sample
+paths per iter for variance reduction. Wall-clock per iter grows with
+worker count (more total walk work plus cache contention) but per-sample
+throughput rises. Bench scenarios should be interpreted in that light.
 
 When completing a substantial change, update this file with durable new
 contracts, commands, caveats, or priorities. Do not add a blow-by-blow progress

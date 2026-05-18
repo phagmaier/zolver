@@ -27,6 +27,23 @@ const MAX_CHANCE_DEPTH: usize = 3;
 // dominate, so we cap regardless of CPU count.
 const MAX_PARALLEL_WORKERS: usize = 8;
 
+// Per-iter wall-clock breakdown for the parallel `cfr.solve` path. `join_ns`
+// dominates the walk-time budget — the main thread is blocked in
+// `threads[j].join()` while workers run, so it captures max(walk_time) plus
+// the join syscall itself.
+pub const ParallelTimings = struct {
+    iter_count: u64 = 0,
+    spawn_ns: u64 = 0,
+    join_ns: u64 = 0,
+    merge_ns: u64 = 0,
+};
+
+fn timestampDeltaNs(from: std.Io.Clock.Timestamp, to: std.Io.Clock.Timestamp) u64 {
+    const diff: i96 = to.raw.nanoseconds - from.raw.nanoseconds;
+    if (diff < 0) return 0;
+    return @intCast(diff);
+}
+
 // All board-derived solver state lives here. Carved out of `Solver` so the
 // mutable boundary is explicit: every field a chance-node walk mutates is in
 // this struct, and chance snapshot/restore is a flat memcpy of one of these.
@@ -207,6 +224,21 @@ pub const Solver = struct {
     runout_cache_root: [5]Card,
     runout_cache_alloc: ?Allocator,
 
+    // Optional worker-count override for `cfr.solve`. 0 means "use the
+    // default cap" (min of cpu_count and MAX_PARALLEL_WORKERS). Any positive
+    // value is also clamped to MAX_PARALLEL_WORKERS. Used by the bench
+    // harness to sweep parallel scaling without changing the call site.
+    max_workers: usize,
+
+    // Optional per-iter timing accumulator for the parallel `cfr.solve` path.
+    // Reset to zero in `init`; updated only when both a parallel iter runs
+    // AND `timings_io` is non-null (since 0.16 timestamps need an Io vtable).
+    // Read after `cfr.solve` returns to attribute wall-clock to spawn / join
+    // (≈ walk wall-clock — workers run while main blocks in join) / merge.
+    // Tests leave `timings_io` null and pay zero overhead.
+    timings: ParallelTimings,
+    timings_io: ?std.Io,
+
     pub fn init(
         board: [5]Card,
         p1: *const Range,
@@ -229,6 +261,9 @@ pub const Solver = struct {
             .runout_cache = null,
             .runout_cache_root = .{ 0, 0, 0, 0, 0 },
             .runout_cache_alloc = null,
+            .max_workers = 0,
+            .timings = .{},
+            .timings_io = null,
         };
 
         @memset(&self.p1_reach, 0);
@@ -840,7 +875,11 @@ pub fn solve(
     try self.buildRunoutCacheIfNeeded(allocator);
 
     const cpu_count: usize = std.Thread.getCpuCount() catch 1;
-    const n_workers: usize = @min(cpu_count, MAX_PARALLEL_WORKERS);
+    const default_workers: usize = @min(cpu_count, MAX_PARALLEL_WORKERS);
+    const n_workers: usize = if (self.max_workers == 0)
+        default_workers
+    else
+        @min(self.max_workers, MAX_PARALLEL_WORKERS);
 
     if (n_workers <= 1 or iterations == 0) {
         // Serial fallback. No deltas, no thread spawn.
@@ -894,6 +933,11 @@ pub fn solve(
         var threads: [MAX_PARALLEL_WORKERS]std.Thread = undefined;
         var jobs: [MAX_PARALLEL_WORKERS]WalkJob = undefined;
 
+        const t_iter_start: ?std.Io.Clock.Timestamp = if (self.timings_io) |io|
+            std.Io.Clock.Timestamp.now(io, .awake)
+        else
+            null;
+
         var spawned: usize = 0;
         var s: usize = 0;
         while (s < n_workers) : (s += 1) {
@@ -918,10 +962,27 @@ pub fn solve(
                 break;
             }
         }
+        const t_after_spawn: ?std.Io.Clock.Timestamp = if (self.timings_io) |io|
+            std.Io.Clock.Timestamp.now(io, .awake)
+        else
+            null;
+
         var j: usize = 0;
         while (j < spawned) : (j += 1) threads[j].join();
+        const t_after_join: ?std.Io.Clock.Timestamp = if (self.timings_io) |io|
+            std.Io.Clock.Timestamp.now(io, .awake)
+        else
+            null;
 
         mergeDeltas(worker_ptrs[0..n_workers]);
+
+        if (self.timings_io) |_| {
+            const t_after_merge = std.Io.Clock.Timestamp.now(self.timings_io.?, .awake);
+            self.timings.iter_count += 1;
+            self.timings.spawn_ns += timestampDeltaNs(t_iter_start.?, t_after_spawn.?);
+            self.timings.join_ns += timestampDeltaNs(t_after_spawn.?, t_after_join.?);
+            self.timings.merge_ns += timestampDeltaNs(t_after_join.?, t_after_merge);
+        }
     }
 
     // Return the last iter's worker-0 CFVs (the public out-buffers are an
