@@ -199,6 +199,10 @@ fn runScenarioAtWorkers(
     const elapsed_ns: i128 = @as(i128, end.nanoseconds) - @as(i128, start.nanoseconds);
     const elapsed_s: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
     const iters_per_s: f64 = @as(f64, @floatFromInt(s.iters)) / elapsed_s;
+    // samples/s = strategy-update rate × walks-per-update. The right metric
+    // for parallel scaling: each parallel iter dispatches `max_workers`
+    // walks, so adding workers raises samples/s even when iters/s falls.
+    const samples_per_s: f64 = iters_per_s * @as(f64, @floatFromInt(@max(@as(usize, 1), max_workers)));
 
     // Per-iter breakdown (parallel path only; serial path leaves timings at
     // zero, so the breakdown line is skipped for workers=1).
@@ -208,13 +212,13 @@ fn runScenarioAtWorkers(
         const join_us = @as(f64, @floatFromInt(solver.timings.join_ns)) / 1e3 / n;
         const merge_us = @as(f64, @floatFromInt(solver.timings.merge_ns)) / 1e3 / n;
         std.debug.print(
-            "{s:<26} workers={d:<2} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>9.2}  spawn/join/merge us/iter = {d:>7.1} / {d:>9.1} / {d:>7.1}\n",
-            .{ s.name, max_workers, s.iters, n_nodes, elapsed_s, iters_per_s, spawn_us, join_us, merge_us },
+            "{s:<26} workers={d:<2} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>8.2}  samples/s={d:>9.2}  spawn/join/merge us/iter = {d:>7.1} / {d:>9.1} / {d:>7.1}\n",
+            .{ s.name, max_workers, s.iters, n_nodes, elapsed_s, iters_per_s, samples_per_s, spawn_us, join_us, merge_us },
         );
     } else {
         std.debug.print(
-            "{s:<26} workers={d:<2} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>9.2}\n",
-            .{ s.name, max_workers, s.iters, n_nodes, elapsed_s, iters_per_s },
+            "{s:<26} workers={d:<2} iters={d:<5} nodes={d:<6} time={d:>7.3}s  iters/s={d:>8.2}  samples/s={d:>9.2}\n",
+            .{ s.name, max_workers, s.iters, n_nodes, elapsed_s, iters_per_s, samples_per_s },
         );
     }
 }
