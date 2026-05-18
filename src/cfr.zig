@@ -137,13 +137,19 @@ fn legalOneCardChanceCount(board: [5]Card, hand: range_mod.Hand) u32 {
     return publicChanceCardCount(board) - 2;
 }
 
-fn legalOrderedRunoutCount(board: [5]Card, hand: range_mod.Hand, cards_to_deal: u8) u32 {
+// Per-hand legal runout count, blocker-conditioned on the private hand.
+//
+// For `cards_to_deal == 2` (flop leaf), this returns the count of *unordered*
+// (turn, river) pairs the hand has left. Showdown evaluation is order-
+// independent, so `allInEquityLeaf` iterates each unordered pair once instead
+// of twice — the per-hand denominator must match.
+fn legalRunoutCount(board: [5]Card, hand: range_mod.Hand, cards_to_deal: u8) u32 {
     if (handBlockedByBoard(hand, board)) return 0;
     const public_count = publicChanceCardCount(board);
     return switch (cards_to_deal) {
         0 => 1,
         1 => public_count - 2,
-        2 => (public_count - 2) * (public_count - 3),
+        2 => (public_count - 2) * (public_count - 3) / 2,
         else => unreachable,
     };
 }
@@ -183,6 +189,24 @@ pub const Solver = struct {
     // this and only this; snapshot/restore is a flat memcpy of the field.
     board_ctx: BoardContext,
 
+    // Pre-computed 5-card BoardContexts for every legal runout off the
+    // solver's root board. Built eagerly by `buildRunoutCacheIfNeeded`
+    // (called from `cfr.solve` at entry); read-only by the time worker
+    // threads start, so no synchronization needed in the hot path.
+    //
+    // - Root flop (3 cards):  cache has C(49, 2) − blocked pairs (≤ 1,176)
+    //                         unordered (turn, river) BoardContexts.
+    // - Root turn (4 cards):  cache has up to 48 river BoardContexts.
+    // - Root river (5 cards): null. Showdown is single-board, no cache needed.
+    //
+    // `runout_cache_root` captures the first `boardCardCount` cards of the
+    // root board so `allInEquityLeaf` can assert the cache still matches the
+    // SolveContext's saved board (paranoia against future code that mutates
+    // the root board between init and solve).
+    runout_cache: ?[]BoardContext,
+    runout_cache_root: [5]Card,
+    runout_cache_alloc: ?Allocator,
+
     pub fn init(
         board: [5]Card,
         p1: *const Range,
@@ -202,6 +226,9 @@ pub const Solver = struct {
             .p1_reach = undefined,
             .p2_reach = undefined,
             .board_ctx = undefined,
+            .runout_cache = null,
+            .runout_cache_root = .{ 0, 0, 0, 0, 0 },
+            .runout_cache_alloc = null,
         };
 
         @memset(&self.p1_reach, 0);
@@ -235,7 +262,56 @@ pub const Solver = struct {
     }
 
     pub fn deinit(self: *Solver) void {
+        if (self.runout_cache) |cache| {
+            if (self.runout_cache_alloc) |a| a.free(cache);
+            self.runout_cache = null;
+            self.runout_cache_alloc = null;
+        }
         self.evaluator.deinit();
+    }
+
+    // Eagerly populate `runout_cache` for the solver's current root board.
+    // No-op if the root board already has 5 cards (no runout enumeration
+    // needed) or if the cache is already built. Safe to call multiple times;
+    // safe to skip entirely if no caller needs the speedup.
+    //
+    // Must be called BEFORE any worker threads dispatch — workers read the
+    // cache without locks under the assumption that it doesn't change during
+    // a solve.
+    pub fn buildRunoutCacheIfNeeded(self: *Solver, allocator: Allocator) !void {
+        if (self.runout_cache != null) return;
+        const root_board = self.board_ctx.board;
+        const num_cards = boardCardCount(root_board);
+        if (num_cards != 3 and num_cards != 4) return;
+
+        const deck = card_mod.makeDeck();
+        var list = std.ArrayList(BoardContext).empty;
+        errdefer list.deinit(allocator);
+
+        if (num_cards == 4) {
+            for (deck) |r| {
+                if (boardContains(root_board, r)) continue;
+                var b = root_board;
+                b[4] = r;
+                try list.append(allocator, BoardContext.compute(&self.evaluator, &self.hand_table, b));
+            }
+        } else {
+            // num_cards == 3: unordered (turn, river) pairs only.
+            for (deck, 0..) |t, ti| {
+                if (boardContains(root_board, t)) continue;
+                for (deck[ti + 1 ..]) |r| {
+                    if (boardContains(root_board, r)) continue;
+                    var b = root_board;
+                    b[3] = t;
+                    b[4] = r;
+                    try list.append(allocator, BoardContext.compute(&self.evaluator, &self.hand_table, b));
+                }
+            }
+        }
+
+        self.runout_cache = try list.toOwnedSlice(allocator);
+        self.runout_cache_root = root_board;
+        self.runout_cache_alloc = allocator;
     }
 
     /// Update the solver's board state for a new runout. Forwards to
@@ -417,28 +493,42 @@ pub const SolveContext = struct {
     }
 
     fn computeShowdownCFV(self: *const SolveContext, reach: []const f32, out: []f32, payoff: f32) void {
+        self.computeShowdownCFVFor(self.board_ctx, reach, out, payoff);
+    }
+
+    // Showdown CFV against an explicitly-supplied BoardContext. Same logic as
+    // `computeShowdownCFV` but lets the caller point at a pre-computed runout
+    // (e.g. an entry in `Solver.runout_cache`) without copying it into
+    // `self.board_ctx` first.
+    fn computeShowdownCFVFor(
+        self: *const SolveContext,
+        board_ctx: *const BoardContext,
+        reach: []const f32,
+        out: []f32,
+        payoff: f32,
+    ) void {
         // Showdown CFV depends on sorted_indices / rank_map / first_rank /
         // last_rank, which are only meaningful at a full 5-card board.
         // Partial-board strengths are computed transiently in the walk but
         // must never reach a showdown — pin the invariant here so future
         // refactors can't silently introduce wrong tie-breaks.
-        std.debug.assert(boardCardCount(self.board_ctx.board) == 5);
+        std.debug.assert(boardCardCount(board_ctx.board) == 5);
         const solver = self.solver;
         var prefix_sum: [NUM_HANDS]f32 = undefined;
         var total_mass: f32 = 0;
         for (0..NUM_HANDS) |r| {
-            total_mass += reach[self.board_ctx.sorted_indices[r]];
+            total_mass += reach[board_ctx.sorted_indices[r]];
             prefix_sum[r] = total_mass;
         }
 
         for (0..NUM_HANDS) |i| {
-            if (self.board_ctx.blocked[i]) {
+            if (board_ctx.blocked[i]) {
                 out[i] = 0;
                 continue;
             }
 
-            const win_rank_end = @as(i32, @intCast(self.board_ctx.first_rank[i])) - 1;
-            const loss_rank_start = self.board_ctx.last_rank[i] + 1;
+            const win_rank_end = @as(i32, @intCast(board_ctx.first_rank[i])) - 1;
+            const loss_rank_start = board_ctx.last_rank[i] + 1;
 
             const naive_win_mass = if (win_rank_end >= 0) prefix_sum[@intCast(win_rank_end)] else 0;
             const naive_loss_mass = if (loss_rank_start < NUM_HANDS) total_mass - prefix_sum[loss_rank_start - 1] else 0;
@@ -446,10 +536,10 @@ pub const SolveContext = struct {
             var corr_win_mass: f32 = 0;
             var corr_loss_mass: f32 = 0;
 
-            const s_i = self.board_ctx.hand_strengths[i];
+            const s_i = board_ctx.hand_strengths[i];
             for (0..solver.collision_counts[i]) |c_idx| {
                 const j = solver.collisions[i][c_idx];
-                const s_j = self.board_ctx.hand_strengths[j];
+                const s_j = board_ctx.hand_strengths[j];
                 if (s_j < s_i) {
                     corr_win_mass += reach[j];
                 } else if (s_j > s_i) {
@@ -467,8 +557,21 @@ pub const SolveContext = struct {
     // All-in equity leaf evaluator. At a chance node we wish to truncate, this
     // returns each player's per-hand CFV under the simplifying assumption that
     // both players commit their remaining stacks immediately and the rest of
-    // the board runs out uniformly. Save/restore goes through pushSnapshot /
+    // the board runs out uniformly.
+    //
+    // Fast path: when `solver.runout_cache` is populated, iterate the cached
+    // 5-card BoardContexts directly — no per-runout hand-strength recompute
+    // and no `pushSnapshot`/`popSnapshot` round-trip. Cache must be built
+    // before any worker walks start; see `Solver.buildRunoutCacheIfNeeded`.
+    //
+    // Slow path (no cache): preserved for tests and ad-hoc callers that don't
+    // go through `cfr.solve`. Save/restore goes through pushSnapshot /
     // popSnapshot so the same chance-depth budget is shared with `walk`.
+    //
+    // Both paths enumerate flop runouts as *unordered* (turn, river) pairs.
+    // Showdown evaluation is order-independent, so the ordered loop was
+    // doing 2x the work for no payoff. The per-hand denominator from
+    // `legalRunoutCount` matches this convention.
     pub fn allInEquityLeaf(
         self: *SolveContext,
         edge: *const Edge,
@@ -484,64 +587,65 @@ pub const SolveContext = struct {
         @memset(out_cfv_p1, 0);
         @memset(out_cfv_p2, 0);
 
-        self.pushSnapshot();
         const saved_board = self.board_ctx.board;
         const num_board_cards = boardCardCount(saved_board);
 
         if (num_board_cards == 5) {
             self.computeShowdownCFV(p2_reach, out_cfv_p1, half_pot);
             self.computeShowdownCFV(p1_reach, out_cfv_p2, half_pot);
-            self.popSnapshot();
             return;
         }
 
         std.debug.assert(num_board_cards == 3 or num_board_cards == 4);
 
-        const deck = card_mod.makeDeck();
-        var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
-        var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
-        const cards_to_deal: u8 = if (num_board_cards == 4) 1 else 2;
         const hands = self.solver.hand_table.all_hands;
+        const cards_to_deal: u8 = if (num_board_cards == 4) 1 else 2;
 
-        if (num_board_cards == 4) {
-            // Turn-chance leaf: enumerate the river card only.
-            for (deck) |r| {
-                if (boardContains(saved_board, r)) continue;
+        if (self.solver.runout_cache) |cache| {
+            // Cached fast path. Each entry is a complete 5-card BoardContext
+            // pre-computed at solver init for the solver's root board.
+            std.debug.assert(std.mem.eql(Card, saved_board[0..num_board_cards], self.solver.runout_cache_root[0..num_board_cards]));
 
-                var new_board = saved_board;
-                new_board[4] = r;
-                self.reinitForBoard(new_board);
+            var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
+            var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
+            var masked_p1: [NUM_HANDS]f32 = undefined;
+            var masked_p2: [NUM_HANDS]f32 = undefined;
 
-                var masked_p1: [NUM_HANDS]f32 = undefined;
-                var masked_p2: [NUM_HANDS]f32 = undefined;
+            for (cache) |*cached| {
+                const new1: Card = if (num_board_cards == 4) cached.board[4] else cached.board[3];
+                const new2: Card = if (num_board_cards == 4) 0 else cached.board[4];
+
                 for (0..NUM_HANDS) |i| {
                     const h = hands[i];
-                    const keep = !handHitsCard(h, r);
+                    const keep = !handHitsCard(h, new1) and (new2 == 0 or !handHitsCard(h, new2));
                     masked_p1[i] = if (keep) p1_reach[i] else 0;
                     masked_p2[i] = if (keep) p2_reach[i] else 0;
                 }
 
-                self.computeShowdownCFV(&masked_p2, &runout_cfv_p1, half_pot);
-                self.computeShowdownCFV(&masked_p1, &runout_cfv_p2, half_pot);
+                self.computeShowdownCFVFor(cached, &masked_p2, &runout_cfv_p1, half_pot);
+                self.computeShowdownCFVFor(cached, &masked_p1, &runout_cfv_p2, half_pot);
 
                 for (0..NUM_HANDS) |i| {
                     const h = hands[i];
-                    if (handHitsCard(h, r)) continue;
+                    if (handHitsCard(h, new1)) continue;
+                    if (new2 != 0 and handHitsCard(h, new2)) continue;
                     out_cfv_p1[i] += runout_cfv_p1[i];
                     out_cfv_p2[i] += runout_cfv_p2[i];
                 }
             }
         } else {
-            // Flop-chance leaf: enumerate (turn, river) ordered pairs.
-            for (deck) |t| {
-                if (boardContains(saved_board, t)) continue;
+            // Slow path: recompute every runout's BoardContext on demand.
+            self.pushSnapshot();
+            const deck = card_mod.makeDeck();
+            var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
+            var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
 
+            if (num_board_cards == 4) {
+                // Turn-chance leaf: enumerate the river card only.
                 for (deck) |r| {
-                    if (r == t) continue;
                     if (boardContains(saved_board, r)) continue;
 
                     var new_board = saved_board;
-                    new_board[3] = t;
                     new_board[4] = r;
                     self.reinitForBoard(new_board);
 
@@ -549,7 +653,7 @@ pub const SolveContext = struct {
                     var masked_p2: [NUM_HANDS]f32 = undefined;
                     for (0..NUM_HANDS) |i| {
                         const h = hands[i];
-                        const keep = !handHitsCard(h, t) and !handHitsCard(h, r);
+                        const keep = !handHitsCard(h, r);
                         masked_p1[i] = if (keep) p1_reach[i] else 0;
                         masked_p2[i] = if (keep) p2_reach[i] else 0;
                     }
@@ -559,19 +663,52 @@ pub const SolveContext = struct {
 
                     for (0..NUM_HANDS) |i| {
                         const h = hands[i];
-                        if (handHitsCard(h, t) or handHitsCard(h, r)) continue;
+                        if (handHitsCard(h, r)) continue;
                         out_cfv_p1[i] += runout_cfv_p1[i];
                         out_cfv_p2[i] += runout_cfv_p2[i];
                     }
                 }
-            }
-        }
+            } else {
+                // Flop-chance leaf: enumerate (turn, river) unordered pairs.
+                for (deck, 0..) |t, ti| {
+                    if (boardContains(saved_board, t)) continue;
 
-        self.popSnapshot();
+                    for (deck[ti + 1 ..]) |r| {
+                        if (boardContains(saved_board, r)) continue;
+
+                        var new_board = saved_board;
+                        new_board[3] = t;
+                        new_board[4] = r;
+                        self.reinitForBoard(new_board);
+
+                        var masked_p1: [NUM_HANDS]f32 = undefined;
+                        var masked_p2: [NUM_HANDS]f32 = undefined;
+                        for (0..NUM_HANDS) |i| {
+                            const h = hands[i];
+                            const keep = !handHitsCard(h, t) and !handHitsCard(h, r);
+                            masked_p1[i] = if (keep) p1_reach[i] else 0;
+                            masked_p2[i] = if (keep) p2_reach[i] else 0;
+                        }
+
+                        self.computeShowdownCFV(&masked_p2, &runout_cfv_p1, half_pot);
+                        self.computeShowdownCFV(&masked_p1, &runout_cfv_p2, half_pot);
+
+                        for (0..NUM_HANDS) |i| {
+                            const h = hands[i];
+                            if (handHitsCard(h, t) or handHitsCard(h, r)) continue;
+                            out_cfv_p1[i] += runout_cfv_p1[i];
+                            out_cfv_p2[i] += runout_cfv_p2[i];
+                        }
+                    }
+                }
+            }
+
+            self.popSnapshot();
+        }
 
         for (0..NUM_HANDS) |i| {
             const h = hands[i];
-            const legal_count = legalOrderedRunoutCount(saved_board, h, cards_to_deal);
+            const legal_count = legalRunoutCount(saved_board, h, cards_to_deal);
             if (legal_count == 0) {
                 out_cfv_p1[i] = 0;
                 out_cfv_p2[i] = 0;
@@ -696,6 +833,12 @@ pub fn solve(
     out_cfv_p1: []f32,
     out_cfv_p2: []f32,
 ) !void {
+    // Build the per-solver runout cache once, before any worker walks start.
+    // Cheap when the root board has 5 cards (no-op). For root flop/turn it
+    // turns the per-leaf hand-strength recompute into a one-time startup
+    // cost amortized across every iteration × every truncated chance leaf.
+    try self.buildRunoutCacheIfNeeded(allocator);
+
     const cpu_count: usize = std.Thread.getCpuCount() catch 1;
     const n_workers: usize = @min(cpu_count, MAX_PARALLEL_WORKERS);
 
@@ -1694,9 +1837,11 @@ test "chance runout counts condition on each private hand" {
 
     try std.testing.expectEqual(@as(u32, 49), publicChanceCardCount(board_flop));
     try std.testing.expectEqual(@as(u32, 48), publicChanceCardCount(board_turn));
-    try std.testing.expectEqual(@as(u32, 47 * 46), legalOrderedRunoutCount(board_flop, aa, 2));
-    try std.testing.expectEqual(@as(u32, 46), legalOrderedRunoutCount(board_turn, aa, 1));
-    try std.testing.expectEqual(@as(u32, 0), legalOrderedRunoutCount(board_turn, blocked, 1));
+    // Flop leaves now enumerate unordered (turn, river) pairs, so the
+    // denominator is C(47, 2) = 47*46/2 = 1081 instead of 47*46 = 2162.
+    try std.testing.expectEqual(@as(u32, 47 * 46 / 2), legalRunoutCount(board_flop, aa, 2));
+    try std.testing.expectEqual(@as(u32, 46), legalRunoutCount(board_turn, aa, 1));
+    try std.testing.expectEqual(@as(u32, 0), legalRunoutCount(board_turn, blocked, 1));
 }
 
 test "Solver.solve: AA vs KK river — p1 always wins ~+25 EV" {
@@ -2283,4 +2428,78 @@ test "verification: all-in equity leaf matches exact full-runout chance tree" {
 
     try std.testing.expectApproxEqAbs(exact_p1[aa_idx], leaf_p1[aa_idx], 1e-3);
     try std.testing.expectApproxEqAbs(exact_p2[kk_idx], leaf_p2[kk_idx], 1e-3);
+}
+
+test "allInEquityLeaf: cached and un-cached paths produce identical CFVs" {
+    // Both flop and turn roots: build the runout cache, take a full vector
+    // snapshot of `allInEquityLeaf`, then tear the cache down and re-run.
+    // Cached and un-cached paths must produce bit-identical CFVs over all
+    // 1326 hands — the cache is a pure optimization with no behavioral side
+    // effects.
+    const allocator = std.testing.allocator;
+
+    const flop_board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        0,
+        0,
+    };
+    const turn_board = [5]Card{
+        card_mod.makeCard(5, 3),
+        card_mod.makeCard(6, 1),
+        card_mod.makeCard(0, 2),
+        card_mod.makeCard(10, 0),
+        0,
+    };
+
+    inline for ([_][5]Card{ flop_board, turn_board }) |board| {
+        var p1 = try Range.initEmpty(allocator, 0);
+        defer p1.deinit(allocator);
+        var p2 = try Range.initEmpty(allocator, 0);
+        defer p2.deinit(allocator);
+
+        var solver = try Solver.init(board, &p1, &p2, 100, 100, 50);
+        defer solver.deinit();
+
+        const ht = HandTable.init();
+        const aa_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(12, 0), card_mod.makeCard(12, 1))).?;
+        const kk_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(11, 3), card_mod.makeCard(11, 2))).?;
+        // Use a multi-hand range to exercise the masking + showdown path
+        // across many runouts, not just two singletons.
+        solver.p1_reach[aa_idx] = 1.0;
+        solver.p2_reach[kk_idx] = 1.0;
+        const qq_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(10, 0), card_mod.makeCard(10, 1))).?;
+        const jj_idx = ht.getIndex(range_mod.Hand.init(card_mod.makeCard(9, 0), card_mod.makeCard(9, 1))).?;
+        solver.p1_reach[qq_idx] = 0.5;
+        solver.p2_reach[jj_idx] = 0.7;
+
+        const edge = Edge{
+            .action = .CHANCE,
+            .amount = 50,
+            .stack1 = 100,
+            .stack2 = 100,
+            .child = null,
+        };
+
+        var uncached_p1: [NUM_HANDS]f32 = undefined;
+        var uncached_p2: [NUM_HANDS]f32 = undefined;
+        solver.allInEquityLeaf(&edge, &solver.p1_reach, &solver.p2_reach, &uncached_p1, &uncached_p2);
+
+        try solver.buildRunoutCacheIfNeeded(allocator);
+        try std.testing.expect(solver.runout_cache != null);
+
+        var cached_p1: [NUM_HANDS]f32 = undefined;
+        var cached_p2: [NUM_HANDS]f32 = undefined;
+        solver.allInEquityLeaf(&edge, &solver.p1_reach, &solver.p2_reach, &cached_p1, &cached_p2);
+
+        // Bit-identical: both paths visit the same set of unordered runouts,
+        // both call computeShowdownCFV with the same operands in the same
+        // order. Any drift here means the cache and the slow path disagree
+        // and one of them is wrong.
+        for (0..NUM_HANDS) |i| {
+            try std.testing.expectEqual(uncached_p1[i], cached_p1[i]);
+            try std.testing.expectEqual(uncached_p2[i], cached_p2[i]);
+        }
+    }
 }

@@ -83,8 +83,9 @@ Keep these contracts intact unless deliberately changing the solver design:
   `exploitability`, and `allInEquityLeaf` enumerate runouts exactly.
 - Chance handling must mask private hands blocked by newly dealt public cards.
   Per-hand chance denominators are blocker-conditioned, e.g. a turn-to-river
-  private hand may have 46 legal rivers, and a flop leaf uses ordered turn/river
-  counts.
+  private hand may have 46 legal rivers. Flop leaves enumerate *unordered*
+  (turn, river) pairs and use `legalRunoutCount` with `cards_to_deal = 2`
+  returning `(public_count - 2) * (public_count - 3) / 2`.
 - CFR is CFR+ with regret matching plus non-negative regret clipping after each
   update. `strategy_sum` uses linear iteration weights (`iter + 1`).
 - `averageStrategy(node, out)` is the public strategy readout. It returns the
@@ -95,6 +96,12 @@ Keep these contracts intact unless deliberately changing the solver design:
   `SolveContext`. Parallel workers must use separate `BoardContext`s and private
   `WorkerDeltas`; shared tree regrets/strategy sums are merged only after worker
   walks finish.
+- `Solver.runout_cache` is an eager, per-`Solver` array of pre-computed 5-card
+  `BoardContext`s for every legal runout off the solver's root board. Built by
+  `Solver.buildRunoutCacheIfNeeded`, which `cfr.solve` calls before dispatching
+  any workers. It is read-only by the time workers run, so the fast path in
+  `SolveContext.allInEquityLeaf` reads it without synchronization. The slow
+  path (recompute on demand) is preserved for callers that bypass `cfr.solve`.
 
 ## Subgame Decomposition
 
@@ -138,8 +145,9 @@ Existing tests cover:
   stack sizes.
 - Full-topology truncated exploitability is too expensive for the default unit
   suite. Put deeper accuracy studies in benchmark-style tests or separate tools.
-- `allInEquityLeaf` recomputes runout `BoardContext`s repeatedly. Caching flop
-  leaf runouts is the most likely next engine optimization.
+- The runout cache stores full `BoardContext`s (~17 KB each, so ~20 MB for a
+  flop solve). Acceptable today; if memory tightens, the cache could shrink
+  to per-hand strength + rank arrays (the actually-read fields).
 - There is no real CLI/range parser yet. Investigate existing range formats
   before inventing one.
 
@@ -148,11 +156,18 @@ Existing tests cover:
 Engine work comes before UI:
 
 1. Characterize release-build parallel CFR performance against serial behavior.
-2. Add benchmark tooling for truncated-subgame accuracy and alternate leaf
-   models.
-3. Cache `allInEquityLeaf` runout board contexts for repeated flop leaf evals.
-4. Replace `HandTable.getIndex` with a constant-time lookup if it becomes hot.
-5. Add a minimal CLI/range input path after the engine API is stable.
+   Use `src/bench.zig` to identify if thread-spawning overhead or delta-merging
+   is the next bottleneck now that the runout cache is in place. Baseline
+   reference: `flop-fullrange-trunc` improved from ~15.0 s/iter to ~6.1 s/iter
+   on a 16-core box after the cache + unordered-pair switch.
+2. Investigate thread pooling for `cfr.solve`. Currently, worker threads are
+   spawned/joined every iteration, which may be "overkill" and slow for fast
+   subgame solves.
+3. Replace `HandTable.getIndex` with a constant-time lookup if it becomes hot.
+   It is currently only used in setup/tests, so this is low priority.
+4. Add a minimal CLI/range input path after the engine API is stable.
+5. Extend `src/bench.zig` for truncated-subgame accuracy and alternate leaf
+   models (v2+ models).
 
 When completing a substantial change, update this file with durable new
 contracts, commands, caveats, or priorities. Do not add a blow-by-blow progress
