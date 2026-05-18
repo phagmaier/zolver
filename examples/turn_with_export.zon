@@ -1,0 +1,17 @@
+// Example: turn re-solve that writes per-hand strategy to CSV and prints
+// exploitability. Run with:
+//   ./zig-out/bin/Poker resolve examples/turn_with_export.zon
+.{
+    .board = "AhKsQd",
+    .pot   = 50,
+    .stack = 200,
+    .p1    = "JJ+, AKs",
+    .p2    = "TT+, AQs+",
+    .iters = 50,
+    .flop  = .{ .path = "x x" },
+    .turn  = .{ .card = "Th" },
+    .output = .{
+        .strategy_csv  = "turn_strategy.csv",
+        .exploitability = true,
+    },
+}

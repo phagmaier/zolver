@@ -1,0 +1,13 @@
+// Example: re-solve a river subgame after check-check / check-check.
+// Run with:  ./zig-out/bin/Poker resolve examples/river.zon
+.{
+    .board = "AhKsQd",
+    .pot   = 50,
+    .stack = 200,
+    .p1    = "JJ+, AKs",
+    .p2    = "TT+, AQs+",
+    .iters = 50,
+    .flop  = .{ .path = "x x" },
+    .turn  = .{ .card = "Th" },
+    .river = .{ .path = "x x", .card = "2s" },
+}

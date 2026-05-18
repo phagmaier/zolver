@@ -47,6 +47,11 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 - Run the CLI: `./zig-out/bin/Poker solve --board AhKsQd --pot 50
   --stack 200 --p1 "JJ+, AKs" --p2 "TT+, AQs+" --iters 20 --truncate flop`
   (build first with `zig build -Doptimize=ReleaseFast`).
+- Re-solve a turn/river subgame: `./zig-out/bin/Poker resolve examples/turn.zon`
+  (or `examples/river.zon`). The spec file declares board, ranges, pot, stack,
+  iters, flop path, turn card, and optional river path + card. Path tokens are
+  whitespace-separated: `x`=check, `c`=call, `f`=fold, `j`=allin, `b<pct>`=bet
+  (sized from `gamestate.BETSIZES`, e.g. `b50`, `b100`).
 - Run benchmark: `zig build -Doptimize=ReleaseFast bench`.
 
 ## Module Map
@@ -59,7 +64,13 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 - `src/node.zig` - Betting tree nodes/edges and full/truncated tree builders.
 - `src/cfr.zig` - CFR+ solver core, chance sampling, parallel walk dispatch.
 - `src/subgame.zig` - `Subgame` and `SubgameManager` orchestration for re-solves.
-- `src/main.zig` - `poker solve` CLI entry point and argument parsing.
+- `src/spec.zig` - ZON spec file types and path-token parser for `poker resolve`.
+  Header comment is the canonical reference for the spec file grammar.
+- `src/export.zig` - CSV writer for per-hand root strategy. Header comment
+  documents the schema.
+- `src/main.zig` - `poker solve` / `poker resolve` CLI entry points and dispatch.
+- `examples/turn.zon`, `examples/river.zon`, `examples/turn_with_export.zon` -
+  Sample `poker resolve` specs (the last enables CSV export + exploitability).
 
 ## Solver Invariants
 
@@ -81,8 +92,17 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 ## Known Gaps & Slop
 
-- **UI/CLI**: No per-hand strategy export or CSV output.
-- **Subgame**: `SubgameManager` is functional but not exposed via CLI.
+- **CLI is placeholder UX.** `poker resolve` exists to exercise
+  `SubgameManager` end-to-end (flop solve → seed lookup → turn re-solve, with
+  optional turn → river chain via `solveRiverFromPath`). It now supports
+  per-hand CSV export and an optional exploitability readout via
+  `spec.output`, but the plan is still to swap the CLI for a TUI/GUI; don't
+  invest heavily in CLI ergonomics.
+- **`card.get_card_str` returns uppercase suits** (`AHKSQD`), which doesn't
+  match the parser's expected lowercase input (`AhKsQd`). Cosmetic only — the
+  parser is case-insensitive on suits — but the `resolve` summary's "full
+  board" line is jarring. Fix by lowercasing the suit letters in
+  `card.get_card_str` if anything else starts depending on that output.
 - **Performance (deferred, low ROI)**: `brWalk`'s chance-runout parallelism
   still uses `std.Thread.spawn` per dispatch. Only one dispatch happens per
   top-level brWalk traversal (workers run with `allow_parallel = false`), so
@@ -91,4 +111,19 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 ## Current Priorities
 
-1. **Features**: Add `poker resolve-turn` and `poker resolve-river` CLI commands.
+`poker resolve` is in place with CSV export + optional exploitability. Next:
+
+1. **Front-end.** TUI or GUI to replace the CLI. The spec-file format already
+   gives a clean separation between "describe the spot" and "run the solve";
+   a front-end can build the spec interactively and either shell out to the
+   binary or call into `src/spec.zig` + `src/subgame.zig` + `src/export.zig`
+   directly.
+2. **Preflop range pipeline.** Preflop solving is out of scope, but the
+   eventual front-end will need to accept user-supplied preflop ranges and
+   feed them into postflop spots. No code for this exists yet — `poker
+   solve` and `poker resolve` both take ranges directly as strings or
+   `@path` references via `range_parser`.
+3. **Whole-tree strategy export.** Current CSV is root-only. A future mode
+   could emit one row per (node, hand, action) for deeper analysis — useful
+   once the front-end can navigate the tree. Deferred until there's a
+   concrete consumer.

@@ -21,6 +21,9 @@ const range_parser = @import("range_parser.zig");
 const node_mod = @import("node.zig");
 const gamestate_mod = @import("gamestate.zig");
 const cfr = @import("cfr.zig");
+const subgame_mod = @import("subgame.zig");
+const spec_mod = @import("spec.zig");
+const export_mod = @import("export.zig");
 
 const Range = range_mod.Range;
 const HandTable = range_mod.HandTable;
@@ -42,6 +45,8 @@ pub fn main(init: std.process.Init) !void {
     const sub = args[1];
     if (std.mem.eql(u8, sub, "solve")) {
         try cmdSolve(init, allocator, args[2..]);
+    } else if (std.mem.eql(u8, sub, "resolve")) {
+        try cmdResolve(init, allocator, args[2..]);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage();
     } else {
@@ -56,8 +61,9 @@ fn printUsage() !void {
         \\Usage: poker <subcommand> [args]
         \\
         \\Subcommands:
-        \\  solve   Run CFR on a postflop spot.
-        \\  help    Show this message.
+        \\  solve     Run CFR on a postflop spot.
+        \\  resolve   Re-solve a turn or river subgame from a ZON spec file.
+        \\  help      Show this message.
         \\
         \\poker solve flags:
         \\  --board <STR>       Board cards, e.g. AhKsQd, AhKsQd2c, AhKsQd2c5h.
@@ -68,6 +74,11 @@ fn printUsage() !void {
         \\  --iters <N>         Number of CFR iterations (default 100).
         \\  --truncate <S>      Truncate the tree at street boundary: flop|turn.
         \\                      Omit for a full tree.
+        \\
+        \\poker resolve <SPEC>: read a ZON spec file describing the spot,
+        \\flop action path, turn card, and (optionally) river path + card.
+        \\Path tokens: x=check, c=call, f=fold, j=allin, b<pct>=bet (e.g. b50, b100).
+        \\See examples/turn.zon and examples/river.zon.
         \\
     ;
     std.debug.print("{s}", .{usage});
@@ -229,9 +240,15 @@ fn cmdSolve(init: std.process.Init, allocator: std.mem.Allocator, args: []const 
         @as(f64, @floatFromInt(sa.iters)) / @max(elapsed_s, 1e-9),
     });
 
-    // Root-level strategy: average over P1's reach to give a per-action
+    // Root-level strategy: average over the actor's reach to give a per-action
     // mass at the root decision node.
-    try printRootStrategy(allocator, root, &p1, &p2);
+    var reach_p1: [NUM_HANDS]f32 = undefined;
+    var reach_p2: [NUM_HANDS]f32 = undefined;
+    @memset(&reach_p1, 0);
+    @memset(&reach_p2, 0);
+    for (p1.active_indices, p1.probs) |idx, w| reach_p1[idx] = w;
+    for (p2.active_indices, p2.probs) |idx, w| reach_p2[idx] = w;
+    try printRootStrategy(allocator, root, &reach_p1, &reach_p2);
 }
 
 fn requireNext(args: []const []const u8, i: *usize, flag: []const u8) ![]const u8 {
@@ -266,10 +283,9 @@ fn freeIfOwned(allocator: std.mem.Allocator, spec: []const u8, text: []const u8)
 fn printRootStrategy(
     allocator: std.mem.Allocator,
     root: *node_mod.Node,
-    p1: *const Range,
-    p2: *const Range,
+    reach_p1: []const f32,
+    reach_p2: []const f32,
 ) !void {
-    _ = p2;
     if (root.is_chance) {
         std.debug.print("Root is a chance node — no actor strategy at root.\n", .{});
         return;
@@ -279,13 +295,14 @@ fn printRootStrategy(
     defer allocator.free(strat_buf);
     cfr.averageStrategy(root, strat_buf);
 
-    // Reach-weighted action mass over the actor's range, so a single number
-    // per action gives a quick sanity readout.
+    const actor_reach = if (root.isp1) reach_p1 else reach_p2;
+
     var mass = try allocator.alloc(f32, n_actions);
     defer allocator.free(mass);
     @memset(mass, 0);
     var total: f32 = 0;
-    for (p1.active_indices, p1.probs) |idx, w| {
+    for (actor_reach, 0..) |w, idx| {
+        if (w == 0) continue;
         total += w;
         for (0..n_actions) |a| {
             mass[a] += w * strat_buf[a * NUM_HANDS + idx];
@@ -293,7 +310,7 @@ fn printRootStrategy(
     }
     if (total == 0) total = 1;
 
-    std.debug.print("Root strategy (reach-weighted over P1's range):\n", .{});
+    std.debug.print("Root strategy (reach-weighted over {s}'s range):\n", .{if (root.isp1) "P1" else "P2"});
     for (root.edges, 0..) |*edge, a| {
         std.debug.print("  {s:<6} amount={d:>8.2}  freq={d:>6.3}\n", .{
             @tagName(edge.action),
@@ -301,4 +318,213 @@ fn printRootStrategy(
             mass[a] / total,
         });
     }
+}
+
+fn cmdResolve(init: std.process.Init, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.debug.print("usage: poker resolve <spec.zon>\n", .{});
+        return error.MissingArgs;
+    }
+
+    const spec = try spec_mod.loadSpec(allocator, init.io, args[0]);
+    defer spec_mod.freeSpec(allocator, spec);
+
+    // Board must be a flop (3 cards) — the spec's .turn / .river sections own
+    // the rest of the runout.
+    const flop_board = try range_parser.parseBoard(spec.board);
+    var flop_card_count: usize = 0;
+    for (flop_board) |c| if (c != 0) {
+        flop_card_count += 1;
+    };
+    if (flop_card_count != 3) {
+        std.debug.print("resolve: --board must be a 3-card flop, got {d} cards\n", .{flop_card_count});
+        return error.BadBoard;
+    }
+
+    var hand_table = HandTable.init();
+    const p1_text = try loadRangeText(allocator, init.io, spec.p1);
+    defer freeIfOwned(allocator, spec.p1, p1_text);
+    const p2_text = try loadRangeText(allocator, init.io, spec.p2);
+    defer freeIfOwned(allocator, spec.p2, p2_text);
+
+    var p1 = try range_parser.parseRange(p1_text, &hand_table, allocator);
+    defer p1.deinit(allocator);
+    var p2 = try range_parser.parseRange(p2_text, &hand_table, allocator);
+    defer p2.deinit(allocator);
+
+    var reach = subgame_mod.ReachProbs.zero();
+    for (p1.active_indices, p1.probs) |idx, w| reach.p1[idx] = w;
+    for (p2.active_indices, p2.probs) |idx, w| reach.p2[idx] = w;
+
+    const turn_card = try range_parser.parseCard(spec.turn.card);
+
+    var manager = subgame_mod.SubgameManager.init(init.io, allocator);
+    defer manager.deinit();
+
+    var prng = std.Random.DefaultPrng.init(42);
+
+    const t_start = std.Io.Clock.Timestamp.now(init.io, .awake);
+
+    // Flop solve → chance seeds.
+    const flop_state = gamestate_mod.GameState.init(.FLOP, true, spec.pot, spec.stack, spec.stack);
+    try manager.solveFlop(flop_state, flop_board, &reach, spec.iters, prng.random());
+
+    // Walk the flop path tokens into PathSteps, then locate the matching seed.
+    const flop_tokens = try spec_mod.parsePathTokens(allocator, spec.flop.path);
+    defer allocator.free(flop_tokens);
+    const flop_steps = try spec_mod.buildPathSteps(allocator, flop_state, flop_tokens);
+    defer allocator.free(flop_steps);
+
+    var turn = manager.solveTurnByPath(flop_steps, turn_card, spec.iters, prng.random()) catch |err| {
+        if (err == error.InvalidChanceSeed) {
+            std.debug.print("resolve: flop path \"{s}\" did not match any chance seed\n", .{spec.flop.path});
+        }
+        return err;
+    };
+    defer turn.deinit();
+
+    if (spec.river) |river_spec| {
+        const river_card = try range_parser.parseCard(river_spec.card);
+
+        // Seeds from the turn subgame describe the post-turn chance fan-out.
+        var turn_seeds = try turn.collectChanceSeeds(allocator);
+        defer turn_seeds.deinit(allocator);
+
+        const turn_tokens = try spec_mod.parsePathTokens(allocator, river_spec.path);
+        defer allocator.free(turn_tokens);
+        const turn_steps = try spec_mod.buildPathSteps(allocator, turn.root_state, turn_tokens);
+        defer allocator.free(turn_steps);
+
+        var river = subgame_mod.solveRiverFromPath(
+            init.io,
+            allocator,
+            turn_seeds.items,
+            turn_steps,
+            turn.board,
+            river_card,
+            spec.iters,
+            prng.random(),
+        ) catch |err| {
+            if (err == error.InvalidChanceSeed) {
+                std.debug.print("resolve: turn path \"{s}\" did not match any chance seed\n", .{river_spec.path});
+            }
+            return err;
+        };
+        defer river.deinit();
+
+        const exploit: ?f32 = if (spec.output.exploitability) try river.exploitability() else null;
+        const t_end = std.Io.Clock.Timestamp.now(init.io, .awake);
+        try printResolveSummary(allocator, t_start, t_end, spec, &p1, &p2, &river, .river, exploit);
+        try writeStrategyCsvIfRequested(allocator, init.io, spec, &river);
+    } else {
+        const exploit: ?f32 = if (spec.output.exploitability) try turn.exploitability() else null;
+        const t_end = std.Io.Clock.Timestamp.now(init.io, .awake);
+        try printResolveSummary(allocator, t_start, t_end, spec, &p1, &p2, &turn, .turn, exploit);
+        try writeStrategyCsvIfRequested(allocator, init.io, spec, &turn);
+    }
+}
+
+fn writeStrategyCsvIfRequested(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    spec: spec_mod.Spec,
+    sub: *const subgame_mod.Subgame,
+) !void {
+    const path = spec.output.strategy_csv orelse return;
+
+    var alloc_writer = std.Io.Writer.Allocating.init(allocator);
+    defer alloc_writer.deinit();
+
+    const actor_reach: []const f32 = if (sub.root.isp1) &sub.solver.p1_reach else &sub.solver.p2_reach;
+    export_mod.writeRootStrategyCsv(allocator, &alloc_writer.writer, sub.root, actor_reach) catch |err| switch (err) {
+        error.RootIsChance => {
+            std.debug.print("resolve: root is a chance node; skipping strategy CSV\n", .{});
+            return;
+        },
+        else => return err,
+    };
+
+    const bytes = alloc_writer.writer.buffered();
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+    std.debug.print("resolve: wrote strategy CSV ({d} bytes) to {s}\n", .{ bytes.len, path });
+}
+
+const ResolveKind = enum { turn, river };
+
+fn printResolveSummary(
+    allocator: std.mem.Allocator,
+    t_start: std.Io.Clock.Timestamp,
+    t_end: std.Io.Clock.Timestamp,
+    spec: spec_mod.Spec,
+    p1: *const Range,
+    p2: *const Range,
+    sub: *const subgame_mod.Subgame,
+    kind: ResolveKind,
+    exploit: ?f32,
+) !void {
+    const elapsed_ns: i96 = t_end.raw.nanoseconds - t_start.raw.nanoseconds;
+    const elapsed_s: f64 = @as(f64, @floatFromInt(@as(i64, @intCast(@max(@as(i96, 0), elapsed_ns))))) / 1e9;
+
+    var board_buf: [10]u8 = undefined;
+    const board_str = try formatBoard(&board_buf, sub.board);
+
+    std.debug.print(
+        \\
+        \\Resolve complete ({s}).
+        \\  flop:          {s}
+        \\  full board:    {s}
+        \\  flop path:     {s}
+        \\  turn card:     {s}
+        \\
+    , .{
+        @tagName(kind),
+        spec.board,
+        board_str,
+        spec.flop.path,
+        spec.turn.card,
+    });
+
+    if (spec.river) |r| {
+        std.debug.print(
+            \\  turn path:     {s}
+            \\  river card:    {s}
+            \\
+        , .{ r.path, r.card });
+    }
+
+    std.debug.print(
+        \\  pot:           {d:.2}
+        \\  stack:         {d:.2}
+        \\  p1 hands:      {d}
+        \\  p2 hands:      {d}
+        \\  iters:         {d}
+        \\  wall-clock:    {d:.3}s
+        \\
+    , .{
+        spec.pot,
+        spec.stack,
+        p1.active_indices.len,
+        p2.active_indices.len,
+        spec.iters,
+        elapsed_s,
+    });
+
+    if (exploit) |e| {
+        std.debug.print("  exploitability: {d:.6}\n", .{e});
+    }
+    std.debug.print("\n", .{});
+
+    try printRootStrategy(allocator, sub.root, &sub.solver.p1_reach, &sub.solver.p2_reach);
+}
+
+fn formatBoard(buf: []u8, board: [5]card_mod.Card) ![]const u8 {
+    var w: usize = 0;
+    for (board) |c| {
+        if (c == 0) continue;
+        const s = try card_mod.get_card_str(c);
+        buf[w] = s[0];
+        buf[w + 1] = s[1];
+        w += 2;
+    }
+    return buf[0..w];
 }

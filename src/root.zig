@@ -6,6 +6,8 @@ pub const card = @import("card.zig");
 pub const evaluator = @import("evaluator.zig");
 pub const cfr = @import("cfr.zig");
 pub const subgame = @import("subgame.zig");
+pub const spec = @import("spec.zig");
+pub const exporter = @import("export.zig");
 
 test {
     _ = gamestate;
@@ -16,4 +18,6 @@ test {
     _ = evaluator;
     _ = cfr;
     _ = subgame;
+    _ = spec;
+    _ = exporter;
 }
