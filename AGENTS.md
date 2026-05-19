@@ -18,7 +18,7 @@ Postflop Texas Hold'em solver (Flop/Turn/River) in Zig 0.16.
 - **Zig 0.16 Style**: Use `std.Io` for I/O. Use `ArenaAllocator` for trees. Prefer `usize` for indices.
 - **External Deps**: ONLY `libvaxis` (TUI). Keep it isolated in `src/tui.zig`.
 - **SIMD Layout**: Strategy/regret vectors are `action * NUM_HANDS + hand_index`. This is action-major for SIMD vectorization across the hand axis. **Do not transpose.**
-- **Perf Validation**: Any change to `src/cfr.zig` or `src/evaluator.zig` **must** be benchmarked: `zig build -Doptimize=ReleaseFast bench`.
+- **Perf Validation**: Any change to `src/cfr.zig` or `src/evaluator.zig` **must** be benchmarked: `zig build -Doptimize=ReleaseFast bench`. Default mode runs every scenario at `cpu_count` workers (~2-3s total). Use `--scaling` for the {1,2,4,8} worker sweep, `--quick` to skip the flop-trunc scenarios.
 - **Inclusion-Exclusion**: Showdown/fold CFVs use an O(N + 52) streaming accumulator. Do not revert to O(N²) collision checks.
 
 ## Current Priorities (In Order)
@@ -39,6 +39,13 @@ Postflop Texas Hold'em solver (Flop/Turn/River) in Zig 0.16.
 - **TUI UI Freeze**: Solve blocks the main thread.
 - **Bet Sizes**: Currently locked to `{0.5, 1.0}` and 2-bet cap.
 - **Case Sensitivity**: `card.get_card_str` returns uppercase; parser prefers lowercase.
+- **Flop-trunc speed**: At ~900ms/iter the `flop-fullrange-100bb-trunc` bench is dominated by `allInEquityLeaf`'s 1128-runout enumeration per chance leaf. The inner showdown sweep is at the SIMD/inclusion-exclusion limit (~30ms × 25 leaves ≈ peak). The remaining 5–20× vs `postflop-solver/` would come from architectural changes — see below.
+
+## Path to postflop-solver Parity (Not Yet Done)
+Ranked by ROI. Each is an independent project; do not bundle.
+1. **Suit isomorphism on chance nodes** (≈3–10× on flop). Collapse the 47-turn/46-river deck via canonical suit ordering — postflop does this in `game/base.rs::isomorphic_chances`. Would let `walk` switch from chance-sampled to full-enumeration vanilla CFR (lower variance, fewer iters to convergence) while keeping per-iter cost down.
+2. **Compressed regrets (i16 + per-node `f32` scale)** on `Node.regrets` and `Node.strategy_sum` (≈1.5–2×). 4× memory reduction so a flop tree fits in L2. See `postflop-solver/src/game/serialization.rs` and the `_compressed` branches in `solve_recursive`. Need encode/decode helpers and a per-node rescale step in merge.
+3. **`valid_indices` per `BoardContext`** for narrow-range solves. ~2% on full-range bench but multiplicatively bigger as ranges narrow — postflop's `valid_player_strength` skips the per-element `blocked[]` branch entirely. Requires touching `accumulateShowdownCFVFor`, `terminalShowdown`, and `brWalk` together.
 
 ---
 
@@ -54,6 +61,8 @@ Postflop Texas Hold'em solver (Flop/Turn/River) in Zig 0.16.
 <details>
 <summary>Recent Performance Gains</summary>
 
+- **SIMD merge**: Vectorized `mergeDeltasRange` inner loop (4–13× on the merge phase: river-polarized 1374→107 µs/iter, turn-fullrange 7003→3035 µs/iter, flop-trunc 957→204 µs/iter). End-to-end: river iters/s 340→735 (~2.2×), turn iters/s 44→69 (~1.6×). No change to flop-trunc (leaf-bound).
+- **Bench harness**: Default bench now runs in <3s (was ~30s) — single workers value at `cpu_count`, opt into the full {1,2,4,8} sweep with `--scaling`, skip flop scenarios with `--quick`. River iters trimmed 200→50, turn 50→20.
 - **Inclusion-Exclusion**: Replaced O(N²) collision loops with O(N+52) passes. (4-8x speedup).
 - **Atomic Pool**: Replaced Mutex/CondVar with atomic spin-waits for worker sync.
 - **Parallel Merge**: `mergeDeltas` is now multi-threaded across node slices.

@@ -103,10 +103,10 @@ pub fn fullRangeFor(allocator: std.mem.Allocator, board: [5]Card) !Built {
     return .{ .board = board, .p1 = p1, .p2 = p2 };
 }
 
-// Iter counts are tuned so the full bench runs in <30s in ReleaseFast. The
-// flop scenario is dominated by allInEquityLeaf's 2,352-runout enumeration;
-// 1 iter is plenty to measure iters/s, and we skip warmup there to avoid
-// paying the same 15s cost twice.
+// Iter counts are tuned so the default (one workers value) bench runs in a
+// few seconds in ReleaseFast. The flop scenario is dominated by
+// allInEquityLeaf's 2,352-runout enumeration; 2 iters lets the runout cache
+// build amortize across one measured iter while still giving a stable read.
 pub const scenarios = [_]Scenario{
     .{
         .name = "river-polarized",
@@ -115,7 +115,7 @@ pub const scenarios = [_]Scenario{
         .pot = 100,
         .stack1 = 500,
         .stack2 = 500,
-        .iters = 200,
+        .iters = 50,
         .warmup = 1,
         .build = buildPolarizedRiver,
     },
@@ -126,7 +126,7 @@ pub const scenarios = [_]Scenario{
         .pot = 50,
         .stack1 = 400,
         .stack2 = 400,
-        .iters = 50,
+        .iters = 20,
         .warmup = 1,
         .build = buildFullRangeTurn,
     },

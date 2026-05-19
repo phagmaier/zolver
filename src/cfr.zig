@@ -1127,11 +1127,42 @@ fn mergeDeltasRange(
     node_end: usize,
 ) void {
     if (workers.len == 0) return;
+    const pos_d_vec: Vf = @splat(weights.regret_pos_discount);
+    const neg_d_vec: Vf = @splat(weights.regret_neg_discount);
+    const strat_d_vec: Vf = @splat(weights.strategy_sum_discount);
+
     var node_idx: usize = node_start;
     while (node_idx < node_end) : (node_idx += 1) {
         const target = workers[0].flat[node_idx].node;
         const len = target.regrets.len;
-        var i: usize = 0;
+        // The buffer is a flat n_actions * NUM_HANDS slab. We stride VEC_LANES
+        // across the whole buffer (action boundary is at NUM_HANDS, which is
+        // not lane-aligned, but the data is contiguous so lanes crossing the
+        // boundary still operate on valid memory). The unaligned tail (last
+        // < VEC_LANES entries) is handled by the scalar loop below.
+        const vec_end: usize = (len / VEC_LANES) * VEC_LANES;
+
+        var v: usize = 0;
+        while (v < vec_end) : (v += VEC_LANES) {
+            var r_sum_vec: Vf = VEC_ZERO;
+            var s_sum_vec: Vf = VEC_ZERO;
+            for (workers) |w| {
+                const r_slot = w.flat[node_idx].regret;
+                const s_slot = w.flat[node_idx].strategy_sum;
+                r_sum_vec += vload(r_slot, v);
+                s_sum_vec += vload(s_slot, v);
+                vstore(r_slot, v, VEC_ZERO);
+                vstore(s_slot, v, VEC_ZERO);
+            }
+            const r_old = vload(target.regrets, v);
+            const is_pos = r_old > VEC_ZERO;
+            const discount = @select(f32, is_pos, pos_d_vec, neg_d_vec);
+            vstore(target.regrets, v, r_old * discount + r_sum_vec);
+            const s_old = vload(target.strategy_sum, v);
+            vstore(target.strategy_sum, v, s_old * strat_d_vec + s_sum_vec);
+        }
+
+        var i: usize = vec_end;
         while (i < len) : (i += 1) {
             var r_sum: f32 = 0;
             var s_sum: f32 = 0;

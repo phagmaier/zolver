@@ -88,14 +88,14 @@ fn runScenarioAtWorkers(
     }
 }
 
-// Default sweep: run every scenario at workers={1, 2, 4, 8} so we can read
-// parallel scaling at a glance. Compare against the rule of thumb of 8x at
-// 8 workers — anything well below that means thread overhead or work
-// imbalance is starting to matter.
-const WORKER_SWEEP = [_]usize{ 1, 2, 4, 8 };
+// Full worker sweep: surfaces parallel scaling at a glance (rule of thumb is
+// 8x at 8 workers; well below that means thread overhead or work imbalance).
+// Opt in with `--scaling`. Default runs only at cpu_count, which is what you
+// actually care about during day-to-day perf work.
+const WORKER_SWEEP_FULL = [_]usize{ 1, 2, 4, 8 };
 
-fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario) !void {
-    for (WORKER_SWEEP) |w| {
+fn runScenario(allocator: std.mem.Allocator, io: std.Io, s: Scenario, workers_list: []const usize) !void {
+    for (workers_list) |w| {
         try runScenarioAtWorkers(allocator, io, s, w);
     }
 }
@@ -107,13 +107,39 @@ pub fn main(init: std.process.Init) !void {
 
     const io = init.io;
     const cpu_count: usize = std.Thread.getCpuCount() catch 1;
+
+    // Argument parsing: `--scaling` runs the full {1,2,4,8} worker sweep,
+    // `--quick` skips the slow flop scenarios entirely. Default is one run
+    // per scenario at cpu_count workers.
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var scaling: bool = false;
+    var quick: bool = false;
+    for (args[@min(1, args.len)..]) |arg| {
+        if (std.mem.eql(u8, arg, "--scaling")) {
+            scaling = true;
+        } else if (std.mem.eql(u8, arg, "--quick")) {
+            quick = true;
+        }
+    }
+
+    var default_workers_buf: [1]usize = .{@min(cpu_count, 8)};
+    const workers_list: []const usize = if (scaling) &WORKER_SWEEP_FULL else default_workers_buf[0..];
+
     std.debug.print(
-        "Poker bench  optimize={s}  cpus={d}\n",
-        .{ @tagName(builtin.mode), cpu_count },
+        "Poker bench  optimize={s}  cpus={d}  mode={s}{s}\n",
+        .{
+            @tagName(builtin.mode),
+            cpu_count,
+            if (scaling) "scaling" else "default",
+            if (quick) " quick" else "",
+        },
     );
     std.debug.print("{s}\n", .{"-" ** 72});
 
     for (scenarios) |s| {
-        try runScenario(allocator, io, s);
+        // The flop-trunc scenarios pay a multi-second per-iter cost (full
+        // (turn, river) enumeration at every leaf). Skip them in --quick.
+        if (quick and s.street == .FLOP) continue;
+        try runScenario(allocator, io, s, workers_list);
     }
 }
