@@ -181,28 +181,68 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 Last performance pass landed:
 
-- **SIMD inner loops** in `walk`, `brWalk`, `allInEquityLeaf`,
-  `computeShowdownCFVFor`, `terminalFold` — `@Vector(VEC_LANES, f32)` over
-  the hand axis with a scalar epilogue. The showdown CFV's
-  collision-correction loop uses manual gather + `@select` to drop the
-  data-dependent branch.
+- **Inclusion-exclusion terminals** in `terminalFold` and
+  `computeShowdownCFVFor`. Inspired by `postflop-solver`'s
+  `game/evaluation.rs`. Replaces the per-hand collision-iteration inner
+  loop (~100 gathers × 1326 hands per call) with O(N + 52) streaming
+  accumulators: a scalar `cfreach_sum` plus a 52-element `cfreach_minus`
+  bucketed by card. For each player hand (c1, c2), the valid-opponent
+  mass is `sum - minus[c1] - minus[c2]` (+ `opp_reach[i]` correction for
+  the fold case to zero the same-cards contribution). Showdown is two
+  passes — forward for win mass, reverse for loss mass — using
+  `BoardContext.first_rank` / `last_rank` to advance bucket-by-bucket so
+  ties (opp at equal strength) drop out of both passes naturally.
+  Accumulators are f64 to preserve precision across 1326-lane sums.
+  The `Solver.collisions` / `collision_counts` tables are no longer
+  read by the hot path — left in place for now; a follow-up can delete
+  them. Workers=1 wall-clock numbers below.
+- **SIMD inner loops** in `walk`, `brWalk`, `allInEquityLeaf` —
+  `@Vector(VEC_LANES, f32)` over the hand axis with a scalar epilogue.
 - **CFR+ → DCFR** for the regret/strategy-sum update. Drop-in replacement;
   see `DcfrWeights.forIter`. Per-iter cost is essentially unchanged;
   convergence per iter is meaningfully better.
 - **Bench scenarios**: added `flop-fullrange-100bb-trunc` (pot 10, stack
   1000) as the canonical user-target spot for future regression tests.
 
-Workers=1 wall-clock results on the four bench scenarios (ReleaseFast,
-AVX2-class CPU):
+Workers=1 wall-clock results, ReleaseFast on AVX2-class CPU. "before"
+column is the post-SIMD baseline; "after" is the inclusion-exclusion
+landing:
 
 | scenario | before | after | speedup |
 | --- | --- | --- | --- |
-| river-polarized (200 iters) | 1.00s | 0.67s | 1.50× |
-| turn-fullrange (50 iters) | 1.92s | 1.23s | 1.56× |
-| flop-fullrange-trunc (1 iter) | 4.99s | 2.82s | 1.77× |
-| flop-fullrange-100bb-trunc (1 iter) | 4.94s | 2.85s | 1.73× |
+| river-polarized (200 iters) | 0.67s | 0.080s | 8.4× |
+| turn-fullrange (50 iters) | 1.23s | 0.283s | 4.3× |
+| flop-fullrange-trunc (1 iter) | 2.82s | 0.633s | 4.5× |
+| flop-fullrange-100bb-trunc (1 iter) | 2.85s | 0.626s | 4.5× |
 
-The full 200-iter `poker solve` on the flop-100bb spot takes ~13 minutes
-wall (16-core machine, parallel) — usable but still long. DCFR's
-convergence improvement means fewer iters are typically needed to reach a
-target exploitability than CFR+ required.
+Walk time on the small scenarios is now short enough that the parallel
+spawn/join overhead dominates at workers ≥ 2 — `river-polarized
+workers=2` is slower than workers=1. The parallel path needs revisiting
+(per-iter thread pool reuse instead of `std.Thread.spawn` per dispatch)
+now that the per-walk cost has dropped ~5×.
+
+DCFR's convergence improvement means fewer iters are typically needed to
+reach a target exploitability than CFR+ required.
+
+## Notes from the `postflop-solver` cross-read
+
+`postflop-solver/` (the in-tree Rust reference impl) was reviewed for
+ideas worth porting. The inclusion-exclusion swap above came from there.
+Other techniques noted but not yet adopted:
+
+- **DCFR γ=3 + power-of-4 strategy-sum reset** (Rust's `solver.rs:11-37`).
+  Their `DiscountParams::new` uses `γ=3` (vs our `GAMMA = 2.0`) and resets
+  the cumulative-strategy weighting at iters 1, 4, 16, 64, 256 by feeding
+  `t_gamma = t - nearest_lower_power_of_4(t)` into `(t/(t+1))^γ`. Cheap
+  to try; expected to reduce iters-to-target-exploitability.
+- **i16 regret / u16 strategy compression** with a per-node f32 scale
+  (`node.rs:99-149`). Halves the tree's working-set memory and was their
+  lever for fitting larger trees in L2/L3. Substantial refactor.
+- **f64 accumulators in misc reductions** (e.g. `inner_product`,
+  `compute_average` in `utility.rs`). Already used in the new terminal
+  evaluators; should be threaded through the rest of the walk's
+  reduce-style ops too (`terminalFold`'s old f32 total-mass reduce
+  pattern is gone, but `walk`'s positive-regret sum is still f32).
+- **Isomorphism reduction** is incompatible with our chance-sampled
+  approach (their solver enumerates every chance child). Not worth
+  trying to bolt on.

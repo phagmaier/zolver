@@ -286,6 +286,16 @@ fn handHitsCard(hand: range_mod.Hand, card: Card) bool {
     return hand.card1 == card or hand.card2 == card;
 }
 
+// Map a Card (with rank in bits 8..11 and one-hot suit in bits 12..15) to a
+// dense 0..52 index. Used to bucket per-card reach contributions in the
+// inclusion-exclusion terminal evaluators (see card.makeCard).
+inline fn cardToDeckIdx(card: Card) usize {
+    const rank: u32 = (card >> 8) & 0xF;
+    const suit_bits: u32 = (card >> 12) & 0xF;
+    const suit_idx: u32 = @ctz(suit_bits);
+    return @intCast(rank * 4 + suit_idx);
+}
+
 fn handBlockedByBoard(hand: range_mod.Hand, board: [5]Card) bool {
     return boardContains(board, hand.card1) or boardContains(board, hand.card2);
 }
@@ -643,23 +653,38 @@ pub const SolveContext = struct {
         const p1_payoff: f32 = if (folder_isp1) -folder_loss else folder_loss;
         const p2_payoff: f32 = -p1_payoff;
 
-        var p1_total_vec: Vf = VEC_ZERO;
-        var p2_total_vec: Vf = VEC_ZERO;
-        {
-            var v: usize = 0;
-            while (v < VEC_TAIL_START) : (v += VEC_LANES) {
-                p1_total_vec += vload(p1_reach, v);
-                p2_total_vec += vload(p2_reach, v);
-            }
-        }
-        var p1_total_mass: f32 = @reduce(.Add, p1_total_vec);
-        var p2_total_mass: f32 = @reduce(.Add, p2_total_vec);
-        {
-            var i: usize = VEC_TAIL_START;
-            while (i < NUM_HANDS) : (i += 1) {
-                p1_total_mass += p1_reach[i];
-                p2_total_mass += p2_reach[i];
-            }
+        // Inclusion-exclusion (postflop-solver-style). Per-hand "opp reach over
+        // hands with no shared card" reduces from O(collisions) gather + branch
+        // per hand to O(N + 52) total. Build:
+        //   sum   = Σ opp_reach[j]
+        //   minus[c] = Σ opp_reach[j] over hands containing card c
+        // Then for player hand i with cards (c1, c2):
+        //   valid_opp = sum - minus[c1] - minus[c2] + opp_reach[i]
+        // The `+ opp_reach[i]` term restores the (c1, c2) hand itself which was
+        // subtracted twice (once for c1, once for c2) and added once in sum —
+        // net -1 — and correctly zeroes its contribution, since opp can't
+        // physically hold the same cards as player.
+        //
+        // f64 accumulators preserve precision across 1326 lane sums.
+        const hands = solver.hand_table.all_hands;
+        var p1_sum: f64 = 0;
+        var p2_sum: f64 = 0;
+        var p1_minus: [52]f64 = @splat(0);
+        var p2_minus: [52]f64 = @splat(0);
+
+        for (0..NUM_HANDS) |i| {
+            const r1: f64 = @as(f64, p1_reach[i]);
+            const r2: f64 = @as(f64, p2_reach[i]);
+            if (r1 == 0 and r2 == 0) continue;
+            const h = hands[i];
+            const c1 = cardToDeckIdx(h.card1);
+            const c2 = cardToDeckIdx(h.card2);
+            p1_sum += r1;
+            p2_sum += r2;
+            p1_minus[c1] += r1;
+            p1_minus[c2] += r1;
+            p2_minus[c1] += r2;
+            p2_minus[c2] += r2;
         }
 
         for (0..NUM_HANDS) |i| {
@@ -668,35 +693,13 @@ pub const SolveContext = struct {
                 out_cfv_p2[i] = 0;
                 continue;
             }
-
-            const count = solver.collision_counts[i];
-            const cols = &solver.collisions[i];
-            const vec_end: usize = (@as(usize, count) / VEC_LANES) * VEC_LANES;
-
-            var p1_incomp_vec: Vf = VEC_ZERO;
-            var p2_incomp_vec: Vf = VEC_ZERO;
-            var c_idx: usize = 0;
-            while (c_idx < vec_end) : (c_idx += VEC_LANES) {
-                var p1_gather: Vf = undefined;
-                var p2_gather: Vf = undefined;
-                inline for (0..VEC_LANES) |k| {
-                    const j = cols[c_idx + k];
-                    p1_gather[k] = p1_reach[j];
-                    p2_gather[k] = p2_reach[j];
-                }
-                p1_incomp_vec += p1_gather;
-                p2_incomp_vec += p2_gather;
-            }
-            var p1_incomp: f32 = @reduce(.Add, p1_incomp_vec);
-            var p2_incomp: f32 = @reduce(.Add, p2_incomp_vec);
-            while (c_idx < count) : (c_idx += 1) {
-                const j = cols[c_idx];
-                p1_incomp += p1_reach[j];
-                p2_incomp += p2_reach[j];
-            }
-
-            out_cfv_p1[i] = p1_payoff * (p2_total_mass - p2_incomp);
-            out_cfv_p2[i] = p2_payoff * (p1_total_mass - p1_incomp);
+            const h = hands[i];
+            const c1 = cardToDeckIdx(h.card1);
+            const c2 = cardToDeckIdx(h.card2);
+            const opp_p2_mass = p2_sum - p2_minus[c1] - p2_minus[c2] + @as(f64, p2_reach[i]);
+            const opp_p1_mass = p1_sum - p1_minus[c1] - p1_minus[c2] + @as(f64, p1_reach[i]);
+            out_cfv_p1[i] = @floatCast(@as(f64, p1_payoff) * opp_p2_mass);
+            out_cfv_p2[i] = @floatCast(@as(f64, p2_payoff) * opp_p1_mass);
         }
     }
 
@@ -737,71 +740,96 @@ pub const SolveContext = struct {
         // must never reach a showdown — pin the invariant here so future
         // refactors can't silently introduce wrong tie-breaks.
         std.debug.assert(boardCardCount(board_ctx.board) == 5);
-        const solver = self.solver;
-        var prefix_sum: [NUM_HANDS]f32 = undefined;
-        var total_mass: f32 = 0;
-        for (0..NUM_HANDS) |r| {
-            total_mass += reach[board_ctx.sorted_indices[r]];
-            prefix_sum[r] = total_mass;
+        const hands = self.solver.hand_table.all_hands;
+        const sorted = &board_ctx.sorted_indices;
+
+        // Inclusion-exclusion in strength order (postflop-solver-style). The
+        // per-hand collision-correction inner loop (~100 gathers per of 1326
+        // player hands) is replaced by two streaming O(N + 52) passes:
+        //
+        //   Pass 1 (ascending): maintain (sum, minus[card]) over opp hands
+        //     with strength strictly less than the current bucket. For each
+        //     player hand i with cards (c1, c2), valid-opp win mass =
+        //     sum - minus[c1] - minus[c2]. Write payoff * win_mass to out.
+        //   Pass 2 (descending): same shape, opp strictly greater. Subtract
+        //     payoff * loss_mass from out.
+        //
+        // Ties (opp at same strength) contribute zero, and are naturally
+        // excluded by the strict-strength condition — the opp hand at the
+        // *same* index as player has the same cards, hence the same strength,
+        // and is never in the strict-less or strict-greater accumulator when
+        // we read it, so no `cfreach_same` correction is needed here.
+        // f64 accumulators preserve precision across 1326 contributions.
+
+        // ----- Pass 1: forward, write win mass -----
+        {
+            var cfreach_sum: f64 = 0;
+            var cfreach_minus: [52]f64 = @splat(0);
+            var i: usize = 0;
+            while (i < NUM_HANDS) {
+                const bucket_top = sorted[i];
+                const bucket_end: usize = @as(usize, board_ctx.last_rank[bucket_top]) + 1;
+                // Write win_mass for each player hand in this bucket using the
+                // current (strict-less) accumulator.
+                for (i..bucket_end) |k| {
+                    const pi = sorted[k];
+                    if (board_ctx.blocked[pi]) {
+                        out[pi] = 0;
+                        continue;
+                    }
+                    const h = hands[pi];
+                    const c1 = cardToDeckIdx(h.card1);
+                    const c2 = cardToDeckIdx(h.card2);
+                    const win_mass = cfreach_sum - cfreach_minus[c1] - cfreach_minus[c2];
+                    out[pi] = @floatCast(@as(f64, payoff) * win_mass);
+                }
+                // Fold this bucket's opp reach into the accumulator for the
+                // next (strictly-greater) buckets.
+                for (i..bucket_end) |k| {
+                    const oj = sorted[k];
+                    const rj: f64 = @as(f64, reach[oj]);
+                    if (rj == 0) continue;
+                    const hj = hands[oj];
+                    cfreach_sum += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card1)] += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card2)] += rj;
+                }
+                i = bucket_end;
+            }
         }
 
-        // Per-hand collision correction. The hot inner loop is ~101 gathers
-        // (one per collision) with a branchy +/- accumulator. We can't avoid
-        // the gather, but we can drop the branch: load VEC_LANES collisions
-        // at a time, gather reach[j] and strength[j], then accumulate via
-        // masked select on `s_j < s_i` / `s_j > s_i`. The compiler turns the
-        // four loads + compare + select sequence into a tight inner loop
-        // that beats the scalar version by 2-3x on AVX2.
-        for (0..NUM_HANDS) |i| {
-            if (board_ctx.blocked[i]) {
-                out[i] = 0;
-                continue;
-            }
-
-            const win_rank_end = @as(i32, @intCast(board_ctx.first_rank[i])) - 1;
-            const loss_rank_start = board_ctx.last_rank[i] + 1;
-
-            const naive_win_mass = if (win_rank_end >= 0) prefix_sum[@intCast(win_rank_end)] else 0;
-            const naive_loss_mass = if (loss_rank_start < NUM_HANDS) total_mass - prefix_sum[loss_rank_start - 1] else 0;
-
-            const s_i = board_ctx.hand_strengths[i];
-            const s_i_vec: Vu32 = @splat(s_i);
-            const count = solver.collision_counts[i];
-            const cols = &solver.collisions[i];
-
-            var win_vec: Vf = VEC_ZERO;
-            var loss_vec: Vf = VEC_ZERO;
-            const vec_end: usize = (@as(usize, count) / VEC_LANES) * VEC_LANES;
-            var c_idx: usize = 0;
-            while (c_idx < vec_end) : (c_idx += VEC_LANES) {
-                var reach_vec: Vf = undefined;
-                var strength_vec: Vu32 = undefined;
-                inline for (0..VEC_LANES) |k| {
-                    const j = cols[c_idx + k];
-                    reach_vec[k] = reach[j];
-                    strength_vec[k] = board_ctx.hand_strengths[j];
+        // ----- Pass 2: reverse, subtract loss mass -----
+        {
+            var cfreach_sum: f64 = 0;
+            var cfreach_minus: [52]f64 = @splat(0);
+            var i: usize = NUM_HANDS;
+            while (i > 0) {
+                const bucket_top = sorted[i - 1];
+                const bucket_first: usize = @intCast(board_ctx.first_rank[bucket_top]);
+                // Subtract loss_mass for each player hand in this bucket using
+                // the current (strict-greater) accumulator.
+                for (bucket_first..i) |k| {
+                    const pi = sorted[k];
+                    if (board_ctx.blocked[pi]) continue; // out[pi] already 0 from pass 1
+                    const h = hands[pi];
+                    const c1 = cardToDeckIdx(h.card1);
+                    const c2 = cardToDeckIdx(h.card2);
+                    const loss_mass = cfreach_sum - cfreach_minus[c1] - cfreach_minus[c2];
+                    out[pi] = @floatCast(@as(f64, out[pi]) - @as(f64, payoff) * loss_mass);
                 }
-                const below: Vb = strength_vec < s_i_vec;
-                const above: Vb = strength_vec > s_i_vec;
-                win_vec += @select(f32, below, reach_vec, VEC_ZERO);
-                loss_vec += @select(f32, above, reach_vec, VEC_ZERO);
-            }
-            var corr_win_mass: f32 = @reduce(.Add, win_vec);
-            var corr_loss_mass: f32 = @reduce(.Add, loss_vec);
-            while (c_idx < count) : (c_idx += 1) {
-                const j = cols[c_idx];
-                const s_j = board_ctx.hand_strengths[j];
-                if (s_j < s_i) {
-                    corr_win_mass += reach[j];
-                } else if (s_j > s_i) {
-                    corr_loss_mass += reach[j];
+                // Fold this bucket's opp reach into the accumulator for the
+                // next (strictly-lesser) buckets.
+                for (bucket_first..i) |k| {
+                    const oj = sorted[k];
+                    const rj: f64 = @as(f64, reach[oj]);
+                    if (rj == 0) continue;
+                    const hj = hands[oj];
+                    cfreach_sum += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card1)] += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card2)] += rj;
                 }
+                i = bucket_first;
             }
-
-            const real_win_mass = naive_win_mass - corr_win_mass;
-            const real_loss_mass = naive_loss_mass - corr_loss_mass;
-
-            out[i] = (real_win_mass - real_loss_mass) * payoff;
         }
     }
 
