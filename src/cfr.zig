@@ -1076,11 +1076,24 @@ fn registerDeltaNodes(
 //   S_t = strat_discount * S_{t-1} + Σ s_delta_w
 // Negative regrets are kept (no CFR+ clamp); regret matching at the next
 // walk reads max(0, R) when computing the strategy.
-fn mergeDeltas(workers: []const *WorkerDeltas, weights: DcfrWeights) void {
+// Merge the regret/strategy_sum deltas for the node-list range
+// `[node_start, node_end)` from every worker into the shared tree, applying
+// the DCFR discount and zeroing each worker's slot. Inputs:
+//   - `workers`: all workers' delta buffers (every slice in the range needs
+//     to sum across all of them, regardless of which worker writes it).
+//   - `weights`: per-iter DCFR discount factors.
+// Each node's update is independent of every other node's, so the range
+// partition is the natural unit for parallelism: dispatch with disjoint
+// `[start, end)` ranges across pool workers.
+fn mergeDeltasRange(
+    workers: []const *WorkerDeltas,
+    weights: DcfrWeights,
+    node_start: usize,
+    node_end: usize,
+) void {
     if (workers.len == 0) return;
-    const n_nodes = workers[0].flat.len;
-    var node_idx: usize = 0;
-    while (node_idx < n_nodes) : (node_idx += 1) {
+    var node_idx: usize = node_start;
+    while (node_idx < node_end) : (node_idx += 1) {
         const target = workers[0].flat[node_idx].node;
         const len = target.regrets.len;
         var i: usize = 0;
@@ -1099,6 +1112,11 @@ fn mergeDeltas(workers: []const *WorkerDeltas, weights: DcfrWeights) void {
             target.strategy_sum[i] = target.strategy_sum[i] * weights.strategy_sum_discount + s_sum;
         }
     }
+}
+
+fn mergeDeltas(workers: []const *WorkerDeltas, weights: DcfrWeights) void {
+    if (workers.len == 0) return;
+    mergeDeltasRange(workers, weights, 0, workers[0].flat.len);
 }
 
 // DCFR(α=1.5, β=0, γ=2) solve loop. Per iter t (1-indexed):
@@ -1200,6 +1218,7 @@ pub fn solve(
     while (s < n_workers) : (s += 1) {
         workers[s] = .{
             .pool = &pool,
+            .index = s,
             .job = .{
                 .ctx = &worker_ctxs[s],
                 .root = root,
@@ -1255,6 +1274,12 @@ pub fn solve(
     const actual_workers = spawned;
     const record = self.record_timings;
 
+    // Merge-phase invariants don't change across iters: same worker delta set
+    // and same flat node count every iteration. Publish once; the per-iter
+    // merge dispatch only needs to update the weights and bump merge_epoch.
+    pool.merge_workers = worker_ptrs[0..actual_workers];
+    pool.merge_n_nodes = worker_deltas[0].flat.len;
+
     // `iterations` is the number of strategy updates — same semantics as the
     // serial loop. Each update dispatches N parallel walks that contribute
     // lower-variance samples to the per-update delta, then merges.
@@ -1298,7 +1323,24 @@ pub fn solve(
         else
             null;
 
-        mergeDeltas(worker_ptrs[0..actual_workers], weights);
+        // Parallel merge phase. Each worker handles its slice of the flat
+        // node list (computed inside PoolWorker.run from `pool.merge_n_nodes`
+        // + worker index). The dispatcher just publishes the weights, bumps
+        // `merge_epoch`, and spin-waits on `merges_done`.
+        pool.merge_weights = weights;
+        pool.merges_done.store(0, .release);
+        _ = pool.merge_epoch.fetchAdd(1, .release);
+        {
+            var spin: usize = 0;
+            while (pool.merges_done.load(.acquire) < actual_workers) {
+                if (spin < POOL_SPIN_BUDGET) {
+                    std.atomic.spinLoopHint();
+                    spin += 1;
+                } else {
+                    std.Thread.yield() catch {};
+                }
+            }
+        }
 
         if (record) {
             const t_after_merge = std.Io.Clock.Timestamp.now(io, .awake);
@@ -1355,11 +1397,29 @@ const WalkJob = struct {
 //     `workers_done.fetchAdd(.release)` → dispatcher
 //     `workers_done.load(.acquire)` then reads the deltas in `mergeDeltas`.
 //   - `shutdown.store(.release)` / `shutdown.load(.acquire)` pair.
+// Two phases run per iteration: a walk phase (each worker runs its own walk
+// over the tree) and a merge phase (each worker sums one slice of the flat
+// node list across all workers' deltas, applying the DCFR discount). Each
+// phase has its own `epoch` / `done` counter pair, signaled by the dispatcher
+// independently. `merge_workers` and `merge_weights` are written by the
+// dispatcher before the merge epoch bumps and read by every worker — the
+// release/acquire pairing publishes them.
 const ParallelPool = struct {
+    // Walk phase synchronization.
     epoch: std.atomic.Value(u64) = .init(0),
     workers_done: std.atomic.Value(usize) = .init(0),
+
+    // Merge phase synchronization.
+    merge_epoch: std.atomic.Value(u64) = .init(0),
+    merges_done: std.atomic.Value(usize) = .init(0),
+
     n_workers: usize = 0,
     shutdown: std.atomic.Value(bool) = .init(false),
+
+    // Per-iter merge inputs published before `merge_epoch` is bumped.
+    merge_workers: []const *WorkerDeltas = &.{},
+    merge_weights: DcfrWeights = undefined,
+    merge_n_nodes: usize = 0,
 };
 
 // Spin parameter shared by worker (epoch wait) and dispatcher (done wait).
@@ -1369,21 +1429,25 @@ const ParallelPool = struct {
 const POOL_SPIN_BUDGET: usize = 1024;
 
 // One persistent worker. `job` is filled by the dispatcher before the pool
-// is started and only `job.weights` is updated between epochs.
+// is started and only `job.weights` is updated between epochs. `index` is
+// used to compute the worker's slice of the flat node list during the
+// merge phase.
 const PoolWorker = struct {
     pool: *ParallelPool,
+    index: usize,
     job: WalkJob,
 
     fn run(self: *PoolWorker) void {
-        var last_epoch: u64 = 0;
+        var last_walk_epoch: u64 = 0;
+        var last_merge_epoch: u64 = 0;
         while (true) {
-            // Wait for a new epoch or shutdown. Spin briefly, then yield.
-            const my_epoch = blk: {
+            // ----- Walk phase -----
+            const my_walk_epoch = blk: {
                 var spin: usize = 0;
                 while (true) {
                     if (self.pool.shutdown.load(.acquire)) return;
                     const cur = self.pool.epoch.load(.acquire);
-                    if (cur != last_epoch) break :blk cur;
+                    if (cur != last_walk_epoch) break :blk cur;
                     if (spin < POOL_SPIN_BUDGET) {
                         std.atomic.spinLoopHint();
                         spin += 1;
@@ -1395,11 +1459,39 @@ const PoolWorker = struct {
 
             WalkJob.run(&self.job);
 
-            last_epoch = my_epoch;
+            last_walk_epoch = my_walk_epoch;
             // `.release` publishes the worker's writes to its delta buffers
-            // and output slot to whichever dispatcher load eventually sees
-            // the incremented counter.
+            // to whichever dispatcher load eventually sees the count.
             _ = self.pool.workers_done.fetchAdd(1, .release);
+
+            // ----- Merge phase -----
+            const my_merge_epoch = blk: {
+                var spin: usize = 0;
+                while (true) {
+                    if (self.pool.shutdown.load(.acquire)) return;
+                    const cur = self.pool.merge_epoch.load(.acquire);
+                    if (cur != last_merge_epoch) break :blk cur;
+                    if (spin < POOL_SPIN_BUDGET) {
+                        std.atomic.spinLoopHint();
+                        spin += 1;
+                    } else {
+                        std.Thread.yield() catch {};
+                    }
+                }
+            };
+
+            // Even partition of [0, merge_n_nodes) across n_workers. Any worker
+            // whose slice is empty (when n_nodes < n_workers) just falls through.
+            const n_nodes = self.pool.merge_n_nodes;
+            const n_w = self.pool.n_workers;
+            const start: usize = (self.index * n_nodes) / n_w;
+            const end: usize = ((self.index + 1) * n_nodes) / n_w;
+            if (start < end) {
+                mergeDeltasRange(self.pool.merge_workers, self.pool.merge_weights, start, end);
+            }
+
+            last_merge_epoch = my_merge_epoch;
+            _ = self.pool.merges_done.fetchAdd(1, .release);
         }
     }
 };

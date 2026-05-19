@@ -105,12 +105,19 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   read path. Per-iter discounts are precomputed in `DcfrWeights.forIter`.
 - `BoardContext` contains all board-mutable state; `SolveContext` is per-worker.
 - `allInEquityLeaf` is the default model for truncated chance nodes.
-- Showdown/fold CFVs use O(N) prefix-sweeps with collision correction. The
-  collision-correction inner loop is SIMD-vectorized via manual gather +
-  masked `@select` on `s_j < s_i` / `s_j > s_i`.
-- `Solver.init` requires `io: std.Io` (used by the parallel-pool sync
-  primitives and the optional `record_timings` accumulator). Binaries pass
-  `init.io`; tests pass `std.testing.io`.
+- Showdown/fold CFVs use **inclusion-exclusion** in O(N + 52): a scalar
+  `cfreach_sum` and a 52-element `cfreach_minus[card]` bucketed by card
+  give the "opp reach over hands with no shared card" mass in two array
+  lookups per player hand. Showdown is two passes — forward (win mass,
+  strictly-lower opp strength) and reverse (loss mass, strictly-greater)
+  — walking `BoardContext` strength buckets via `first_rank` / `last_rank`.
+  f64 accumulators preserve precision across 1326 lane sums. See
+  `cardToDeckIdx` for the card→0..52 map.
+- `Solver.init` requires `io: std.Io`. The parallel-pool sync is now
+  atomics-only (no longer uses `std.Io.Mutex` / `Condition`), but `io` is
+  still used for the optional `record_timings` accumulator and for
+  `Timestamp.now` calls. Binaries pass `init.io`; tests pass
+  `std.testing.io`.
 - `walk` / `brWalk` are depth-indexed: callers pass `depth = 0`, recursion
   advances. Per-frame scratch lives in `SolveContext.scratch` (heap-allocated
   via `WalkScratch.init`). `MAX_WALK_DEPTH` is the hard ceiling — asserts at
@@ -179,83 +186,109 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
 
 ## Recent Perf Work
 
-Last performance pass landed:
+Three back-to-back passes inspired by an audit of `postflop-solver/`
+(in-tree Rust reference impl):
 
-- **Inclusion-exclusion terminals** in `terminalFold` and
-  `computeShowdownCFVFor`. Inspired by `postflop-solver`'s
-  `game/evaluation.rs`. Replaces the per-hand collision-iteration inner
-  loop (~100 gathers × 1326 hands per call) with O(N + 52) streaming
-  accumulators: a scalar `cfreach_sum` plus a 52-element `cfreach_minus`
-  bucketed by card. For each player hand (c1, c2), the valid-opponent
-  mass is `sum - minus[c1] - minus[c2]` (+ `opp_reach[i]` correction for
-  the fold case to zero the same-cards contribution). Showdown is two
-  passes — forward for win mass, reverse for loss mass — using
-  `BoardContext.first_rank` / `last_rank` to advance bucket-by-bucket so
-  ties (opp at equal strength) drop out of both passes naturally.
-  Accumulators are f64 to preserve precision across 1326-lane sums.
-  The `Solver.collisions` / `collision_counts` tables and the
-  `handsCompatible` helper are gone — reclaimed ~270 KB of solver state
-  and a per-init O(N²) build loop. Workers=1 wall-clock numbers below.
-- **Atomic spin-wait pool sync.** Persistent worker pool now coordinates
-  via `std.atomic.Value`-backed `epoch` / `workers_done` counters with a
-  brief `spinLoopHint` then `Thread.yield` fallback. Replaces the prior
-  `std.Io.Mutex` + two `std.Io.Condition`s. Dispatcher overhead
-  ("spawn_ns" in the bench) dropped 2.3µs → 0.1µs per iter. Sync portion
-  of "join_ns" dropped from ~500µs to ~10µs; remaining join time on
-  short scenarios is now walk-imbalance + serial `mergeDeltas` cost
-  (the next parallel-path bottleneck).
-- **SIMD inner loops** in `walk`, `brWalk`, `allInEquityLeaf` —
-  `@Vector(VEC_LANES, f32)` over the hand axis with a scalar epilogue.
-- **CFR+ → DCFR** for the regret/strategy-sum update. Drop-in replacement;
-  see `DcfrWeights.forIter`. Per-iter cost is essentially unchanged;
-  convergence per iter is meaningfully better.
-- **Bench scenarios**: added `flop-fullrange-100bb-trunc` (pot 10, stack
-  1000) as the canonical user-target spot for future regression tests.
+1. **Inclusion-exclusion terminals** (`terminalFold`,
+   `computeShowdownCFVFor`). Replaced the per-hand collision-iteration
+   loop (~100 gathers × 1326 hands per call) with O(N + 52) streaming
+   accumulators bucketed by card. Showdown runs as two passes —
+   forward win mass, reverse loss mass — over `BoardContext` strength
+   buckets. f64 accumulators in the hot reduce. The
+   `Solver.collisions` / `collision_counts` tables and the
+   `handsCompatible` helper were deleted (~270 KB + an O(N²) init
+   loop).
+2. **Atomic spin-wait pool sync.** Replaced the persistent pool's
+   `std.Io.Mutex` + two `std.Io.Condition`s with `std.atomic.Value`
+   counters (`epoch`, `workers_done`) and a `spinLoopHint` then
+   `Thread.yield` fallback. Dispatcher overhead ("spawn_ns" in the
+   bench) dropped 2.3µs → 0.1µs/iter; sync portion of "join_ns"
+   dropped ~500µs → ~10µs.
+3. **Parallel mergeDeltas.** Same persistent pool now runs a second
+   phase per iter: each worker takes node-list slice
+   `[i*N/W .. (i+1)*N/W)`. `mergeDeltasRange(workers, weights, start,
+   end)` is the per-slice body; old single-threaded `mergeDeltas` is a
+   thin wrapper for non-parallel callers. Pool gained `merge_epoch` /
+   `merges_done` atomic pair; `merge_workers` / `merge_n_nodes` are
+   published once before the iter loop. Merge at workers=8 dropped
+   3.0ms → 0.77ms on river-polarized; 20.4ms → 4.6ms on
+   turn-fullrange (~4× sublinear, memory-bound reduce).
 
-Workers=1 wall-clock results, ReleaseFast on AVX2-class CPU. "before"
-column is the post-SIMD baseline; "after" is the inclusion-exclusion
-landing:
+Plus pre-existing work still in place: **SIMD inner loops** in `walk` /
+`brWalk` / `allInEquityLeaf`, **CFR+ → DCFR** transition (see
+`DcfrWeights.forIter`), and the `flop-fullrange-100bb-trunc` canonical
+bench scenario.
+
+### Bench numbers (ReleaseFast, AVX2-class CPU)
+
+Workers=1 wall-clock, before-IE vs after-IE+pool+merge:
 
 | scenario | before | after | speedup |
 | --- | --- | --- | --- |
-| river-polarized (200 iters) | 0.67s | 0.080s | 8.4× |
-| turn-fullrange (50 iters) | 1.23s | 0.283s | 4.3× |
-| flop-fullrange-trunc (1 iter) | 2.82s | 0.633s | 4.5× |
-| flop-fullrange-100bb-trunc (1 iter) | 2.85s | 0.626s | 4.5× |
+| river-polarized (200 iters) | 0.67s | 0.082s | 8.2× |
+| turn-fullrange (50 iters) | 1.23s | 0.279s | 4.4× |
+| flop-fullrange-trunc (1 iter) | 2.82s | 0.600s | 4.7× |
+| flop-fullrange-100bb-trunc (1 iter) | 2.85s | 0.606s | 4.7× |
 
-Walk time on the small scenarios is now short enough that the parallel
-spawn/join overhead dominates at workers ≥ 2 — `river-polarized
-workers=2` is slower than workers=1. The parallel path needs revisiting
-(per-iter thread pool reuse instead of `std.Thread.spawn` per dispatch)
-now that the per-walk cost has dropped ~5×.
+Parallel scaling (samples/s = parallel walks completed per second):
 
-DCFR's convergence improvement means fewer iters are typically needed to
-reach a target exploitability than CFR+ required.
+| scenario | w=1 | w=2 | w=4 | w=8 |
+| --- | --- | --- | --- | --- |
+| river-polarized | 2436 | 3227 | 6258 | 5221 |
+| turn-fullrange | 179 | 280 | 516 | 535 |
+
+river-polarized peaks at w=4 (2.6× over single-thread); turn-fullrange
+saturates around w=4–8. Big flop spots are walk-bound; merge was already
+a small fraction so parallel-merge gain there is modest. Remaining
+"join_ns" on the small scenarios is **walk-imbalance** (slowest worker
+dictates) — needs work-stealing within a single walk to fix.
 
 ## Notes from the `postflop-solver` cross-read
 
-`postflop-solver/` (the in-tree Rust reference impl) was reviewed for
-ideas worth porting. The inclusion-exclusion swap above came from there.
-Other techniques noted but not yet adopted:
+Audited for ideas worth porting. Inclusion-exclusion landed (above).
+Outstanding:
 
-- **DCFR γ=3 + power-of-4 strategy-sum reset** (Rust's `solver.rs:11-37`).
+- **DCFR γ=3 + power-of-4 strategy-sum reset** (`solver.rs:11-37`).
   *Tried and reverted.* The Rust formulation also shifts α by `(t-1)`,
-  which gives `pos_discount = 0` at iter 1 and wipes the positive
-  regrets accumulated at iter 0. On point-range subgames (e.g. the
-  trunc-vs-full turn re-solve test in `subgame.zig`) the wipe sends the
-  strategy back to uniform, triggering oscillation and preventing
-  convergence in tens of iters. The wipe likely amortizes out at the
-  hundreds-of-iters scale `postflop-solver` targets, but we don't have
-  an exploitability-vs-iters workflow to confirm. Revisit when one
-  exists.
-- **i16 regret / u16 strategy compression** with a per-node f32 scale
-  (`node.rs:99-149`). Halves the tree's working-set memory and was their
-  lever for fitting larger trees in L2/L3. Substantial refactor.
-- **f64 accumulators in misc reductions** (e.g. `inner_product`,
-  `compute_average` in `utility.rs`). Already used in the new terminal
-  evaluators; should be threaded through the rest of the walk's
-  reduce-style ops too (`terminalFold`'s old f32 total-mass reduce
-  pattern is gone, but `walk`'s positive-regret sum is still f32).
-- **Isomorphism reduction** is incompatible with our chance-sampled
-  approach (their solver enumerates every chance child). Not worth
-  trying to bolt on.
+  which makes `pos_discount = 0` at iter 1 and wipes the positive
+  regrets from iter 0. On point-range subgames (the trunc-vs-full turn
+  re-solve test in `subgame.zig`) the wipe causes oscillation and
+  prevents convergence in tens of iters. Likely amortizes out at the
+  hundreds-of-iters scale Rust targets; revisit once an
+  exploitability-vs-iters workflow exists to validate.
+- **i16 regret / u16 strategy compression** with per-node f32 scale
+  (`node.rs:99-149`). Halves working-set memory; the lever for fitting
+  bigger trees in L2/L3. Substantial refactor.
+- **More f64 accumulators in walk-side reductions** (`utility.rs`
+  `inner_product`, `compute_average`). The terminal evaluators got
+  this in pass #1; `walk`'s positive-regret sum and reach reductions
+  are still f32.
+- **Isomorphism reduction** (suit-permutation canonicalization at
+  chance nodes). Incompatible with our chance-sampled walk; would
+  require switching to full chance enumeration. Out of scope.
+
+## Current Perf Work-In-Progress
+
+No active edits — last session ended after parallel-merge landed and
+tests green. Next perf steps, in priority order:
+
+1. **Exploitability-vs-iters harness.** A small driver that runs a
+   solve at varying iter counts and prints exploitability (via
+   `cfr.exploitability`) at each. Unblocks the deferred DCFR γ=3 work
+   and gives a measurable signal for any future algorithm change.
+   Lowest effort, highest leverage. Recommended next.
+2. **Walk-imbalance / work-stealing.** Remaining `join_ns` on
+   river-polarized at w=8 is dominated by the slowest worker; with
+   chance sampling + cache variance, walk times differ across workers.
+   Fix is work-stealing within a single walk (split chance subtrees
+   across idle workers). Substantial — needs the harness above to know
+   whether it's actually helping.
+3. **f64 in walk-side reductions** (per cross-read note above). Cheap;
+   precision benefit unclear without measurement. After harness.
+4. **i16/u16 regret/strategy compression.** Memory win, modest perf
+   win. Only matters once tree size becomes the bottleneck.
+
+The atomic pool path still leaves `brWalk`'s chance-runout parallelism
+on the old `std.Thread.spawn`-per-dispatch path (Known Gaps section).
+`brWalk` is exploitability-only, called rarely, so the gain is small —
+deferred.
