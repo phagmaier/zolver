@@ -1,0 +1,25 @@
+I don't think we should do bucketing. So remove that.
+You should also look into isomorphism i.e. finding boards that are identical
+Performance Summary
+  Your current approach is an "Exact DCFR" solver. It is very accurate but computationally expensive because it treats all 1326 hand combinations
+  individually for every single calculation.
+
+   * Current Speed: You are doing well with SIMD, but your biggest bottleneck is likely Sparsity. Currently, even if a player has only 1% of their hands
+     left in a range, you are still calculating the other 99% as zeros.
+   * Showdown: Your collision correction is O(H · C), which is the hottest part of your code. Moving to a Fast Walsh-Hadamard Transform (FWHT) or a more
+     optimized table-based evaluator would be a major win.
+
+  Key Optimization Roadmap
+   1. Sparsity-Aware CFR (Highest Priority): Modify your walk to skip hands with zero reach. This is usually a 5x–10x speedup in post-flop scenarios.
+   2. Regret Compression: Storing regrets as f32 is memory-intensive. Using 16-bit integers with a scaling factor can double your cache efficiency.
+   3. Parallel Merging: As you expand your betting tree, the serial mergeDeltas step will become a significant bottleneck. This should be parallelized.
+
+  Roadmap to a "Full-Fledged" Solver
+  To compete with commercial solvers, you'll need to implement these structural changes:
+   * Betting Tree Flexibility: Your current MAXNUMBETS = 2 and fixed BETSIZES are very restrictive. You need a system that allows arbitrary reraises and
+     user-defined sizing.
+   * Hand Abstraction (Bucketing): For pre-flop and flop solving, you cannot use all 1326 hands. You'll need to group them into ~500 clusters based on
+     similarity.
+   * Subgame Resolving: Your current subgame solving is a great start, but to be theoretically sound, you need CFR-D (Decomposition) to ensure subgame
+     strategies remain part of the global equilibrium.
+   * Rake: Real-world solvers require rake calculation, as it fundamentally changes the value of folding vs. calling.
