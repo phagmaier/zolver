@@ -72,4 +72,26 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run solver benchmark");
     bench_step.dependOn(&run_bench.step);
+
+    const exploit_exe = b.addExecutable(.{
+        .name = "PokerExploitCurve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/exploit_curve.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_exploit = b.addRunArtifact(exploit_exe);
+    run_exploit.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_exploit.addArgs(args);
+
+    const exploit_step = b.step("exploit", "Run exploitability-vs-iters harness");
+    exploit_step.dependOn(&run_exploit.step);
+
+    const exploit_tests = b.addTest(.{
+        .root_module = exploit_exe.root_module,
+    });
+    const run_exploit_tests = b.addRunArtifact(exploit_tests);
+    test_step.dependOn(&run_exploit_tests.step);
 }

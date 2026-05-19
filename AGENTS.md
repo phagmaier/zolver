@@ -65,6 +65,11 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   board has 4+ cards, `turn path` when it has 5. The TUI is the resolve
   front-end only — 3-card flop-only solves go through `poker solve`.
 - Run benchmark: `zig build -Doptimize=ReleaseFast bench`.
+- Run exploitability-vs-iters harness: `zig build -Doptimize=ReleaseFast exploit`.
+  Prints exploitability (chips, `v_p1 + v_p2`) at geometric iter checkpoints
+  for each bench scenario, alongside solve and best-response timings. Use this
+  as the convergence signal when evaluating any algorithm change (DCFR
+  weights, walk policy, accumulator precision).
 
 ## Module Map
 
@@ -88,6 +93,12 @@ reasonably fast, and memory-conscious, not a commercial-scale solver.
   back to disk as ZON.
 - `src/main.zig` - `poker solve` / `poker resolve` / `poker tui` CLI entry
   points and dispatch.
+- `src/bench_scenarios.zig` - Shared scenario definitions (`Built`, `Scenario`,
+  builder fns, `scenarios` array) imported by both `bench.zig` and
+  `exploit_curve.zig`. Edit here when adding/tuning a canonical bench spot.
+- `src/exploit_curve.zig` - Exploitability-vs-iters harness. Per-checkpoint
+  runs build a fresh `Solver` and run N iters from scratch (fresh-per-checkpoint
+  keeps the `DcfrWeights.forIter` schedule honest).
 - `examples/turn.zon`, `examples/river.zon`, `examples/turn_with_export.zon` -
   Sample specs (the last enables CSV export + exploitability). Any of these
   works as input to `poker tui` too.
@@ -269,22 +280,38 @@ Outstanding:
 
 ## Current Perf Work-In-Progress
 
-No active edits — last session ended after parallel-merge landed and
-tests green. Next perf steps, in priority order:
+No active edits — last session ended after the exploitability harness
+landed (`src/exploit_curve.zig`, `zig build exploit`) and tests green.
+Sample output on AVX2-class CPU, ReleaseFast (geometric checkpoints):
 
-1. **Exploitability-vs-iters harness.** A small driver that runs a
-   solve at varying iter counts and prints exploitability (via
-   `cfr.exploitability`) at each. Unblocks the deferred DCFR γ=3 work
-   and gives a measurable signal for any future algorithm change.
-   Lowest effort, highest leverage. Recommended next.
+```
+river-polarized      iters=1   exploit=2.28e+02  solve=0.014s expl=0.002s
+river-polarized      iters=16  exploit=1.02e+00  solve=0.057s expl=0.002s
+river-polarized      iters=256 exploit=3.17e-04  solve=0.781s expl=0.002s
+turn-fullrange       iters=1   exploit=1.03e+02  solve=0.080s expl=0.106s
+turn-fullrange       iters=256 exploit=6.56e+00  solve=3.805s expl=0.106s
+flop-fullrange-trunc iters=1   exploit=4.34e+01  solve=1.068s expl=0.620s
+flop-fullrange-trunc iters=16  exploit=1.75e+00  solve=15.38s expl=0.635s
+```
+
+Use this as the quality signal for any algorithm change.
+
+Next perf steps, in priority order:
+
+1. **DCFR γ=3 + power-of-4 strategy-sum reset** revisit. Now testable
+   — run the harness before and after, compare exploitability at
+   matched iter counts on `turn-fullrange` and `flop-fullrange-100bb-trunc`.
+   See the cross-read note below for the prior failed attempt and why
+   it needs an iter offset before it can work without wiping early
+   positive regrets.
 2. **Walk-imbalance / work-stealing.** Remaining `join_ns` on
    river-polarized at w=8 is dominated by the slowest worker; with
    chance sampling + cache variance, walk times differ across workers.
    Fix is work-stealing within a single walk (split chance subtrees
-   across idle workers). Substantial — needs the harness above to know
-   whether it's actually helping.
+   across idle workers). Substantial — use the harness to confirm
+   correctness isn't sacrificed for throughput.
 3. **f64 in walk-side reductions** (per cross-read note above). Cheap;
-   precision benefit unclear without measurement. After harness.
+   precision benefit now measurable via the harness.
 4. **i16/u16 regret/strategy compression.** Memory win, modest perf
    win. Only matters once tree size becomes the bottleneck.
 
