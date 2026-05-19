@@ -161,12 +161,17 @@ pub const ParallelTimings = struct {
 // thumb. The walk and mergeDeltas read these values per iter; the per-iter
 // scalar cost is negligible.
 //
-// Note: postflop-solver uses γ=3 with a power-of-4 strategy-sum reset and a
-// `(t-1)` α-shift that wipes iter-0 positive regrets at iter 1. The wipe
-// breaks low-iter convergence on point-range subgames (see the trunc-vs-full
-// turn re-solve verification test), so we keep the textbook DCFR(γ=2) here
-// until a real exploitability-vs-iters workflow is in place to evaluate the
-// tradeoff on representative spots.
+// γ=3 with a power-of-4 strategy-sum reset (postflop-solver style). At each
+// power of 4 (1, 4, 16, 64, ...) we rebase the strategy-sum schedule by
+// substituting `t' = t − floor_pow4(t)` for `t` in γ. At t=4 the discount is
+// (0/1)^3 = 0, so the running strategy sum gets wiped and the new boundary
+// starts fresh — the average strategy at iter N effectively only averages
+// since the last power-of-4 boundary. Combined with γ=3 (vs textbook γ=2)
+// this concentrates the average on late-iter strategies and converges faster
+// in chips/iter on real spots. Unlike the Rust ref we do NOT apply the same
+// (t-1) shift to α — the iter-0 wipe that caused breaks the trunc-vs-full
+// turn re-solve verification on point ranges; keeping α at its DCFR default
+// preserves the early-iter regret state.
 pub const DcfrWeights = struct {
     regret_pos_discount: f32,
     regret_neg_discount: f32,
@@ -174,14 +179,19 @@ pub const DcfrWeights = struct {
 
     pub const ALPHA: f32 = 1.5;
     pub const BETA: f32 = 0.0;
-    pub const GAMMA: f32 = 2.0;
+    pub const GAMMA: f32 = 3.0;
 
     pub fn forIter(iter_idx_0: usize) DcfrWeights {
         const t: f32 = @floatFromInt(iter_idx_0 + 1);
         const t_alpha: f32 = std.math.pow(f32, t, ALPHA);
         const t_beta: f32 = std.math.pow(f32, t, BETA); // 1.0 when β=0
-        const t_over_tp1: f32 = t / (t + 1.0);
-        const gamma_factor: f32 = std.math.pow(f32, t_over_tp1, GAMMA);
+
+        const t_int: u64 = @as(u64, iter_idx_0) + 1;
+        const t_g_int: u64 = t_int - floorPow4(t_int);
+        const t_g: f32 = @floatFromInt(t_g_int);
+        const t_g_over_tgp1: f32 = if (t_g_int == 0) 0 else t_g / (t_g + 1.0);
+        const gamma_factor: f32 = std.math.pow(f32, t_g_over_tgp1, GAMMA);
+
         return .{
             .regret_pos_discount = t_alpha / (t_alpha + 1.0),
             .regret_neg_discount = t_beta / (t_beta + 1.0),
@@ -189,6 +199,15 @@ pub const DcfrWeights = struct {
         };
     }
 };
+
+// Largest power of 4 less than or equal to t. Used by DcfrWeights to rebase
+// γ at each power-of-4 boundary. t≥1 always (DcfrWeights uses iter+1).
+fn floorPow4(t: u64) u64 {
+    std.debug.assert(t >= 1);
+    var p: u64 = 1;
+    while (p * 4 <= t) : (p *= 4) {}
+    return p;
+}
 
 fn timestampDeltaNs(from: std.Io.Clock.Timestamp, to: std.Io.Clock.Timestamp) u64 {
     const diff: i96 = to.raw.nanoseconds - from.raw.nanoseconds;
@@ -818,6 +837,90 @@ pub const SolveContext = struct {
         }
     }
 
+    // Accumulating, blocked-aware variant for the truncated-chance leaf. Each
+    // call adds one cached runout's contribution to `out`; caller pre-zeros.
+    // Replaces the 4 per-cached-entry SIMD wrapper passes (fill keep_mask,
+    // mask p1/p2 reach, accumulate runout_cfv × keep_mask) that
+    // `computeShowdownCFVFor` previously required around it. We skip blocked
+    // hands inline using `board_ctx.blocked` (which already encodes
+    // "shares a card with the full 5-card board") instead of pre-masking
+    // reach. Net: 2 passes per cached entry instead of 6, no intermediate
+    // 1326-elem buffers per leaf call.
+    fn accumulateShowdownCFVFor(
+        self: *const SolveContext,
+        board_ctx: *const BoardContext,
+        reach: []const f32,
+        out: []f32,
+        payoff: f32,
+    ) void {
+        std.debug.assert(boardCardCount(board_ctx.board) == 5);
+        const hands = self.solver.hand_table.all_hands;
+        const sorted = &board_ctx.sorted_indices;
+        const blocked = &board_ctx.blocked;
+
+        // ----- Pass 1: forward, add win mass -----
+        {
+            var cfreach_sum: f64 = 0;
+            var cfreach_minus: [52]f64 = @splat(0);
+            var i: usize = 0;
+            while (i < NUM_HANDS) {
+                const bucket_top = sorted[i];
+                const bucket_end: usize = @as(usize, board_ctx.last_rank[bucket_top]) + 1;
+                for (i..bucket_end) |k| {
+                    const pi = sorted[k];
+                    if (blocked[pi]) continue;
+                    const h = hands[pi];
+                    const c1 = cardToDeckIdx(h.card1);
+                    const c2 = cardToDeckIdx(h.card2);
+                    const win_mass = cfreach_sum - cfreach_minus[c1] - cfreach_minus[c2];
+                    out[pi] = @floatCast(@as(f64, out[pi]) + @as(f64, payoff) * win_mass);
+                }
+                for (i..bucket_end) |k| {
+                    const oj = sorted[k];
+                    if (blocked[oj]) continue;
+                    const rj: f64 = @as(f64, reach[oj]);
+                    if (rj == 0) continue;
+                    const hj = hands[oj];
+                    cfreach_sum += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card1)] += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card2)] += rj;
+                }
+                i = bucket_end;
+            }
+        }
+
+        // ----- Pass 2: reverse, subtract loss mass -----
+        {
+            var cfreach_sum: f64 = 0;
+            var cfreach_minus: [52]f64 = @splat(0);
+            var i: usize = NUM_HANDS;
+            while (i > 0) {
+                const bucket_top = sorted[i - 1];
+                const bucket_first: usize = @intCast(board_ctx.first_rank[bucket_top]);
+                for (bucket_first..i) |k| {
+                    const pi = sorted[k];
+                    if (blocked[pi]) continue;
+                    const h = hands[pi];
+                    const c1 = cardToDeckIdx(h.card1);
+                    const c2 = cardToDeckIdx(h.card2);
+                    const loss_mass = cfreach_sum - cfreach_minus[c1] - cfreach_minus[c2];
+                    out[pi] = @floatCast(@as(f64, out[pi]) - @as(f64, payoff) * loss_mass);
+                }
+                for (bucket_first..i) |k| {
+                    const oj = sorted[k];
+                    if (blocked[oj]) continue;
+                    const rj: f64 = @as(f64, reach[oj]);
+                    if (rj == 0) continue;
+                    const hj = hands[oj];
+                    cfreach_sum += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card1)] += rj;
+                    cfreach_minus[cardToDeckIdx(hj.card2)] += rj;
+                }
+                i = bucket_first;
+            }
+        }
+    }
+
     // All-in equity leaf evaluator. At a chance node we wish to truncate, this
     // returns each player's per-hand CFV under the simplifying assumption that
     // both players commit their remaining stacks immediately and the rest of
@@ -868,117 +971,49 @@ pub const SolveContext = struct {
         if (self.solver.runout_cache) |cache| {
             // Cached fast path. Each entry is a complete 5-card BoardContext
             // pre-computed at solver init for the solver's root board.
+            // `out_cfv_p1` / `out_cfv_p2` were @memset to 0 above; the
+            // accumulating showdown sweep adds each runout's contribution
+            // directly. `cached.blocked` already encodes "hand shares a card
+            // with the 5-card board", strictly covering the runout-card mask
+            // we used to apply separately — see accumulateShowdownCFVFor.
             std.debug.assert(std.mem.eql(Card, saved_board[0..num_board_cards], self.solver.runout_cache_root[0..num_board_cards]));
 
-            var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
-            var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
-            var masked_p1: [NUM_HANDS]f32 = undefined;
-            var masked_p2: [NUM_HANDS]f32 = undefined;
-            var keep_mask: KeepMask = undefined;
-
             for (cache) |*cached| {
-                const new1: Card = if (num_board_cards == 4) cached.board[4] else cached.board[3];
-                const new2: Card = if (num_board_cards == 4) 0 else cached.board[4];
-
-                fillTwoCardBlockMask(&hands, new1, new2, &keep_mask);
-
-                {
-                    var v: usize = 0;
-                    while (v < VEC_TAIL_START) : (v += VEC_LANES) {
-                        const km = vload(&keep_mask, v);
-                        vstore(&masked_p1, v, vload(p1_reach, v) * km);
-                        vstore(&masked_p2, v, vload(p2_reach, v) * km);
-                    }
-                    var i: usize = VEC_TAIL_START;
-                    while (i < NUM_HANDS) : (i += 1) {
-                        masked_p1[i] = p1_reach[i] * keep_mask[i];
-                        masked_p2[i] = p2_reach[i] * keep_mask[i];
-                    }
-                }
-
-                self.computeShowdownCFVFor(cached, &masked_p2, &runout_cfv_p1, half_pot);
-                self.computeShowdownCFVFor(cached, &masked_p1, &runout_cfv_p2, half_pot);
-
-                {
-                    var v: usize = 0;
-                    while (v < VEC_TAIL_START) : (v += VEC_LANES) {
-                        const km = vload(&keep_mask, v);
-                        vstore(out_cfv_p1, v, vload(out_cfv_p1, v) + vload(&runout_cfv_p1, v) * km);
-                        vstore(out_cfv_p2, v, vload(out_cfv_p2, v) + vload(&runout_cfv_p2, v) * km);
-                    }
-                    var i: usize = VEC_TAIL_START;
-                    while (i < NUM_HANDS) : (i += 1) {
-                        out_cfv_p1[i] += runout_cfv_p1[i] * keep_mask[i];
-                        out_cfv_p2[i] += runout_cfv_p2[i] * keep_mask[i];
-                    }
-                }
+                self.accumulateShowdownCFVFor(cached, p2_reach, out_cfv_p1, half_pot);
+                self.accumulateShowdownCFVFor(cached, p1_reach, out_cfv_p2, half_pot);
             }
         } else {
-            // Slow path: recompute every runout's BoardContext on demand.
+            // Slow path: recompute every runout's BoardContext on demand and
+            // accumulate into the same `out_cfv_*` buffers as the cached path
+            // via `accumulateShowdownCFVFor`. Keeping the two paths on the
+            // same accumulator function guarantees bit-identical results — the
+            // only difference is whether the BoardContext was precomputed at
+            // solver init or built on the fly here.
             self.pushSnapshot();
             const deck = card_mod.makeDeck();
-            var runout_cfv_p1: [NUM_HANDS]f32 = undefined;
-            var runout_cfv_p2: [NUM_HANDS]f32 = undefined;
 
             if (num_board_cards == 4) {
                 // Turn-chance leaf: enumerate the river card only.
                 for (deck) |r| {
                     if (boardContains(saved_board, r)) continue;
-
                     var new_board = saved_board;
                     new_board[4] = r;
                     self.reinitForBoard(new_board);
-
-                    var masked_p1: [NUM_HANDS]f32 = undefined;
-                    var masked_p2: [NUM_HANDS]f32 = undefined;
-                    for (0..NUM_HANDS) |i| {
-                        const h = hands[i];
-                        const keep = !handHitsCard(h, r);
-                        masked_p1[i] = if (keep) p1_reach[i] else 0;
-                        masked_p2[i] = if (keep) p2_reach[i] else 0;
-                    }
-
-                    self.computeShowdownCFV(&masked_p2, &runout_cfv_p1, half_pot);
-                    self.computeShowdownCFV(&masked_p1, &runout_cfv_p2, half_pot);
-
-                    for (0..NUM_HANDS) |i| {
-                        const h = hands[i];
-                        if (handHitsCard(h, r)) continue;
-                        out_cfv_p1[i] += runout_cfv_p1[i];
-                        out_cfv_p2[i] += runout_cfv_p2[i];
-                    }
+                    self.accumulateShowdownCFVFor(self.board_ctx, p2_reach, out_cfv_p1, half_pot);
+                    self.accumulateShowdownCFVFor(self.board_ctx, p1_reach, out_cfv_p2, half_pot);
                 }
             } else {
                 // Flop-chance leaf: enumerate (turn, river) unordered pairs.
                 for (deck, 0..) |t, ti| {
                     if (boardContains(saved_board, t)) continue;
-
                     for (deck[ti + 1 ..]) |r| {
                         if (boardContains(saved_board, r)) continue;
-
                         var new_board = saved_board;
                         new_board[3] = t;
                         new_board[4] = r;
                         self.reinitForBoard(new_board);
-
-                        var masked_p1: [NUM_HANDS]f32 = undefined;
-                        var masked_p2: [NUM_HANDS]f32 = undefined;
-                        for (0..NUM_HANDS) |i| {
-                            const h = hands[i];
-                            const keep = !handHitsCard(h, t) and !handHitsCard(h, r);
-                            masked_p1[i] = if (keep) p1_reach[i] else 0;
-                            masked_p2[i] = if (keep) p2_reach[i] else 0;
-                        }
-
-                        self.computeShowdownCFV(&masked_p2, &runout_cfv_p1, half_pot);
-                        self.computeShowdownCFV(&masked_p1, &runout_cfv_p2, half_pot);
-
-                        for (0..NUM_HANDS) |i| {
-                            const h = hands[i];
-                            if (handHitsCard(h, t) or handHitsCard(h, r)) continue;
-                            out_cfv_p1[i] += runout_cfv_p1[i];
-                            out_cfv_p2[i] += runout_cfv_p2[i];
-                        }
+                        self.accumulateShowdownCFVFor(self.board_ctx, p2_reach, out_cfv_p1, half_pot);
+                        self.accumulateShowdownCFVFor(self.board_ctx, p1_reach, out_cfv_p2, half_pot);
                     }
                 }
             }
@@ -3394,20 +3429,44 @@ test "Solver.solve: turn-start with scratch pool — deeper recursion stays dete
     for (regrets_a, regrets_b) |a, b| try std.testing.expectEqual(a, b);
 }
 
-test "DcfrWeights.forIter: known values at t=1, t=2" {
-    // t = 1 (iter index 0): t^α = 1, so pos_discount = 1/2. β=0 ⇒ neg = 1/2.
-    // (t/(t+1))^γ = (1/2)² = 0.25.
+test "DcfrWeights.forIter: known values at t=1..5, power-of-4 reset" {
+    // α and β unchanged from textbook DCFR(α=1.5, β=0):
+    //   pos_discount = t^1.5 / (t^1.5 + 1); neg_discount = 1/2 (β=0).
+    // γ=3 with power-of-4 reset on t' = t - floor_pow4(t):
+    //   t=1 → t'=0 → discount = 0   (boundary, sum reset)
+    //   t=2 → t'=1 → (1/2)^3  = 0.125
+    //   t=3 → t'=2 → (2/3)^3 ≈ 0.296
+    //   t=4 → t'=0 → discount = 0   (boundary, sum reset)
+    //   t=5 → t'=1 → (1/2)^3  = 0.125
     const w0 = DcfrWeights.forIter(0);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), w0.regret_pos_discount, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), w0.regret_neg_discount, 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.25), w0.strategy_sum_discount, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), w0.strategy_sum_discount, 1e-5);
 
-    // t = 2: t^1.5 ≈ 2.8284; pos_discount = 2.8284 / 3.8284 ≈ 0.7388.
-    // (t/(t+1))^γ = (2/3)² ≈ 0.4444.
     const w1 = DcfrWeights.forIter(1);
     try std.testing.expectApproxEqAbs(@as(f32, 0.7388), w1.regret_pos_discount, 1e-3);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), w1.regret_neg_discount, 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.4444), w1.strategy_sum_discount, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.125), w1.strategy_sum_discount, 1e-3);
+
+    const w2 = DcfrWeights.forIter(2);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.296), w2.strategy_sum_discount, 1e-3);
+
+    const w3 = DcfrWeights.forIter(3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), w3.strategy_sum_discount, 1e-5);
+
+    const w4 = DcfrWeights.forIter(4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.125), w4.strategy_sum_discount, 1e-3);
+}
+
+test "floorPow4: boundaries" {
+    try std.testing.expectEqual(@as(u64, 1), floorPow4(1));
+    try std.testing.expectEqual(@as(u64, 1), floorPow4(3));
+    try std.testing.expectEqual(@as(u64, 4), floorPow4(4));
+    try std.testing.expectEqual(@as(u64, 4), floorPow4(15));
+    try std.testing.expectEqual(@as(u64, 16), floorPow4(16));
+    try std.testing.expectEqual(@as(u64, 16), floorPow4(63));
+    try std.testing.expectEqual(@as(u64, 64), floorPow4(64));
+    try std.testing.expectEqual(@as(u64, 256), floorPow4(1000));
 }
 
 test "DCFR: river polarized strategy converges to a stable equilibrium" {
