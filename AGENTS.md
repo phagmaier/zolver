@@ -193,9 +193,17 @@ Last performance pass landed:
   `BoardContext.first_rank` / `last_rank` to advance bucket-by-bucket so
   ties (opp at equal strength) drop out of both passes naturally.
   Accumulators are f64 to preserve precision across 1326-lane sums.
-  The `Solver.collisions` / `collision_counts` tables are no longer
-  read by the hot path — left in place for now; a follow-up can delete
-  them. Workers=1 wall-clock numbers below.
+  The `Solver.collisions` / `collision_counts` tables and the
+  `handsCompatible` helper are gone — reclaimed ~270 KB of solver state
+  and a per-init O(N²) build loop. Workers=1 wall-clock numbers below.
+- **Atomic spin-wait pool sync.** Persistent worker pool now coordinates
+  via `std.atomic.Value`-backed `epoch` / `workers_done` counters with a
+  brief `spinLoopHint` then `Thread.yield` fallback. Replaces the prior
+  `std.Io.Mutex` + two `std.Io.Condition`s. Dispatcher overhead
+  ("spawn_ns" in the bench) dropped 2.3µs → 0.1µs per iter. Sync portion
+  of "join_ns" dropped from ~500µs to ~10µs; remaining join time on
+  short scenarios is now walk-imbalance + serial `mergeDeltas` cost
+  (the next parallel-path bottleneck).
 - **SIMD inner loops** in `walk`, `brWalk`, `allInEquityLeaf` —
   `@Vector(VEC_LANES, f32)` over the hand axis with a scalar epilogue.
 - **CFR+ → DCFR** for the regret/strategy-sum update. Drop-in replacement;
@@ -231,10 +239,15 @@ ideas worth porting. The inclusion-exclusion swap above came from there.
 Other techniques noted but not yet adopted:
 
 - **DCFR γ=3 + power-of-4 strategy-sum reset** (Rust's `solver.rs:11-37`).
-  Their `DiscountParams::new` uses `γ=3` (vs our `GAMMA = 2.0`) and resets
-  the cumulative-strategy weighting at iters 1, 4, 16, 64, 256 by feeding
-  `t_gamma = t - nearest_lower_power_of_4(t)` into `(t/(t+1))^γ`. Cheap
-  to try; expected to reduce iters-to-target-exploitability.
+  *Tried and reverted.* The Rust formulation also shifts α by `(t-1)`,
+  which gives `pos_discount = 0` at iter 1 and wipes the positive
+  regrets accumulated at iter 0. On point-range subgames (e.g. the
+  trunc-vs-full turn re-solve test in `subgame.zig`) the wipe sends the
+  strategy back to uniform, triggering oscillation and preventing
+  convergence in tens of iters. The wipe likely amortizes out at the
+  hundreds-of-iters scale `postflop-solver` targets, but we don't have
+  an exploitability-vs-iters workflow to confirm. Revisit when one
+  exists.
 - **i16 regret / u16 strategy compression** with a per-node f32 scale
   (`node.rs:99-149`). Halves the tree's working-set memory and was their
   lever for fitting larger trees in L2/L3. Substantial refactor.

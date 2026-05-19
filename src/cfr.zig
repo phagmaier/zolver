@@ -160,6 +160,13 @@ pub const ParallelTimings = struct {
 // β=0 gives a constant neg_discount of 0.5 — DCFR's "halve the bad" rule of
 // thumb. The walk and mergeDeltas read these values per iter; the per-iter
 // scalar cost is negligible.
+//
+// Note: postflop-solver uses γ=3 with a power-of-4 strategy-sum reset and a
+// `(t-1)` α-shift that wipes iter-0 positive regrets at iter 1. The wipe
+// breaks low-iter convergence on point-range subgames (see the trunc-vs-full
+// turn re-solve verification test), so we keep the textbook DCFR(γ=2) here
+// until a real exploitability-vs-iters workflow is in place to evaluate the
+// tradeoff on representative spots.
 pub const DcfrWeights = struct {
     regret_pos_discount: f32,
     regret_neg_discount: f32,
@@ -347,11 +354,6 @@ pub const Solver = struct {
     initial_stack2: f32,
     pot_at_root: f32,
 
-    // Collision map: hand-pairs that share a card. Board-independent, so it
-    // stays on the immutable side of the solver — chance walks never touch it.
-    collisions: [NUM_HANDS][101]u16,
-    collision_counts: [NUM_HANDS]u8,
-
     // Dense reach vectors derived from the caller's sparse Range inputs at
     // root. Indexed by hand id 0..1325; blocked entries are zero.
     p1_reach: [NUM_HANDS]f32,
@@ -414,8 +416,6 @@ pub const Solver = struct {
             .initial_stack1 = initial_stack1,
             .initial_stack2 = initial_stack2,
             .pot_at_root = pot_at_root,
-            .collisions = undefined,
-            .collision_counts = undefined,
             .p1_reach = undefined,
             .p2_reach = undefined,
             .board_ctx = undefined,
@@ -432,21 +432,6 @@ pub const Solver = struct {
         @memset(&self.p2_reach, 0);
 
         self.board_ctx = BoardContext.compute(&self.evaluator, &self.hand_table, board);
-
-        // Precompute collision map
-        for (0..NUM_HANDS) |i| {
-            const h_i = self.hand_table.all_hands[i];
-            var c_count: u8 = 0;
-            for (0..NUM_HANDS) |j| {
-                if (i == j) continue;
-                const h_j = self.hand_table.all_hands[j];
-                if (!handsCompatible(h_i, h_j)) {
-                    self.collisions[i][c_count] = @intCast(j);
-                    c_count += 1;
-                }
-            }
-            self.collision_counts[i] = c_count;
-        }
 
         for (p1.active_indices, p1.probs) |idx, p| {
             if (!self.board_ctx.blocked[idx]) self.p1_reach[idx] = p;
@@ -575,7 +560,7 @@ pub const Solver = struct {
 // walker (`walk`/`brWalk`) and the terminal/leaf helpers all operate through a
 // `*SolveContext`, which is what makes parallel workers cleanly representable:
 // each worker gets its own SolveContext over its own BoardContext, while the
-// Solver itself (evaluator, hand_table, collisions, root reaches) is read-only
+// Solver itself (evaluator, hand_table, root reaches) is read-only
 // shareable across workers.
 pub const SolveContext = struct {
     solver: *Solver,
@@ -1016,10 +1001,6 @@ pub const SolveContext = struct {
     }
 };
 
-inline fn handsCompatible(a: range_mod.Hand, b: range_mod.Hand) bool {
-    return a.card1 != b.card1 and a.card1 != b.card2 and a.card2 != b.card1 and a.card2 != b.card2;
-}
-
 // Per-worker delta buffers for parallel CFR. Each non-chance / non-leaf node
 // gets its own delta slice (same shape as `node.regrets` / `strategy_sum`)
 // keyed by `*Node`. During a parallel `solve`, workers write into their own
@@ -1219,7 +1200,6 @@ pub fn solve(
     while (s < n_workers) : (s += 1) {
         workers[s] = .{
             .pool = &pool,
-            .io = io,
             .job = .{
                 .ctx = &worker_ctxs[s],
                 .root = root,
@@ -1250,10 +1230,7 @@ pub fn solve(
 
     if (spawned <= 1) {
         if (spawned == 1) {
-            pool.mutex.lockUncancelable(io);
-            pool.shutdown = true;
-            pool.mutex.unlock(io);
-            pool.job_cv.broadcast(io);
+            pool.shutdown.store(true, .release);
             threads[0].join();
         }
         // Reuse worker_scratches[0] for the serial fallback — already
@@ -1267,13 +1244,11 @@ pub fn solve(
         return;
     }
 
-    // From here on, `spawned` workers are parked on `job_cv` waiting for the
-    // first epoch. Shutdown on any exit path joins them cleanly.
+    // From here on, `spawned` workers are spinning on `epoch` waiting for the
+    // first dispatch. Shutdown on any exit path joins them cleanly — workers
+    // see `shutdown=true` on their next spin-check (within ~1µs).
     defer {
-        pool.mutex.lockUncancelable(io);
-        pool.shutdown = true;
-        pool.mutex.unlock(io);
-        pool.job_cv.broadcast(io);
+        pool.shutdown.store(true, .release);
         for (0..spawned) |i| threads[i].join();
     }
 
@@ -1292,24 +1267,31 @@ pub fn solve(
         else
             null;
 
-        // Workers are parked: safe to mutate their job's per-iter field
-        // without the pool lock. The lock + broadcast below publishes.
+        // Workers are spinning on `epoch`: safe to write per-iter job fields
+        // before the epoch bump publishes them via release/acquire.
         for (0..actual_workers) |w| workers[w].job.weights = weights;
 
-        pool.mutex.lockUncancelable(io);
-        pool.workers_done = 0;
-        pool.epoch += 1;
-        pool.mutex.unlock(io);
-        pool.job_cv.broadcast(io);
+        pool.workers_done.store(0, .release);
+        _ = pool.epoch.fetchAdd(1, .release);
 
         const t_after_spawn: ?std.Io.Clock.Timestamp = if (record)
             std.Io.Clock.Timestamp.now(io, .awake)
         else
             null;
 
-        pool.mutex.lockUncancelable(io);
-        while (pool.workers_done < actual_workers) pool.done_cv.waitUncancelable(io, &pool.mutex);
-        pool.mutex.unlock(io);
+        // Spin-wait for all workers to finish. Pairs with worker's
+        // `.release` fetchAdd so we observe their delta-buffer writes.
+        {
+            var spin: usize = 0;
+            while (pool.workers_done.load(.acquire) < actual_workers) {
+                if (spin < POOL_SPIN_BUDGET) {
+                    std.atomic.spinLoopHint();
+                    spin += 1;
+                } else {
+                    std.Thread.yield() catch {};
+                }
+            }
+        }
 
         const t_after_join: ?std.Io.Clock.Timestamp = if (record)
             std.Io.Clock.Timestamp.now(io, .awake)
@@ -1354,57 +1336,70 @@ const WalkJob = struct {
 
 // Coordinates the persistent worker pool used by `solve`. One instance lives
 // on the dispatcher's stack for the duration of a single `solve` call; the
-// pool is torn down before `solve` returns. Workers park on `job_cv` between
-// iterations and wake when `epoch` advances. `done_cv` is signaled when
-// `workers_done` reaches `n_workers`, releasing the dispatcher to merge.
+// pool is torn down before `solve` returns.
 //
-// All state under `mutex` — no atomics needed; the lock pairing with the
-// condition variables provides the memory ordering for per-iter `WalkJob`
-// updates (the dispatcher writes `weights` while workers are parked, then
-// the broadcast/wake pair publishes those writes).
+// All synchronization is via atomics + spin-with-yield. The previous design
+// used `std.Io.Mutex` + two `std.Io.Condition`s; with the post-IE walk now
+// down to ~50–500us per worker, the per-iter `Mutex.lock` + `Condition.wait`
+// round-trip (~500us at workers=2 on the river bench) dominated the budget.
+// Atomic + spin is brutal but right for this workload: workers are sized to
+// fit available cores (capped at `MAX_PARALLEL_WORKERS`), so a spinning
+// worker isn't denying anyone else CPU; and a brief spin with a `yield`
+// fallback after ~1024 iterations bounds the wasted cycles when a walk is
+// long enough that the OS scheduler would benefit from being involved.
+//
+// Memory ordering pairs:
+//   - dispatcher writes `job.weights`, then `epoch.fetchAdd(.release)` →
+//     worker `epoch.load(.acquire)` sees both.
+//   - worker writes `worker_deltas[t]` (via WalkJob.run), then
+//     `workers_done.fetchAdd(.release)` → dispatcher
+//     `workers_done.load(.acquire)` then reads the deltas in `mergeDeltas`.
+//   - `shutdown.store(.release)` / `shutdown.load(.acquire)` pair.
 const ParallelPool = struct {
-    // `std.Io.Mutex`/`Condition` need an `Io` on every call — passed in
-    // alongside `pool` from the dispatcher's stack so workers don't have to
-    // chase a back-pointer to the Solver.
-    mutex: std.Io.Mutex = std.Io.Mutex.init,
-    job_cv: std.Io.Condition = std.Io.Condition.init,
-    done_cv: std.Io.Condition = std.Io.Condition.init,
-    epoch: u64 = 0,
-    workers_done: usize = 0,
+    epoch: std.atomic.Value(u64) = .init(0),
+    workers_done: std.atomic.Value(usize) = .init(0),
     n_workers: usize = 0,
-    shutdown: bool = false,
+    shutdown: std.atomic.Value(bool) = .init(false),
 };
+
+// Spin parameter shared by worker (epoch wait) and dispatcher (done wait).
+// 1024 spin iterations on a modern x86 core is ~1–3µs — short enough to
+// disappear under the per-iter join budget for short walks, long enough that
+// the OS scheduler doesn't get involved when the wait would resolve quickly.
+const POOL_SPIN_BUDGET: usize = 1024;
 
 // One persistent worker. `job` is filled by the dispatcher before the pool
 // is started and only `job.weights` is updated between epochs.
 const PoolWorker = struct {
     pool: *ParallelPool,
-    io: std.Io,
     job: WalkJob,
 
     fn run(self: *PoolWorker) void {
         var last_epoch: u64 = 0;
         while (true) {
-            self.pool.mutex.lockUncancelable(self.io);
-            while (!self.pool.shutdown and self.pool.epoch == last_epoch) {
-                self.pool.job_cv.waitUncancelable(self.io, &self.pool.mutex);
-            }
-            if (self.pool.shutdown) {
-                self.pool.mutex.unlock(self.io);
-                return;
-            }
-            const my_epoch = self.pool.epoch;
-            self.pool.mutex.unlock(self.io);
+            // Wait for a new epoch or shutdown. Spin briefly, then yield.
+            const my_epoch = blk: {
+                var spin: usize = 0;
+                while (true) {
+                    if (self.pool.shutdown.load(.acquire)) return;
+                    const cur = self.pool.epoch.load(.acquire);
+                    if (cur != last_epoch) break :blk cur;
+                    if (spin < POOL_SPIN_BUDGET) {
+                        std.atomic.spinLoopHint();
+                        spin += 1;
+                    } else {
+                        std.Thread.yield() catch {};
+                    }
+                }
+            };
 
             WalkJob.run(&self.job);
 
             last_epoch = my_epoch;
-            self.pool.mutex.lockUncancelable(self.io);
-            self.pool.workers_done += 1;
-            if (self.pool.workers_done == self.pool.n_workers) {
-                self.pool.done_cv.signal(self.io);
-            }
-            self.pool.mutex.unlock(self.io);
+            // `.release` publishes the worker's writes to its delta buffers
+            // and output slot to whichever dispatcher load eventually sees
+            // the incremented counter.
+            _ = self.pool.workers_done.fetchAdd(1, .release);
         }
     }
 };
