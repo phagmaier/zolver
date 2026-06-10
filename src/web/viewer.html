@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zolver — Strategy Viewer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  background: #0d1117; color: #c9d1d9;
+  min-height: 100vh; padding: 20px;
+  display: flex; flex-direction: column; align-items: center;
+}
+.header {
+  text-align: center; margin-bottom: 20px;
+}
+.header h1 { font-size: 20px; color: #58a6ff; margin-bottom: 4px; }
+.header .sub { font-size: 12px; color: #8b949e; }
+.meta-grid {
+  display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;
+  margin-bottom: 16px; font-size: 12px;
+}
+.meta-item { text-align: center; }
+.meta-item .label { color: #8b949e; }
+.meta-item .value { color: #c9d1d9; font-weight: bold; font-size: 14px; }
+.meta-item .value.good { color: #3fb950; }
+.meta-item .value.warn { color: #d29922; }
+
+.board-cards {
+  display: flex; gap: 6px; justify-content: center; margin-bottom: 16px;
+}
+.board-card {
+  width: 48px; height: 64px; border-radius: 6px;
+  background: #fff; color: #000; font-size: 18px; font-weight: bold;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.board-card.red { color: #d32f2f; }
+.board-card.black { color: #212121; }
+
+.controls {
+  display: flex; gap: 12px; align-items: center; justify-content: center;
+  margin-bottom: 12px; flex-wrap: wrap;
+}
+.controls select, .controls button {
+  background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+  font-family: inherit;
+}
+.controls button:hover { background: #30363d; }
+.controls button.active { background: #1f6feb; border-color: #1f6feb; }
+
+.breadcrumb {
+  display: flex; gap: 4px; align-items: center; justify-content: center;
+  margin-bottom: 12px; font-size: 11px; flex-wrap: wrap;
+}
+.breadcrumb span { color: #484f58; }
+.breadcrumb .step {
+  background: #21262d; padding: 3px 8px; border-radius: 4px;
+  color: #8b949e;
+}
+
+.street-label {
+  text-align: center; font-size: 11px; color: #8b949e; margin-bottom: 8px;
+}
+
+.grid-wrapper {
+  display: flex; gap: 20px; justify-content: center; align-items: flex-start;
+}
+.grid-container { position: relative; }
+.grid-table { border-collapse: collapse; }
+.grid-table th {
+  width: 40px; height: 20px; font-size: 10px; color: #8b949e;
+  text-align: center; font-weight: normal;
+}
+.grid-table td {
+  width: 40px; height: 40px; text-align: center; font-size: 10px;
+  cursor: pointer; border: 1px solid #21262d; position: relative;
+  transition: transform 0.1s;
+}
+.grid-table td:hover { transform: scale(1.15); z-index: 2; border-color: #58a6ff; }
+.grid-table td.selected { border: 2px solid #58a6ff; z-index: 1; }
+.grid-table td.blocked {
+  background: #161b22 !important; cursor: default;
+}
+.grid-table td.blocked::after {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(
+    135deg, transparent, transparent 2px, rgba(255,0,0,0.1) 2px, rgba(255,0,0,0.1) 4px
+  );
+}
+.grid-table td .combo-label { position: relative; z-index: 1; line-height: 1.1; }
+.grid-table td .freq { font-size: 8px; color: rgba(255,255,255,0.6); }
+
+.detail-panel {
+  width: 260px; background: #161b22; border: 1px solid #30363d;
+  border-radius: 8px; padding: 14px; font-size: 12px;
+}
+.detail-panel h3 { font-size: 14px; color: #58a6ff; margin-bottom: 8px; }
+.detail-panel .combo-name { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
+.detail-panel .ev-line { margin-bottom: 10px; color: #8b949e; }
+.detail-panel .ev-line .ev-val { color: #d2a8ff; font-weight: bold; }
+.action-bar { margin-bottom: 6px; }
+.action-bar .action-label {
+  display: inline-block; width: 70px; font-size: 11px; color: #8b949e;
+}
+.action-bar .action-bar-fill {
+  display: inline-block; height: 14px; border-radius: 3px; vertical-align: middle;
+  min-width: 2px;
+}
+.action-bar .action-pct {
+  display: inline-block; width: 40px; text-align: right; font-size: 11px;
+  margin-left: 6px; color: #c9d1d9;
+}
+
+.action-buttons {
+  display: flex; gap: 6px; justify-content: center; margin-top: 12px;
+  flex-wrap: wrap;
+}
+.action-buttons button {
+  background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+  border-radius: 6px; padding: 8px 16px; font-size: 12px; cursor: pointer;
+  font-family: inherit; white-space: nowrap;
+}
+.action-buttons button:hover { background: #30363d; }
+.action-buttons button.primary { background: #238636; border-color: #238636; }
+.action-buttons button.danger { background: #da3633; border-color: #da3633; }
+
+.no-data { text-align: center; color: #8b949e; padding: 40px; }
+.drop-zone {
+  border: 2px dashed #30363d; border-radius: 12px; padding: 60px;
+  text-align: center; color: #8b949e; margin: 40px auto; max-width: 500px;
+  cursor: pointer;
+}
+.drop-zone:hover { border-color: #58a6ff; color: #58a6ff; }
+.drop-zone input { display: none; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+    <div style="font-size:40px;margin-bottom:12px">&#9824; &#9829; &#9830; &#9827;</div>
+    <div style="font-size:16px;margin-bottom:4px">Drop results.json here</div>
+    <div style="font-size:12px">or click to browse</div>
+    <input type="file" id="fileInput" accept=".json" onchange="handleFile(event)">
+  </div>
+  <div id="viewer" style="display:none"></div>
+</div>
+
+<script>
+// ── Data ────────────────────────────────────────────────────────────────────
+const RANKS = ['A','K','Q','J','T','9','8','7','6','5','4','3','2'];
+const RANK_MAP = { A:0, K:1, Q:2, J:3, T:4, '9':5, '8':6, '7':7, '6':8, '5':9, '4':10, '3':11, '2':12 };
+const SUIT_COLORS = { s:'black', h:'red', d:'red', c:'black' };
+const SUIT_SYMBOLS = { s:'\u2660', h:'\u2665', d:'\u2666', c:'\u2663' };
+
+const ACTION_COLORS = {
+  check:  [0x23,0x86,0x36], fold:   [0xda,0x36,0x33],
+  call:   [0x1f,0x6f,0xeb], bet:    [0xd2,0x99,0x22],
+  raise:  [0xa3,0x71,0xf7], allin:  [0xdb,0x61,0xa2],
+};
+
+function classifyAction(label) {
+  const l = label.toLowerCase();
+  if (l === 'check') return 'check';
+  if (l === 'fold') return 'fold';
+  if (l === 'call') return 'call';
+  if (l === 'all-in') return 'allin';
+  if (l.startsWith('raise')) return 'raise';
+  if (l.startsWith('bet')) return 'bet';
+  return 'bet';
+}
+
+// ── State ───────────────────────────────────────────────────────────────────
+let DATA = null;
+let streetIdx = 0;
+let nodeIdx = 0;   // index into current street's nodes[]
+let selectedCombo = null;
+let playerPerspective = null; // 'oop' or 'ip' — null means "show acting player"
+let nodeIndex = {}; // "line|streetIdx" → node array index
+let pathHistory = [];
+
+// ── File handling ───────────────────────────────────────────────────────────
+const dropZone = document.getElementById('dropZone');
+const viewer = document.getElementById('viewer');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor = '#58a6ff'; });
+dropZone.addEventListener('dragleave', e => { e.preventDefault(); dropZone.style.borderColor = '#30363d'; });
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.style.borderColor = '#30363d';
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+
+function handleFile(e) {
+  const file = e.target.files[0];
+  if (file) loadFile(file);
+}
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      DATA = JSON.parse(reader.result);
+      initViewer();
+    } catch (err) {
+      alert('Invalid JSON file: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ── Initialization ──────────────────────────────────────────────────────────
+function initViewer() {
+  if (!DATA || !DATA.streets || !DATA.meta) return;
+  dropZone.style.display = 'none';
+  viewer.style.display = 'block';
+  streetIdx = 0;
+  nodeIdx = 0;
+  selectedCombo = null;
+  playerPerspective = null;
+  pathHistory = [];
+  buildNodeIndex();
+  render();
+}
+
+function buildNodeIndex() {
+  nodeIndex = {};
+  for (let s = 0; s < DATA.streets.length; s++) {
+    const nodes = DATA.streets[s].nodes;
+    for (let i = 0; i < nodes.length; i++) {
+      const key = nodes[i].line.join('|') + '|' + s;
+      nodeIndex[key] = i;
+    }
+  }
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+function render() {
+  const street = DATA.streets[streetIdx];
+  const node = street.nodes[nodeIdx];
+  const isFlop = street.street === 'flop';
+
+  let player = playerPerspective || node.player;
+  // If showing opposite perspective, find the corresponding node
+  let displayNode = node;
+  if (playerPerspective && playerPerspective !== node.player) {
+    // Look for sibling action node at same line but different player
+    // On flop, the root is always OOP. After one action, it's IP's turn, etc.
+    // Just find any node at current street with matching line
+    displayNode = findNodeByLineAndPlayer(street.nodes, node.line, playerPerspective) || node;
+  }
+
+  let html = '';
+
+  // Header
+  html += '<div class="header">';
+  html += '<h1>\u2660 Zolver Strategy Viewer</h1>';
+  html += '<div class="sub">' + DATA.meta.flop + ' &mdash; ' +
+    DATA.meta.iterations + ' iters, ' +
+    DATA.meta.exploitability_pct.toFixed(2) + '% exploit</div>';
+  html += '</div>';
+
+  // Meta
+  html += '<div class="meta-grid">';
+  html += metaItem('Initial Pot', DATA.meta.initial_pot);
+  html += metaItem('Eff Stack', DATA.meta.effective_stack);
+  html += metaItem('EV OOP', (DATA.meta.ev_oop || 0).toFixed(1), (DATA.meta.ev_oop || 0) > 0 ? 'good' : '');
+  html += metaItem('EV IP', (DATA.meta.ev_ip || 0).toFixed(1), (DATA.meta.ev_ip || 0) > 0 ? 'good' : '');
+  html += metaItem('Exploit', (DATA.meta.exploitability_pct || 0).toFixed(2) + '%',
+    (DATA.meta.exploitability_pct || 100) < 0.5 ? 'good' : 'warn');
+  html += metaItem('Converged', DATA.meta.converged ? 'yes' : 'no', DATA.meta.converged ? 'good' : 'warn');
+  html += '</div>';
+
+  // Board cards
+  html += '<div class="board-cards">';
+  const boardCards = (street.board || '').split(' ').filter(function(c) { return c.length >= 2; });
+  for (const card of boardCards) {
+    const rank = card[0], suit = card[1].toLowerCase();
+      html += '<div class="board-card ' + (SUIT_COLORS[suit]||'') + '">';
+      html += rank + SUIT_SYMBOLS[suit];
+      html += '</div>';
+  }
+  html += '</div>';
+
+  // Controls
+  html += '<div class="controls">';
+  html += '<span style="font-size:12px;color:#8b949e">Street:</span>';
+  html += '<select onchange="changeStreet(this.value)">';
+  for (let s = 0; s < DATA.streets.length; s++) {
+    const st = DATA.streets[s];
+    const sel = s === streetIdx ? ' selected' : '';
+    html += '<option value="' + s + '"' + sel + '>' + st.street + ' &mdash; ' + st.board + '</option>';
+  }
+  html += '</select>';
+
+  html += '<span style="font-size:12px;color:#8b949e;margin-left:8px">View:</span>';
+  const actingClass = (!playerPerspective || playerPerspective === node.player) ? ' active' : '';
+  const oopClass = (playerPerspective === 'oop') ? ' active' : '';
+  const ipClass = (playerPerspective === 'ip') ? ' active' : '';
+  html += '<button class="' + actingClass + '" onclick="setPerspective(null)">Acting (' + node.player.toUpperCase() + ')</button>';
+  html += '<button class="' + oopClass + '" onclick="setPerspective(\'oop\')">OOP</button>';
+  html += '<button class="' + ipClass + '" onclick="setPerspective(\'ip\')">IP</button>';
+
+  if (pathHistory.length > 0) {
+    html += '<button onclick="goBack()" style="margin-left:8px">\u2190 Back</button>';
+  }
+  html += '</div>';
+
+  // Breadcrumb
+  html += '<div class="breadcrumb">';
+  html += '<span>' + street.street.toUpperCase() + '</span>';
+  for (const step of node.line) {
+    html += '<span>\u25B8</span><span class="step">' + step + '</span>';
+  }
+  html += '</div>';
+
+  // Street label
+  html += '<div class="street-label">' +
+    displayNode.player.toUpperCase() + ' to act &mdash; ' +
+    displayNode.hands.length + ' combos</div>';
+
+  // Grid + detail
+  html += '<div class="grid-wrapper">';
+  html += renderGrid(displayNode, street.board);
+  html += renderDetail(displayNode);
+  html += '</div>';
+
+  // Action buttons (for navigation — only for acting player's actual node)
+  html += '<div class="action-buttons">';
+  for (let a = 0; a < node.actions.length; a++) {
+    const cls = classifyAction(node.actions[a]);
+    const btnClass = (cls === 'fold') ? 'danger' : (cls === 'check') ? 'primary' : '';
+    html += '<button class="' + btnClass + '" onclick="navigateAction(' + a + ')">' +
+      node.actions[a] + '</button>';
+  }
+  html += '</div>';
+
+  viewer.innerHTML = html;
+}
+
+function metaItem(label, value, extraClass) {
+  return '<div class="meta-item"><div class="label">' + label + '</div>' +
+    '<div class="value' + (extraClass ? ' ' + extraClass : '') + '">' + value + '</div></div>';
+}
+
+// ── Grid rendering ──────────────────────────────────────────────────────────
+function renderGrid(node, board) {
+  // Parse board cards to find blocked ranks/suits
+  const boardCards = board.split(' ').filter(c => c.length >= 2);
+  const blockedSet = new Set();
+  for (const c of boardCards) {
+    const r = RANK_MAP[c[0].toUpperCase()];
+    const s = c[1].toLowerCase();
+    if (r !== undefined) blockedSet.add(r * 4 + ['s','h','d','c'].indexOf(s));
+  }
+
+  // Build combo → hand data map
+  const handMap = {};
+  for (const h of node.hands) {
+    handMap[h.combo] = h;
+  }
+
+  // Precompute strategy for each hand in the grid
+  const gridData = {};
+  for (let r1 = 0; r1 < 13; r1++) {
+    for (let r2 = 0; r2 < 13; r2++) {
+      const key = r1 * 13 + r2;
+      gridData[key] = computeGridCell(r1, r2, handMap, blockedSet);
+    }
+  }
+
+  let html = '<div class="grid-container"><table class="grid-table">';
+
+  // Column headers
+  html += '<tr><th></th>';
+  for (let c = 0; c < 13; c++) html += '<th>' + RANKS[c] + '</th>';
+  html += '</tr>';
+
+  // Rows
+  for (let r = 0; r < 13; r++) {
+    html += '<tr><th>' + RANKS[r] + '</th>';
+    for (let c = 0; c < 13; c++) {
+      const cell = gridData[r * 13 + c];
+      const comboKey = cell.comboKey;
+      const selClass = (selectedCombo === comboKey) ? ' selected' : '';
+
+      if (cell.blocked) {
+        html += '<td class="blocked' + selClass + '"></td>';
+      } else if (!cell.hand) {
+        // Empty cell (e.g., suited cell for offsuit combo not in range)
+        html += '<td style="background:#161b22;cursor:default"></td>';
+      } else {
+        const bg = cellColor(cell.strategy, node.actions);
+        html += '<td class="' + selClass + '" style="background:' + bg +
+          '" onclick="selectCombo(\'' + comboKey + '\')" title="' + comboKey + '">';
+        html += '<div class="combo-label">' + cell.label + '</div>';
+        if (cell.maxFreq > 0 && cell.maxFreq < 0.99) {
+          html += '<div class="freq">' + Math.round(cell.maxFreq * 100) + '%</div>';
+        }
+        html += '</td>';
+      }
+    }
+    html += '</tr>';
+  }
+
+  html += '</table></div>';
+  return html;
+}
+
+function computeGridCell(r1, r2, handMap, blockedSet) {
+  // Determine if this cell represents suited, offsuit, or pair
+  const isPair = (r1 === r2);
+  const isSuited = (r1 < r2);  // upper right = suited
+  const isOffsuit = (r1 > r2); // lower left = offsuit
+
+  if (isPair) {
+    // Pair: find any combo matching this pair
+    // Pair is suited or offsuit doesn't matter — all combos of same rank
+    const rank = RANKS[r1];
+    let hand = null;
+    // Try all suit combinations
+    const suits = ['s','h','d','c'];
+    for (let i = 0; i < 4 && !hand; i++) {
+      for (let j = i+1; j < 4 && !hand; j++) {
+        const combo = rank + suits[i] + rank + suits[j];
+        if (handMap[combo]) hand = handMap[combo];
+        const combo2 = rank + suits[j] + rank + suits[i];
+        if (!hand && handMap[combo2]) hand = handMap[combo2];
+      }
+    }
+    const label = rank + rank;
+    // Check blocked: pair is fully blocked only if 3+ suits of this rank are on board
+    const ri = RANK_MAP[rank];
+    let blockedSuits = 0;
+    for (let s = 0; s < 4; s++) {
+      if (blockedSet.has(ri * 4 + s)) blockedSuits++;
+    }
+    const blocked = blockedSuits >= 3;
+    return { hand, label, blocked, comboKey: label, strategy: hand ? hand.strategy : null, maxFreq: hand ? Math.max(...hand.strategy) : 0, blockedSuits: blockedSuits };
+  }
+
+  if (isSuited) {
+    // Suited: find any same-suit combo
+    const rHi = RANKS[r1], rLo = RANKS[r2];
+    let hand = null;
+    const suits = ['s','h','d','c'];
+    for (const s of suits) {
+      const combo = rHi + s + rLo + s;
+      if (handMap[combo]) { hand = handMap[combo]; break; }
+    }
+    const label = rHi + rLo + 's';
+    // Blocked if either rank has all suits blocked
+    const riHi = RANK_MAP[rHi], riLo = RANK_MAP[rLo];
+    let blocked = true;
+    for (const s of suits) {
+      if (!blockedSet.has(riHi * 4 + suits.indexOf(s)) && !blockedSet.has(riLo * 4 + suits.indexOf(s))) {
+        blocked = false; break;
+      }
+    }
+    return { hand, label, blocked, comboKey: label, strategy: hand ? hand.strategy : null, maxFreq: hand ? Math.max(...hand.strategy) : 0 };
+  }
+
+  if (isOffsuit) {
+    // Lower left (r1 > r2): offsuit. Here r1 is lower rank (bigger index), r2 is higher rank.
+    // So row = lower card rank, col = higher card rank
+    const rHi2 = RANKS[r2], rLo2 = RANKS[r1];
+    let hand = null;
+    const suits = ['s','h','d','c'];
+    for (const s1 of suits) {
+      for (const s2 of suits) {
+        if (s1 === s2) continue;
+        const combo = rHi2 + s1 + rLo2 + s2;
+        if (handMap[combo]) { hand = handMap[combo]; break; }
+        const combo2 = rHi2 + s2 + rLo2 + s1;
+        if (!hand && handMap[combo2]) hand = handMap[combo2];
+      }
+      if (hand) break;
+    }
+    const label = rHi2 + rLo2 + 'o';
+    const riHi = RANK_MAP[rHi2], riLo = RANK_MAP[rLo2];
+    let blocked = true;
+    for (const s1 of suits) {
+      for (const s2 of suits) {
+        if (s1 === s2) continue;
+        if (!blockedSet.has(riHi * 4 + suits.indexOf(s1)) && !blockedSet.has(riLo * 4 + suits.indexOf(s2))) {
+          blocked = false; break;
+        }
+      }
+      if (!blocked) break;
+    }
+    return { hand, label, blocked, comboKey: label, strategy: hand ? hand.strategy : null, maxFreq: hand ? Math.max(...hand.strategy) : 0 };
+  }
+
+  return { hand: null, label: '', blocked: false, comboKey: '', strategy: null, maxFreq: 0 };
+}
+
+function cellColor(strategy, actions) {
+  if (!strategy || strategy.length === 0) return '#161b22';
+  let r = 0, g = 0, b = 0;
+  let totalWeight = 0;
+  for (let i = 0; i < strategy.length; i++) {
+    const w = strategy[i];
+    if (w <= 0) continue;
+    const cls = classifyAction(actions[i]);
+    const col = ACTION_COLORS[cls] || [0x88,0x88,0x88];
+    r += col[0] * w;
+    g += col[1] * w;
+    b += col[2] * w;
+    totalWeight += w;
+  }
+  if (totalWeight <= 0) return '#161b22';
+  r = Math.round(r / totalWeight);
+  g = Math.round(g / totalWeight);
+  b = Math.round(b / totalWeight);
+  // Darken slightly for readability
+  const scale = 0.55;
+  r = Math.round(22 + (r - 22) * scale);
+  g = Math.round(22 + (g - 22) * scale);
+  b = Math.round(22 + (b - 22) * scale);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function dominantAction(strategy, actions) {
+  if (!strategy) return '';
+  let maxI = 0, maxV = 0;
+  for (let i = 0; i < strategy.length; i++) {
+    if (strategy[i] > maxV) { maxV = strategy[i]; maxI = i; }
+  }
+  return maxV > 0 ? actions[maxI] : '';
+}
+
+// ── Detail panel ────────────────────────────────────────────────────────────
+function renderDetail(node) {
+  let html = '<div class="detail-panel">';
+
+  if (selectedCombo) {
+    // Find the hand data
+    let hand = null;
+    for (const h of node.hands) {
+      // Match by combo name or by label
+      if (h.combo === selectedCombo || comboToLabel(h.combo) === selectedCombo) {
+        hand = h; break;
+      }
+    }
+    if (hand) {
+      html += '<h3>Selected Hand</h3>';
+      html += '<div class="combo-name">' + formatCombo(hand.combo) + '</div>';
+      if (hand.ev !== null && hand.ev !== undefined) {
+        html += '<div class="ev-line">EV: <span class="ev-val">' +
+          (hand.ev >= 0 ? '+' : '') + hand.ev.toFixed(2) + '</span></div>';
+      } else {
+        html += '<div class="ev-line">EV: <span class="ev-val">—</span></div>';
+      }
+      for (let i = 0; i < hand.strategy.length; i++) {
+        const pct = hand.strategy[i];
+        if (pct <= 0) continue;
+        const cls = classifyAction(node.actions[i]);
+        const col = ACTION_COLORS[cls] || [0x88,0x88,0x88];
+        const barW = Math.max(pct * 100, 2);
+        html += '<div class="action-bar">';
+        html += '<span class="action-label">' + node.actions[i] + '</span>';
+        html += '<span class="action-bar-fill" style="width:' + barW + 'px;background:rgb(' +
+          col.join(',') + ')"></span>';
+        html += '<span class="action-pct">' + (pct * 100).toFixed(1) + '%</span>';
+        html += '</div>';
+      }
+    } else {
+      html += '<div class="no-data">Hand not in range</div>';
+    }
+  } else {
+    html += '<h3>Hand Detail</h3>';
+    html += '<div style="color:#8b949e;font-size:12px">Click a cell to see per-hand strategy and EV.</div>';
+    if (node.hands.length > 0 && node.hands[0].ev !== null) {
+      html += '<div style="margin-top:12px;font-size:11px;color:#8b949e">';
+      html += node.hands.filter(h => h.ev !== null).length + ' combos with EV data';
+      html += '</div>';
+    }
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function comboToLabel(combo) {
+  if (combo.length < 4) return combo;
+  const r1 = combo[0], s1 = combo[1], r2 = combo[2], s2 = combo[3];
+  if (r1 === r2) return r1 + r2; // pair
+  if (s1 === s2) return r1 + r2 + 's'; // suited
+  return r1 + r2 + 'o'; // offsuit
+}
+
+function formatCombo(combo) {
+  if (combo.length < 4) return combo;
+  return combo[0] + SUIT_SYMBOLS[combo[1].toLowerCase()] + ' ' +
+    combo[2] + SUIT_SYMBOLS[combo[3].toLowerCase()];
+}
+
+// ── Actions ─────────────────────────────────────────────────────────────────
+function selectCombo(key) {
+  if (selectedCombo === key) { selectedCombo = null; }
+  else { selectedCombo = key; }
+  render();
+}
+
+function setPerspective(p) {
+  playerPerspective = p;
+  render();
+}
+
+function changeStreet(idx) {
+  streetIdx = parseInt(idx);
+  nodeIdx = 0;
+  selectedCombo = null;
+  pathHistory = [];
+  render();
+}
+
+function navigateAction(actionIdx) {
+  const street = DATA.streets[streetIdx];
+  if (!street || !street.nodes[nodeIdx]) return;
+  const node = street.nodes[nodeIdx];
+  if (actionIdx >= node.actions.length) return;
+  const newLine = [...node.line, node.actions[actionIdx]];
+  // Search all streets for the child node (cross-street navigation)
+  let found = null, foundStreet = streetIdx;
+  for (let s = 0; s < DATA.streets.length; s++) {
+    const key = newLine.join('|') + '|' + s;
+    if (nodeIndex[key] !== undefined) {
+      found = nodeIndex[key];
+      foundStreet = s;
+      break;
+    }
+  }
+  if (found !== null) {
+    pathHistory.push({ streetIdx, nodeIdx });
+    streetIdx = foundStreet;
+    nodeIdx = found;
+    selectedCombo = null;
+    render();
+  }
+}
+
+function goBack() {
+  if (pathHistory.length === 0) return;
+  const prev = pathHistory.pop();
+  streetIdx = prev.streetIdx;
+  nodeIdx = prev.nodeIdx;
+  selectedCombo = null;
+  render();
+}
+
+function findNodeByLineAndPlayer(nodes, line, player) {
+  for (const n of nodes) {
+    if (arraysEqual(n.line, line) && n.player === player) return n;
+  }
+  return null;
+}
+
+function arraysEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// ── Keyboard navigation ─────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (!DATA) return;
+  if (e.key === 'Backspace') { e.preventDefault(); goBack(); }
+  else if (e.key === 'Escape') { e.preventDefault(); selectedCombo = null; render(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); if (streetIdx > 0) changeStreet(streetIdx - 1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); if (streetIdx < DATA.streets.length - 1) changeStreet(streetIdx + 1); }
+});
+
+// ── Embedded data injection (replaced by zolver view command) ───────────────
+var ZOLVER_DATA = __ZV_DATA_PLACEHOLDER__;
+if (ZOLVER_DATA) { DATA = ZOLVER_DATA; initViewer(); }
+</script>
+</body>
+</html>

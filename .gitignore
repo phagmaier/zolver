@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+spot.toml
+zolver-config.html
+bench_threading
+perf.data*
+perf_profile

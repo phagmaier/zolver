@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Zig is a cross-compiler, so every target is built from a single Linux runner.
+# This is faster than a per-OS matrix and avoids waiting on scarce macOS runners.
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Cross-compile all targets
+        run: |
+          mkdir -p dist
+          build() { # <zig-target> <output-name>
+            zig build -Doptimize=ReleaseFast -Dtarget="$1" -p "out/$1"
+            if [ -f "out/$1/bin/zolver.exe" ]; then
+              cp "out/$1/bin/zolver.exe" "dist/$2"
+            else
+              cp "out/$1/bin/zolver" "dist/$2"
+            fi
+          }
+          build x86_64-linux   zolver-linux-x86_64
+          build aarch64-macos  zolver-macos-arm64
+          build x86_64-macos   zolver-macos-x86_64
+          build x86_64-windows zolver-windows-x86_64.exe
+          ls -la dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
