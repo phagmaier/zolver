@@ -514,3 +514,4 @@ This project draws on the academic literature on CFR and its variants:
 - Tammelin (2014) — CFR+
 - Johanson et al. (2012) — Suit isomorphism for poker
 ```
+
