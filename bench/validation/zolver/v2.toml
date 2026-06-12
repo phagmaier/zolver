@@ -1,0 +1,31 @@
+# V2 — realistic-range cross-validation, using the V1b structure that converges
+# cleanly: shallow stack (all-in is a modest overbet, not a 15x shove) and
+# flop-only betting so the tree is guaranteed identical to TexasSolver's.
+# Ranges are explicit hand lists (TexasSolver's console parser rejects "+").
+# Wider than V1b => fewer indifferent hands => sharper aggregate comparison.
+[game]
+flop = "As 8d 3c"
+initial_pot = 20
+effective_stack = 400
+min_bet = 1
+
+[game.sizings]
+flop = [75]
+turn = []
+river = []
+
+[game.raise_cap]
+flop = 0
+turn = 0
+river = 0
+
+[ranges]
+oop = "99, TT, JJ, QQ, KK, AA, A9s, ATs, AJs, AQs, AKs, KQs, KJs, QJs, JTs, T9s, AQo, AKo"
+ip  = "TT, JJ, QQ, KK, AA, AJs, AQs, AKs, KQs, KJs, AQo, AKo"
+
+[solver]
+algorithm = "dcfr"
+max_iterations = 1000
+target_exploitability_pct = 0.05
+num_threads = 8
+prune_zero_reach = true

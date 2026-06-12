@@ -6,7 +6,7 @@ no cloud, no bloat. A config file and a terminal are all you need.
 
 ![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen)
 
 ```text
 $ zolver solve spot.toml --summary
@@ -441,6 +441,13 @@ automatically once it drops below `target_exploitability_pct`.
 All measurements on a Ryzen 7 7840U (8 cores / 16 threads), `ReleaseFast`
 build, DCFR with α=1.5 β=0 γ=2.
 
+> **Note (2026):** the cumulative average-strategy buffer was changed from f16 to
+> f32 to fix a convergence bug — the f16 accumulator overflowed at high iteration
+> counts (CFR+ produced NaN; DCFR drifted). Memory figures in the tables below
+> predate that change and are now roughly 30–40% higher for the strategy storage.
+> For a current, reproducible end-to-end benchmark suite (and a cross-validation
+> harness against TexasSolver), see [`bench/`](bench/README.md).
+
 ### Kernel throughput (bench.zig micro-benchmarks)
 
 | Kernel | Scalar | SIMD | Speedup |
@@ -467,9 +474,11 @@ build, DCFR with α=1.5 β=0 γ=2.
 
 Suit isomorphism collapses the monotone flop from 49 → 23 canonical turns
 (3.5× fewer runouts), delivering a proportional speedup with identical strategy
-quality. Convergence plateaus around 0.1% exploitability — targeting 0.5% is
-the practical sweet spot. Scaling is sublinear beyond ~8 threads due to the
-serial flop descent (~3.7% of runtime per Amdahl's law).
+quality. Convergence is reliable: the bundled example reaches ~0.001%
+exploitability and keeps improving with iterations. Targeting 0.3–0.5% is the
+practical study sweet spot (tens to a few hundred iterations); tighten it for
+near-exact strategies. Scaling is sublinear beyond ~8 threads due to the serial
+flop descent (~3.7% of runtime per Amdahl's law).
 
 ## Limitations
 
@@ -479,10 +488,11 @@ serial flop descent (~3.7% of runtime per Amdahl's law).
 
 ## Project Status
 
-The solver is **complete and tested (217 tests)** — from tree construction
+The solver is **complete and tested (218 tests)** — from tree construction
 through threaded DCFR, best response, exploitability, SIMD kernels, output
 extraction, JSON export, interactive web UI (config builder + strategy viewer),
-and human-readable summaries. See
+and human-readable summaries. Convergence is cross-validated against TexasSolver
+(see [`bench/`](bench/README.md)). See
 [`AGENTS.md`](AGENTS.md) for detailed implementation notes.
 
 ## Building
