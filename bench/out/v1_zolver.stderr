@@ -1,0 +1,12 @@
+loaded 'bench/validation/zolver/v1.toml'
+  ranges: 38/38 combos  tree: 88 actions, 125 terminals  runouts: 49 turns, 2352 rivers
+  memory: 68.2 MB  threads: 8
+solving...
+  start  exploitability: 86.778% (17.356 chips)
+  iter     32  exploitability:  3.201% (0.640 chips)  1.3s
+  iter     64  exploitability:  1.005% (0.201 chips)  2.5s
+  iter    128  exploitability:  0.347% (0.069 chips)  4.6s
+  iter    192  exploitability:  0.228% (0.046 chips)  6.8s
+  iter    256  exploitability:  0.195% (0.039 chips)  8.9s
+solve complete: 300 iterations, 0.195% exploitability, 10.4s elapsed
+output written to 'bench/out/v1_zolver.json'

@@ -204,9 +204,9 @@ fn runSolve(
     const mem_bytes = is.storage.regrets_flop.len * @sizeOf(f32) +
         is.storage.regrets_turn.len * @sizeOf(f32) +
         is.storage.regrets_river.len * @sizeOf(f32) +
-        is.storage.strategies_flop.len * @sizeOf(f16) +
-        is.storage.strategies_turn.len * @sizeOf(f16) +
-        is.storage.strategies_river.len * @sizeOf(f16);
+        is.storage.strategies_flop.len * @sizeOf(f32) +
+        is.storage.strategies_turn.len * @sizeOf(f32) +
+        is.storage.strategies_river.len * @sizeOf(f32);
 
     try printFormatted(io, "loaded '{s}'\n", .{config_path});
     try printFormatted(io, "  ranges: {d}/{d} combos  tree: {d} actions, {d} terminals  runouts: {d} turns, {d} rivers\n", .{
@@ -241,6 +241,14 @@ fn runSolve(
             try printFormatted(io, "  iter {d:>6}  exploitability: {d:6.3}% ({d:.3} chips)  {d:.1}s\n", .{
                 solver.t, last_exp.pct, last_exp.chips, elapsed_s,
             });
+            // Defense-in-depth: a non-finite exploitability means the solver
+            // diverged (e.g. an accumulator overflowed). Surface it loudly and
+            // stop rather than running on and emitting NaN results. This check
+            // runs in every build, unlike the Debug-only invariant sweeps.
+            if (!std.math.isFinite(last_exp.pct)) {
+                try printToStderr(io, "  error: exploitability became non-finite (NaN/Inf) — solver diverged; stopping\n");
+                break;
+            }
             if (last_exp.pct <= cfg.target_exploitability_pct) break;
         }
     }
@@ -281,6 +289,14 @@ fn runSolve(
     }
 
     if (output_path) |path| {
+        // Never emit invalid JSON (e.g. `-nan`) — a non-finite result means the
+        // solve diverged and the strategy is meaningless.
+        if (!std.math.isFinite(last_exp.pct) or !std.math.isFinite(last_exp.chips) or
+            !std.math.isFinite(ev0) or !std.math.isFinite(ev1))
+        {
+            try printFormatted(io, "error: refusing to write '{s}': solve produced non-finite results (NaN/Inf)\n", .{path});
+            return;
+        }
         if (options.all_runouts) {
             try printToStderr(io, "  --all-runouts: dumping every canonical runout (this can be very large; per-hand EVs are omitted)\n");
         }

@@ -1,0 +1,29 @@
+# V1 — smallest validation spot. Dry rainbow flop, tiny ranges,
+# one bet size per street, no raises. Tree is tightly determined so a
+# correct solver's frequencies are nearly unique => sharp cross-check.
+[game]
+flop = "Ah Kd 7c"
+initial_pot = 20
+effective_stack = 100
+min_bet = 1
+
+[game.sizings]
+flop = [75]
+turn = [75]
+river = [75]
+
+[game.raise_cap]
+flop = 0
+turn = 0
+river = 0
+
+[ranges]
+oop = "AA, KK, 77, AKs, AQs, KQs, QJs, JTs"
+ip  = "AA, KK, QQ, AKs, AQs, KQs, KJs, T9s"
+
+[solver]
+algorithm = "dcfr"
+max_iterations = 300
+target_exploitability_pct = 0.1
+num_threads = 8
+prune_zero_reach = true

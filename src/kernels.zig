@@ -77,12 +77,13 @@ pub fn dcfrRegretUpdate(
     }
 }
 
-/// DCFR strategy accumulation: scale existing cumulative f16 slots by
+/// DCFR strategy accumulation: scale existing cumulative slots by
 /// (t/(t+1))^gamma, then add reach_u[h] * sigma[a][h].
 ///
-/// All arithmetic is done in f32; f16 is only at the load/store boundary.
+/// Storage is f32: the cumulative strategy is an unbounded running sum and
+/// overflowed/lost precision in f16 (see storage.bytes_per_strategy).
 pub fn accumulateStrategy(
-    cumul_strategy: []f16,
+    cumul_strategy: []f32,
     reach_u: []const f32,
     strategy: []const f32,
     strategy_scale: f32,
@@ -94,10 +95,8 @@ pub fn accumulateStrategy(
         const base = a * N_p;
         var h: u32 = 0;
         while (h < N_p) : (h += 1) {
-            const existing: f32 = @floatCast(cumul_strategy[base + h]);
-            const scaled = existing * strategy_scale;
-            const added = scaled + reach_u[h] * strategy[base + h];
-            cumul_strategy[base + h] = @floatCast(added);
+            const scaled = cumul_strategy[base + h] * strategy_scale;
+            cumul_strategy[base + h] = scaled + reach_u[h] * strategy[base + h];
         }
     }
 }
@@ -124,9 +123,11 @@ pub fn cfrRegretUpdate(
 }
 
 /// CFR+ (linear) strategy accumulation: S[a][h] += t * reach_u[h] * sigma[a][h].
-/// At extraction, divide by sum_{i=1..t} i = t*(t+1)/2.
+/// At extraction, the per-action sums are renormalized, so the t*(t+1)/2 weight
+/// total cancels. Storage is f32: this running sum grows like t*(t+1)/2 and
+/// overflowed f16 (Inf) around t=362.
 pub fn cfrAccumulateStrategy(
-    cumul_strategy: []f16,
+    cumul_strategy: []f32,
     reach_u: []const f32,
     strategy: []const f32,
     t: u32,
@@ -139,8 +140,7 @@ pub fn cfrAccumulateStrategy(
         const base = a * N_p;
         var h: u32 = 0;
         while (h < N_p) : (h += 1) {
-            const existing: f32 = @floatCast(cumul_strategy[base + h]);
-            cumul_strategy[base + h] = @floatCast(existing + t_f32 * reach_u[h] * strategy[base + h]);
+            cumul_strategy[base + h] += t_f32 * reach_u[h] * strategy[base + h];
         }
     }
 }
@@ -328,7 +328,7 @@ pub fn cfrRegretUpdateSimd(
 }
 
 pub fn accumulateStrategySimd(
-    cumul_strategy: []f16,
+    cumul_strategy: []f32,
     reach_u: []const f32,
     strategy: []const f32,
     strategy_scale: f32,
@@ -343,39 +343,28 @@ pub fn accumulateStrategySimd(
         const base = a * N_p;
         var h: u32 = 0;
         while (h < vec_hands) : (h += simd_width) {
-            var existing_f32: [simd_width]f32 = undefined;
-            for (0..simd_width) |i| {
-                existing_f32[i] = @floatCast(cumul_strategy[@intCast(base + h + i)]);
-            }
-            const existing: Vec = existing_f32;
-            const scaled = existing * scale_vec;
+            const existing = vecLoad(cumul_strategy.ptr, base + h);
             const ru = vecLoad(reach_u.ptr, h);
             const s = vecLoad(strategy.ptr, base + h);
-            const added = scaled + ru * s;
-
-            const result: [simd_width]f32 = added;
-            for (0..simd_width) |i| {
-                cumul_strategy[@intCast(base + h + i)] = @floatCast(result[i]);
-            }
+            vecStore(cumul_strategy.ptr, base + h, existing * scale_vec + ru * s);
         }
         while (h < N_p) : (h += 1) {
-            const existing: f32 = @floatCast(cumul_strategy[@intCast(base + h)]);
-            const scaled = existing * strategy_scale;
-            const added = scaled + reach_u[h] * strategy[base + h];
-            cumul_strategy[@intCast(base + h)] = @floatCast(added);
+            const scaled = cumul_strategy[@intCast(base + h)] * strategy_scale;
+            cumul_strategy[@intCast(base + h)] = scaled + reach_u[h] * strategy[base + h];
         }
     }
 }
 
 pub fn cfrAccumulateStrategySimd(
-    cumul_strategy: []f16,
+    cumul_strategy: []f32,
     reach_u: []const f32,
     strategy: []const f32,
     t: u32,
     N_p: u32,
     A: u32,
 ) void {
-    const t_vec: Vec = @splat(@floatFromInt(t));
+    const t_f32: f32 = @floatFromInt(t);
+    const t_vec: Vec = @splat(t_f32);
     const vec_hands: u32 = (N_p / simd_width) * simd_width;
 
     var a: u32 = 0;
@@ -383,23 +372,13 @@ pub fn cfrAccumulateStrategySimd(
         const base = a * N_p;
         var h: u32 = 0;
         while (h < vec_hands) : (h += simd_width) {
-            var existing_f32: [simd_width]f32 = undefined;
-            for (0..simd_width) |i| {
-                existing_f32[i] = @floatCast(cumul_strategy[@intCast(base + h + i)]);
-            }
-            const existing: Vec = existing_f32;
+            const existing = vecLoad(cumul_strategy.ptr, base + h);
             const ru = vecLoad(reach_u.ptr, h);
             const s = vecLoad(strategy.ptr, base + h);
-            const added = existing + t_vec * ru * s;
-
-            const result: [simd_width]f32 = added;
-            for (0..simd_width) |i| {
-                cumul_strategy[@intCast(base + h + i)] = @floatCast(result[i]);
-            }
+            vecStore(cumul_strategy.ptr, base + h, existing + t_vec * ru * s);
         }
         while (h < N_p) : (h += 1) {
-            const existing: f32 = @floatCast(cumul_strategy[@intCast(base + h)]);
-            cumul_strategy[@intCast(base + h)] = @floatCast(existing + @as(f32, @floatFromInt(t)) * reach_u[h] * strategy[base + h]);
+            cumul_strategy[@intCast(base + h)] += t_f32 * reach_u[h] * strategy[base + h];
         }
     }
 }
@@ -580,7 +559,7 @@ test "dcfrRegretUpdate: negative entries discounted independently" {
 test "accumulateStrategy: f16 boundary correctness" {
     const N_p: u32 = 2;
     const A: u32 = 2;
-    var cumul = [_]f16{ 0.0, 0.0, 0.0, 0.0 };
+    var cumul = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
     const reach_u = [_]f32{ 0.5, 1.0 };
     const strategy = [_]f32{ 0.75, 0.25, 0.0, 1.0 };
     const scale: f32 = 0.25; // (1/2)^2 for t=1
@@ -601,7 +580,7 @@ test "accumulateStrategy: persists and scales previous contributions" {
     const N_p: u32 = 1;
     const A: u32 = 2;
     // Start with some previous accumulation
-    var cumul = [_]f16{ @floatCast(@as(f32, 2.0)), @floatCast(@as(f32, 1.0)) };
+    var cumul = [_]f32{ 2.0, 1.0 };
     const reach_u = [_]f32{0.5};
     const strategy = [_]f32{ 0.8, 0.2 };
     const scale: f32 = 0.25; // (1/2)^2
@@ -636,7 +615,7 @@ test "cfrRegretUpdate: clamps negatives to zero" {
 test "cfrAccumulateStrategy: linear weighting by t" {
     const N_p: u32 = 2;
     const A: u32 = 1;
-    var cumul = [_]f16{0.0} ** 2;
+    var cumul = [_]f32{0.0} ** 2;
     const reach_u = [_]f32{ 0.6, 1.0 };
     const strategy = [_]f32{ 1.0, 1.0 };
     const t: u32 = 3;
@@ -647,6 +626,24 @@ test "cfrAccumulateStrategy: linear weighting by t" {
     try testing.expect(@abs(@as(f32, 1.8) - @as(f32, @floatCast(cumul[0]))) < 0.002);
     // Hand 1: 0 + 3*1.0*1.0 = 3.0
     try testing.expect(@abs(@as(f32, 3.0) - @as(f32, @floatCast(cumul[1]))) < 0.002);
+}
+
+test "cfrAccumulateStrategy: large-t running sum stays finite (regression: f16 overflowed)" {
+    // Worst-case slot: reach=1, sigma=1, weighted by t each iteration. The
+    // running sum is 1+2+...+t. By t=362 that exceeds f16's max (65504), so the
+    // old f16 storage overflowed to +Inf and CFR+ produced NaN at extraction.
+    // f32 must accumulate the exact sum and stay finite. Cheap (<1ms): a single
+    // slot over a few hundred iterations, no tree.
+    var cumul = [_]f32{0.0};
+    const reach = [_]f32{1.0};
+    const strat = [_]f32{1.0};
+    var t: u32 = 1;
+    while (t <= 400) : (t += 1) {
+        cfrAccumulateStrategy(&cumul, &reach, &strat, t, 1, 1);
+    }
+    try testing.expect(std.math.isFinite(cumul[0]));
+    // sum_{t=1..400} t = 400*401/2 = 80200, well past the f16 ceiling.
+    try testing.expectApproxEqRel(@as(f32, 80200.0), cumul[0], 1e-5);
 }
 
 test "maskMultiply: zeros where mask is zero" {
@@ -888,13 +885,13 @@ test "accumulateStrategySimd: matches scalar lane-by-lane" {
     var rng = std.Random.DefaultPrng.init(101);
     const rand = rng.random();
 
-    var scalar_cumul: [11 * 3]f16 = undefined;
-    var simd_cumul: [11 * 3]f16 = undefined;
+    var scalar_cumul: [11 * 3]f32 = undefined;
+    var simd_cumul: [11 * 3]f32 = undefined;
     var reach_u: [11]f32 = undefined;
     var strategy: [11 * 3]f32 = undefined;
 
     for (&scalar_cumul, &simd_cumul) |*sc, *ss| {
-        const v: f16 = @floatCast(rand.floatNorm(f32) * 2.0);
+        const v: f32 = rand.floatNorm(f32) * 2.0;
         sc.* = v;
         ss.* = v;
     }
@@ -917,13 +914,13 @@ test "accumulateStrategySimd: exact multiple of simd_width" {
     var rng = std.Random.DefaultPrng.init(202);
     const rand = rng.random();
 
-    var scalar_cumul: [8 * 2]f16 = undefined;
-    var simd_cumul: [8 * 2]f16 = undefined;
+    var scalar_cumul: [8 * 2]f32 = undefined;
+    var simd_cumul: [8 * 2]f32 = undefined;
     var reach_u: [8]f32 = undefined;
     var strategy: [8 * 2]f32 = undefined;
 
     for (&scalar_cumul, &simd_cumul) |*sc, *ss| {
-        const v: f16 = @floatCast(rand.floatNorm(f32) * 3.0);
+        const v: f32 = rand.floatNorm(f32) * 3.0;
         sc.* = v;
         ss.* = v;
     }
@@ -944,13 +941,13 @@ test "cfrAccumulateStrategySimd: matches scalar lane-by-lane" {
     var rng = std.Random.DefaultPrng.init(303);
     const rand = rng.random();
 
-    var scalar_cumul: [14 * 2]f16 = undefined;
-    var simd_cumul: [14 * 2]f16 = undefined;
+    var scalar_cumul: [14 * 2]f32 = undefined;
+    var simd_cumul: [14 * 2]f32 = undefined;
     var reach_u: [14]f32 = undefined;
     var strategy: [14 * 2]f32 = undefined;
 
     for (&scalar_cumul, &simd_cumul) |*sc, *ss| {
-        const v: f16 = @floatCast(rand.float(f32) * 5.0);
+        const v: f32 = rand.float(f32) * 5.0;
         sc.* = v;
         ss.* = v;
     }

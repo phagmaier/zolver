@@ -77,7 +77,7 @@ fn benchKernels(allocator: std.mem.Allocator) !void {
     defer allocator.free(node_v);
     const reach = try allocator.alloc(f32, N);
     defer allocator.free(reach);
-    const cumul = try allocator.alloc(f16, len);
+    const cumul = try allocator.alloc(f32, len);
     defer allocator.free(cumul);
 
     var prng = std.Random.DefaultPrng.init(0xBEEF);
@@ -91,7 +91,7 @@ fn benchKernels(allocator: std.mem.Allocator) !void {
     const reps: u64 = 20_000;
     const slots: f64 = @floatFromInt(len);
 
-    const Ctx = struct { regrets: []f32, strat: []f32, child_v: []f32, node_v: []f32, reach: []f32, cumul: []f16, n: u32, a: u32 };
+    const Ctx = struct { regrets: []f32, strat: []f32, child_v: []f32, node_v: []f32, reach: []f32, cumul: []f32, n: u32, a: u32 };
     const ctx = Ctx{ .regrets = regrets, .strat = strat, .child_v = child_v, .node_v = node_v, .reach = reach, .cumul = cumul, .n = N, .a = A };
 
     std.debug.print("\nKernel throughput (N={d}, A={d}, {d} reps) — Mslots/s:\n", .{ N, A, reps });

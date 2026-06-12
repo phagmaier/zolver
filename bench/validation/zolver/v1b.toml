@@ -1,0 +1,30 @@
+# V1b — diagnostic. Deep stack (all-in never reached) and betting only on the
+# flop; turn/river check down. Collapses to a single flop decision => the
+# equilibrium is tightly determined and the two solvers MUST agree on aggregate
+# frequencies. Isolates real strategy bugs from deep-tree all-in mismatches.
+[game]
+flop = "Ah Kd 7c"
+initial_pot = 20
+effective_stack = 400
+min_bet = 1
+
+[game.sizings]
+flop = [75]
+turn = []
+river = []
+
+[game.raise_cap]
+flop = 0
+turn = 0
+river = 0
+
+[ranges]
+oop = "AA, KK, 77, AKs, AQs, KQs, QJs, JTs"
+ip  = "AA, KK, QQ, AKs, AQs, KQs, KJs, T9s"
+
+[solver]
+algorithm = "dcfr"
+max_iterations = 400
+target_exploitability_pct = 0.05
+num_threads = 8
+prune_zero_reach = true

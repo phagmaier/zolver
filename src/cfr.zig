@@ -646,7 +646,7 @@ pub const WalkCtx = struct {
         };
     }
 
-    fn streetStrategies(self: *WalkCtx, street: Street) []f16 {
+    fn streetStrategies(self: *WalkCtx, street: Street) []f32 {
         return switch (street) {
             .flop => self.is.storage.strategies_flop,
             .turn => self.is.storage.strategies_turn,
@@ -1142,9 +1142,9 @@ fn expectIdenticalStorage(ref: *const SolverInit, got: *const SolverInit) !void 
     try testing.expectEqualSlices(f32, ref.storage.regrets_flop, got.storage.regrets_flop);
     try testing.expectEqualSlices(f32, ref.storage.regrets_turn, got.storage.regrets_turn);
     try testing.expectEqualSlices(f32, ref.storage.regrets_river, got.storage.regrets_river);
-    try testing.expectEqualSlices(f16, ref.storage.strategies_flop, got.storage.strategies_flop);
-    try testing.expectEqualSlices(f16, ref.storage.strategies_turn, got.storage.strategies_turn);
-    try testing.expectEqualSlices(f16, ref.storage.strategies_river, got.storage.strategies_river);
+    try testing.expectEqualSlices(f32, ref.storage.strategies_flop, got.storage.strategies_flop);
+    try testing.expectEqualSlices(f32, ref.storage.strategies_turn, got.storage.strategies_turn);
+    try testing.expectEqualSlices(f32, ref.storage.strategies_river, got.storage.strategies_river);
 }
 
 test "parallel solve is byte-identical to serial across worker counts" {

@@ -5,10 +5,15 @@ const Allocator = std.mem.Allocator;
 const Street = game_tree.Street;
 
 pub const bytes_per_regret: u64 = @sizeOf(f32); // 4
-pub const bytes_per_strategy: u64 = @sizeOf(f16); // 2
-pub const bytes_per_slot: u64 = bytes_per_regret + bytes_per_strategy; // 6
+// The cumulative strategy is a running *sum* that grows unbounded with the
+// iteration count (CFR+ adds t·reach·σ; DCFR a near-unity-scaled sum). f16 tops
+// out at 65504 and loses all precision in the thousands, so it overflowed to
+// Inf (CFR+, ~iter 360) or silently stopped accumulating (DCFR), breaking
+// convergence. It must be f32.
+pub const bytes_per_strategy: u64 = @sizeOf(f32); // 4
+pub const bytes_per_slot: u64 = bytes_per_regret + bytes_per_strategy; // 8
 
-/// Compute the total bytes required for regret (f32) + strategy (f16) storage
+/// Compute the total bytes required for regret (f32) + strategy (f32) storage
 /// across all three streets.
 pub fn memoryEstimate(slots_per_runout: [3]u64, runout_counts: [3]u64) u64 {
     var total: u64 = 0;
@@ -25,9 +30,9 @@ pub const Storage = struct {
     regrets_turn: []f32,
     regrets_river: []f32,
 
-    strategies_flop: []f16,
-    strategies_turn: []f16,
-    strategies_river: []f16,
+    strategies_flop: []f32,
+    strategies_turn: []f32,
+    strategies_river: []f32,
 
     /// Allocate and zero-initialize all regret and strategy arrays.
     /// Returns error.StorageBudgetExceeded if the estimate exceeds max_budget_bytes.
@@ -54,11 +59,11 @@ pub const Storage = struct {
         storage.regrets_river = try allocator.alloc(f32, @intCast(len2));
         errdefer allocator.free(storage.regrets_river);
 
-        storage.strategies_flop = try allocator.alloc(f16, @intCast(len0));
+        storage.strategies_flop = try allocator.alloc(f32, @intCast(len0));
         errdefer allocator.free(storage.strategies_flop);
-        storage.strategies_turn = try allocator.alloc(f16, @intCast(len1));
+        storage.strategies_turn = try allocator.alloc(f32, @intCast(len1));
         errdefer allocator.free(storage.strategies_turn);
-        storage.strategies_river = try allocator.alloc(f16, @intCast(len2));
+        storage.strategies_river = try allocator.alloc(f32, @intCast(len2));
         errdefer allocator.free(storage.strategies_river);
 
         @memset(storage.regrets_flop, 0);
@@ -124,13 +129,14 @@ pub inline fn streetSlotAddress(
 }
 
 test "memory estimate single street" {
+    // 10 slots * 2 runouts * 8 bytes/slot
     const estimate = memoryEstimate(.{ 10, 0, 0 }, .{ 2, 0, 0 });
-    try std.testing.expectEqual(@as(u64, 120), estimate);
+    try std.testing.expectEqual(@as(u64, 160), estimate);
 }
 
 test "memory estimate all streets" {
     const estimate = memoryEstimate(.{ 10, 20, 30 }, .{ 1, 49, 2352 });
-    try std.testing.expectEqual(@as(u64, 429300), estimate);
+    try std.testing.expectEqual(@as(u64, 572400), estimate);
 }
 
 test "memory estimate zero slots" {
@@ -168,7 +174,7 @@ test "storage zero-initializes" {
         try std.testing.expectEqual(@as(f32, 0.0), v);
     }
     for (storage.strategies_flop) |v| {
-        try std.testing.expectEqual(@as(f16, 0.0), v);
+        try std.testing.expectEqual(@as(f32, 0.0), v);
     }
 }
 
@@ -183,12 +189,12 @@ test "storage budget exceeded" {
 }
 
 test "storage budget just fits" {
-    // 1 slot * 1 runout per street = 3 slots * 6 bytes = 18 bytes
+    // 1 slot * 1 runout (flop only) = 1 slot * 8 bytes = 8 bytes
     var storage = try Storage.init(
         std.testing.allocator,
         .{ 1, 0, 0 },
         .{ 1, 0, 0 },
-        6, // budget = 6, estimate = 6
+        8, // budget = 8, estimate = 8
     );
     defer storage.deinit();
     try std.testing.expectEqual(@as(usize, 1), storage.regrets_flop.len);
@@ -270,5 +276,5 @@ test "regret and strategy arrays independent" {
     storage.strategies_flop[0] = 7.0;
 
     try std.testing.expectEqual(@as(f32, 3.0), storage.regrets_flop[0]);
-    try std.testing.expectEqual(@as(f16, 7.0), storage.strategies_flop[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), storage.strategies_flop[0]);
 }
