@@ -66,7 +66,7 @@ pub fn maxChildren(tree: *const Tree) u32 {
 /// all-in kernel's `reach_opp` / `child_values` staging buffers and the three
 /// 52-float card buffers used by every terminal kernel.
 ///
-/// Total: `max_depth × (3 + 2·a_max) × n_max + 2·n_max + 3·52` floats.
+/// Total: `max_depth × (3 + 2·a_max) × n_max + 4·n_max + 3·52` floats.
 pub const Scratch = struct {
     allocator: Allocator,
     max_depth: u32,
@@ -100,14 +100,19 @@ pub const Scratch = struct {
         return init(allocator, try maxDepth(tree), n_max, maxChildren(tree));
     }
 
+    /// Exact slab allocation required by `forTree`, without allocating it.
+    pub fn memoryBytesForTree(tree: *const Tree, n_max: u32) !u64 {
+        const floats = try slabLen(try maxDepth(tree), n_max, maxChildren(tree));
+        return std.math.mul(u64, @intCast(floats), @sizeOf(f32));
+    }
+
     pub fn init(allocator: Allocator, max_depth: u32, n_max: u32, a_max: u32) !Scratch {
         const d: usize = max_depth;
         const n: usize = n_max;
         const a: usize = a_max;
-
-        const small = d * n; // each of reach_u, reach_opp, values
-        const wide = d * a * n; // each of strategy, child_values
-        const total = small * 3 + wide * 2 + n * 2 + card_scratch_len * 3 + n * 2;
+        const small = try std.math.mul(usize, d, n); // each of reach_u, reach_opp, values
+        const wide = try std.math.mul(usize, small, a); // each of strategy, child_values
+        const total = try slabLen(max_depth, n_max, a_max);
 
         const slab = try allocator.alloc(f32, total);
 
@@ -225,6 +230,18 @@ pub const Scratch = struct {
         };
     }
 };
+
+fn slabLen(max_depth: u32, n_max: u32, a_max: u32) !usize {
+    const d: usize = max_depth;
+    const n: usize = n_max;
+    const a: usize = a_max;
+    const small = try std.math.mul(usize, d, n);
+    const wide = try std.math.mul(usize, small, a);
+    var total = try std.math.mul(usize, small, 3);
+    total = try std.math.add(usize, total, try std.math.mul(usize, wide, 2));
+    total = try std.math.add(usize, total, try std.math.mul(usize, n, 4));
+    return std.math.add(usize, total, card_scratch_len * 3);
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 

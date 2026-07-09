@@ -75,6 +75,8 @@ pub const WalkCtx = struct {
     pos_discount: f32,
     neg_discount: f32,
     strat_scale: f32,
+    avg_history_scale: f32,
+    avg_current_scale: f32,
     t: u32,
     probe: bool,
     use_simd: bool,
@@ -241,19 +243,19 @@ pub const WalkCtx = struct {
                     .dcfr => {
                         if (self.use_simd) {
                             kernels.dcfrRegretUpdateSimd(regret_block, child_values, node_v, self.pos_discount, self.neg_discount, n_act, a);
-                            kernels.accumulateStrategySimd(strat_store, reach_u, strat, self.strat_scale, n_act, a);
+                            kernels.accumulateNormalizedStrategySimd(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
                         } else {
                             kernels.dcfrRegretUpdate(regret_block, child_values, node_v, self.pos_discount, self.neg_discount, n_act, a);
-                            kernels.accumulateStrategy(strat_store, reach_u, strat, self.strat_scale, n_act, a);
+                            kernels.accumulateNormalizedStrategy(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
                         }
                     },
                     .cfr_plus => {
                         if (self.use_simd) {
                             kernels.cfrRegretUpdateSimd(regret_block, child_values, node_v, n_act, a);
-                            kernels.cfrAccumulateStrategySimd(strat_store, reach_u, strat, self.t, n_act, a);
+                            kernels.accumulateNormalizedStrategySimd(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
                         } else {
                             kernels.cfrRegretUpdate(regret_block, child_values, node_v, n_act, a);
-                            kernels.cfrAccumulateStrategy(strat_store, reach_u, strat, self.t, n_act, a);
+                            kernels.accumulateNormalizedStrategy(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
                         }
                     },
                 }
@@ -308,11 +310,17 @@ pub const WalkCtx = struct {
                 for (self.is.runout_tables.canonical_turns, 0..) |_, t| {
                     const child_runout: u32 = @intCast(t);
                     self.descendChance(
-                        node.child, .turn, child_runout,
+                        node.child,
+                        .turn,
+                        child_runout,
                         self.is.mask_turn[self.u][child_runout * n_u ..][0..n_u],
                         self.is.mask_turn[self.opp][child_runout * n_opp ..][0..n_opp],
                         self.is.weight_turns[t],
-                        reach_u, reach_opp, node_v, depth, mode,
+                        reach_u,
+                        reach_opp,
+                        node_v,
+                        depth,
+                        mode,
                     );
                 }
             },
@@ -322,11 +330,17 @@ pub const WalkCtx = struct {
                 while (r < turn.num_rivers) : (r += 1) {
                     const full = turn.first_river + r;
                     self.descendChance(
-                        node.child, .river, full,
+                        node.child,
+                        .river,
+                        full,
                         self.is.mask_river[self.u][full * n_u ..][0..n_u],
                         self.is.mask_river[self.opp][full * n_opp ..][0..n_opp],
                         self.is.weight_rivers[full],
-                        reach_u, reach_opp, node_v, depth, mode,
+                        reach_u,
+                        reach_opp,
+                        node_v,
+                        depth,
+                        mode,
                     );
                 }
             },
@@ -497,9 +511,7 @@ pub const WalkCtx = struct {
             @memset(result_slot, 0);
 
             const turn = task.ctx.rt.canonical_turns[t];
-            terminal_eval.accumulateTurnRivers(
-                result_slot, task.reach_opp, turn, task.ctx.weight_turns[t], false, task.ctx, ais
-            );
+            terminal_eval.accumulateTurnRivers(result_slot, task.reach_opp, turn, task.ctx.weight_turns[t], false, task.ctx, ais);
         }
     };
 
@@ -572,9 +584,13 @@ pub const WalkCtx = struct {
                 const amount = if (self.probe) ip_f else foldUtility(is.tree.initial_pot, term, self.u);
                 @memset(self.scratch.cardsum, 0);
                 terminal_eval.foldEval(
-                    node_v, reach_opp,
-                    u_ci, opp_ci,
-                    is.same_combo_idx[u], amount, self.scratch.cardsum,
+                    node_v,
+                    reach_opp,
+                    u_ci,
+                    opp_ci,
+                    is.same_combo_idx[u],
+                    amount,
+                    self.scratch.cardsum,
                 );
             },
             .showdown => {
@@ -599,15 +615,22 @@ pub const WalkCtx = struct {
                     }
 
                     terminal_eval.showdownEval(
-                        node_v, reach_opp,
-                        u_ci, opp_ci,
+                        node_v,
+                        reach_opp,
+                        u_ci,
+                        opp_ci,
                         sd.order[u][runout_id * n_u ..][0..n_u],
                         sd.strengths[u][runout_id * n_u ..][0..n_u],
                         sd.order[opp][runout_id * n_opp ..][0..n_opp],
                         sd.strengths[opp][runout_id * n_opp ..][0..n_opp],
-                        c.win, c.loss, c.tie,
-                        self.scratch.cardsum, total, same_reach,
-                        self.scratch.lo_card, self.scratch.eq_card,
+                        c.win,
+                        c.loss,
+                        c.tie,
+                        self.scratch.cardsum,
+                        total,
+                        same_reach,
+                        self.scratch.lo_card,
+                        self.scratch.eq_card,
                         self.scratch.compat,
                     );
                 } else {
@@ -722,6 +745,8 @@ pub const Solver = struct {
     pos_discount: f32,
     neg_discount: f32,
     strat_scale: f32,
+    avg_history_scale: f32,
+    avg_current_scale: f32,
     probe: bool,
 
     pool: ?threading.Pool,
@@ -730,11 +755,32 @@ pub const Solver = struct {
     /// Allocated once (empty when running serially); see `WalkCtx.turn_results`.
     turn_results: []f32,
 
+    /// Primary dynamically allocated working memory, excluding native thread
+    /// stacks and small thread-pool bookkeeping.
+    pub fn workingMemoryEstimate(init_state: *const SolverInit, config: SolverConfig) !u64 {
+        const n_max = @max(init_state.ranges[0].N(), init_state.ranges[1].N());
+        const scratch_bytes = try Scratch.memoryBytesForTree(&init_state.tree, n_max);
+        const scratch_count: u64 = if (config.num_threads > 0)
+            @as(u64, config.num_threads) + 1
+        else
+            1;
+        var total = try std.math.mul(u64, scratch_bytes, scratch_count);
+        const result_floats = try std.math.mul(u64, @intCast(init_state.runout_tables.canonical_turns.len), n_max);
+        total = try std.math.add(u64, total, try std.math.mul(u64, result_floats, @sizeOf(f32)));
+        total = try std.math.add(u64, total, try std.math.mul(u64, @as(u64, config.num_threads), @sizeOf(Scratch)));
+        return total;
+    }
+
     pub fn init(allocator: Allocator, init_state: *SolverInit, config: SolverConfig) !Solver {
         try config.validate();
         const n0 = init_state.ranges[0].N();
         const n1 = init_state.ranges[1].N();
         const n_max = @max(n0, n1);
+        const init_bytes = try init_state.memoryBytes();
+        const working_bytes = try workingMemoryEstimate(init_state, config);
+        if (try std.math.add(u64, init_bytes, working_bytes) > init_state.max_budget_bytes) {
+            return error.MemoryBudgetExceeded;
+        }
         const scratch = try Scratch.forTree(allocator, &init_state.tree, n_max);
         errdefer {
             var s = scratch;
@@ -778,6 +824,8 @@ pub const Solver = struct {
             .pos_discount = 0,
             .neg_discount = 0,
             .strat_scale = 0,
+            .avg_history_scale = 0,
+            .avg_current_scale = 0,
             .probe = false,
             .pool = pool,
             .worker_scratches = worker_scratches,
@@ -791,6 +839,14 @@ pub const Solver = struct {
         self.worker_scratches.deinit(self.allocator);
         if (self.turn_results.len > 0) self.allocator.free(self.turn_results);
         self.scratch.deinit();
+    }
+
+    pub fn workingMemoryBytes(self: *const Solver) u64 {
+        var total: u64 = self.scratch.memoryBytes();
+        for (self.worker_scratches.items) |scratch| total += scratch.memoryBytes();
+        total += @as(u64, @intCast(self.turn_results.len)) * @sizeOf(f32);
+        total += @as(u64, @intCast(self.worker_scratches.items.len)) * @sizeOf(Scratch);
+        return total;
     }
 
     // ── Iterate loop ──────────────────────────────────────────────────────
@@ -884,6 +940,8 @@ pub const Solver = struct {
             .pos_discount = self.pos_discount,
             .neg_discount = self.neg_discount,
             .strat_scale = self.strat_scale,
+            .avg_history_scale = self.avg_history_scale,
+            .avg_current_scale = self.avg_current_scale,
             .t = self.t,
             .probe = self.probe,
             .use_simd = self.config.use_simd,
@@ -904,6 +962,19 @@ pub const Solver = struct {
         const tb = std.math.pow(f32, tf, self.config.dcfr.beta);
         self.neg_discount = tb / (tb + 1.0);
         self.strat_scale = std.math.pow(f32, tf / (tf + 1.0), self.config.dcfr.gamma);
+        if (self.t == 0) {
+            self.avg_history_scale = 0;
+            self.avg_current_scale = 0;
+            return;
+        }
+        const previous: f32 = @floatFromInt(self.t - 1);
+        self.avg_current_scale = 1.0 / tf;
+        self.avg_history_scale = switch (self.config.algorithm) {
+            // DCFR: S_t = d_t S_(t-1) + x_t, stored as S_t / t.
+            .dcfr => self.strat_scale * previous / tf,
+            // CFR+: S_t = S_(t-1) + t x_t, stored as S_t / t².
+            .cfr_plus => (previous / tf) * (previous / tf),
+        };
     }
 
     fn initRootReaches(self: *Solver, u: u8) struct { []f32, []f32 } {
@@ -988,6 +1059,18 @@ fn checkConstantSum(solver: *Solver, tol: f32) !void {
 
     try testing.expect(@abs(p0 - p1) < tol);
     try testing.expect(@abs((ev0 + ev1) - p0) < tol);
+    // Probe mode pays the initial pot to both players at every terminal. A
+    // correct chance traversal must therefore preserve every compatible
+    // private-hand pair with total runout probability exactly one.
+    var compatible_mass: f32 = 0;
+    const is = solver.init_state;
+    for (is.ranges[0].hands, is.ranges[0].weights, is.mask_flop[0]) |h0, w0, m0| {
+        for (is.ranges[1].hands, is.ranges[1].weights, is.mask_flop[1]) |h1, w1, m1| {
+            if ((h0.cardMask() & h1.cardMask()) == 0) compatible_mass += w0 * m0 * w1 * m1;
+        }
+    }
+    const ip: f32 = @floatFromInt(is.tree.initial_pot);
+    try testing.expect(@abs(p0 - ip * compatible_mass) < tol);
 }
 
 test "fold utility conventions (signs and magnitudes)" {
@@ -1034,6 +1117,25 @@ test "constant-sum invariant still holds after DCFR iterations" {
 
     solver.iterate(3);
     try checkConstantSum(&solver, 1e-2);
+}
+
+test "solver memory budget includes thread-dependent working arenas" {
+    const alloc = testing.allocator;
+    const oop = [_]WeightedCombo{try wc(spade(9), spade(8))};
+    const ip = [_]WeightedCombo{try wc(spade(7), spade(6))};
+    var is = try buildInit(alloc, mono_flop, &oop, &ip);
+    defer is.deinit();
+
+    // Initialization itself fits, but the total solver footprint must reserve
+    // the main scratch arena, worker arenas, and result reduction buffer too.
+    is.max_budget_bytes = try is.memoryBytes();
+    try testing.expectError(error.MemoryBudgetExceeded, Solver.init(alloc, &is, .{}));
+
+    const required = try std.math.add(u64, try is.memoryBytes(), try Solver.workingMemoryEstimate(&is, .{}));
+    is.max_budget_bytes = required;
+    var solver = try Solver.init(alloc, &is, .{});
+    defer solver.deinit();
+    try testing.expect(solver.workingMemoryBytes() > 0);
 }
 
 test "regrets stay finite and strategies are valid distributions" {
@@ -1156,7 +1258,7 @@ test "parallel solve is byte-identical to serial across worker counts" {
     // genuinely exercised — yet the canonical-order reduction must still yield
     // bit-identical regret and strategy arrays for every thread count.
     const oop = [_]WeightedCombo{
-        try wc(spade(9), spade(8)), try wc(spade(4), spade(3)),
+        try wc(spade(9), spade(8)),  try wc(spade(4), spade(3)),
         try wc(spade(11), spade(7)), try wc(spade(6), spade(2)),
         try wc(spade(10), spade(5)),
     };

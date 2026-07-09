@@ -101,6 +101,34 @@ pub fn accumulateStrategy(
     }
 }
 
+/// Update a globally normalized cumulative strategy.
+///
+/// If the conceptual accumulator is `S`, storage holds `S / G_t`, where the
+/// positive scale `G_t` is shared by every infoset in a pass. The caller supplies
+/// `history_scale = discount * G_(t-1) / G_t` and
+/// `current_scale = 1 / G_t`. Dividing every action of an infoset by the same
+/// scale leaves extracted average strategies unchanged, while keeping storage
+/// bounded instead of letting the running sum lose f32 precision.
+pub fn accumulateNormalizedStrategy(
+    cumul_strategy: []f32,
+    reach_u: []const f32,
+    strategy: []const f32,
+    history_scale: f32,
+    current_scale: f32,
+    N_p: u32,
+    A: u32,
+) void {
+    var a: u32 = 0;
+    while (a < A) : (a += 1) {
+        const base = a * N_p;
+        var h: u32 = 0;
+        while (h < N_p) : (h += 1) {
+            cumul_strategy[base + h] = cumul_strategy[base + h] * history_scale +
+                current_scale * reach_u[h] * strategy[base + h];
+        }
+    }
+}
+
 /// CFR+ regret update: add instantaneous regrets, then clamp negative entries to zero.
 /// No discounting — CFR+ relies on non-negativity to drive convergence.
 pub fn cfrRegretUpdate(
@@ -355,6 +383,36 @@ pub fn accumulateStrategySimd(
     }
 }
 
+pub fn accumulateNormalizedStrategySimd(
+    cumul_strategy: []f32,
+    reach_u: []const f32,
+    strategy: []const f32,
+    history_scale: f32,
+    current_scale: f32,
+    N_p: u32,
+    A: u32,
+) void {
+    const history_vec: Vec = @splat(history_scale);
+    const current_vec: Vec = @splat(current_scale);
+    const vec_hands: u32 = (N_p / simd_width) * simd_width;
+
+    var a: u32 = 0;
+    while (a < A) : (a += 1) {
+        const base = a * N_p;
+        var h: u32 = 0;
+        while (h < vec_hands) : (h += simd_width) {
+            const existing = vecLoad(cumul_strategy.ptr, base + h);
+            const ru = vecLoad(reach_u.ptr, h);
+            const s = vecLoad(strategy.ptr, base + h);
+            vecStore(cumul_strategy.ptr, base + h, existing * history_vec + current_vec * ru * s);
+        }
+        while (h < N_p) : (h += 1) {
+            cumul_strategy[@intCast(base + h)] = cumul_strategy[@intCast(base + h)] * history_scale +
+                current_scale * reach_u[h] * strategy[base + h];
+        }
+    }
+}
+
 pub fn cfrAccumulateStrategySimd(
     cumul_strategy: []f32,
     reach_u: []const f32,
@@ -591,6 +649,30 @@ test "accumulateStrategy: persists and scales previous contributions" {
     try testing.expect(@abs(@as(f32, 0.9) - @as(f32, @floatCast(cumul[0]))) < 0.002);
     // a=1: 1.0*0.25 + 0.5*0.2 = 0.25 + 0.1 = 0.35
     try testing.expect(@abs(@as(f32, 0.35) - @as(f32, @floatCast(cumul[1]))) < 0.002);
+}
+
+test "normalized strategy accumulation stays bounded at long horizons" {
+    const N_p: u32 = 2;
+    const A: u32 = 2;
+    var stored = [_]f32{0} ** (N_p * A);
+    const reach = [_]f32{ 1.0, 0.25 };
+    const strategy = [_]f32{ 0.25, 0.25, 0.75, 0.75 };
+
+    var t: u32 = 1;
+    while (t <= 1_000_000) : (t += 1) {
+        const tf: f32 = @floatFromInt(t);
+        const prev: f32 = @floatFromInt(t - 1);
+        // CFR+: G_t = t², so S/G_t remains bounded by one.
+        accumulateNormalizedStrategy(&stored, &reach, &strategy, (prev / tf) * (prev / tf), 1.0 / tf, N_p, A);
+    }
+
+    for (stored) |value| try testing.expect(value >= 0 and value <= 1.0);
+    for (0..N_p) |h| {
+        const total = stored[h] + stored[N_p + h];
+        try testing.expect(total > 0);
+        try testing.expectApproxEqAbs(@as(f32, 0.25), stored[h] / total, 5e-5);
+        try testing.expectApproxEqAbs(@as(f32, 0.75), stored[N_p + h] / total, 5e-5);
+    }
 }
 
 test "cfrRegretUpdate: clamps negatives to zero" {
@@ -933,6 +1015,24 @@ test "accumulateStrategySimd: exact multiple of simd_width" {
     for (scalar_cumul, 0..) |s, i| {
         try testing.expect(@abs(@as(f32, @floatCast(s)) - @as(f32, @floatCast(simd_cumul[i]))) < 0.002);
     }
+}
+
+test "accumulateNormalizedStrategySimd: matches scalar lane-by-lane" {
+    const N_p: u32 = 11;
+    const A: u32 = 3;
+    var scalar: [N_p * A]f32 = undefined;
+    var simd: [N_p * A]f32 = undefined;
+    var reach: [N_p]f32 = undefined;
+    var strategy: [N_p * A]f32 = undefined;
+
+    for (&scalar, 0..) |*value, i| value.* = @as(f32, @floatFromInt(i)) * 0.03125;
+    simd = scalar;
+    for (&reach, 0..) |*value, i| value.* = @as(f32, @floatFromInt(i + 1)) / 16.0;
+    for (&strategy, 0..) |*value, i| value.* = @as(f32, @floatFromInt((i % 5) + 1)) / 8.0;
+
+    accumulateNormalizedStrategy(&scalar, &reach, &strategy, 0.875, 0.0625, N_p, A);
+    accumulateNormalizedStrategySimd(&simd, &reach, &strategy, 0.875, 0.0625, N_p, A);
+    for (scalar, simd) |expected, actual| try testing.expectApproxEqAbs(expected, actual, 1e-6);
 }
 
 test "cfrAccumulateStrategySimd: matches scalar lane-by-lane" {

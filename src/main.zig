@@ -201,21 +201,6 @@ fn runSolve(
     const turns = is.runout_tables.canonical_turns.len;
     const rivers = is.runout_tables.canonical_rivers.len;
 
-    const mem_bytes = is.storage.regrets_flop.len * @sizeOf(f32) +
-        is.storage.regrets_turn.len * @sizeOf(f32) +
-        is.storage.regrets_river.len * @sizeOf(f32) +
-        is.storage.strategies_flop.len * @sizeOf(f32) +
-        is.storage.strategies_turn.len * @sizeOf(f32) +
-        is.storage.strategies_river.len * @sizeOf(f32);
-
-    try printFormatted(io, "loaded '{s}'\n", .{config_path});
-    try printFormatted(io, "  ranges: {d}/{d} combos  tree: {d} actions, {d} terminals  runouts: {d} turns, {d} rivers\n", .{
-        n0, n1, action_count, terminal_count, turns, rivers,
-    });
-    try printFormatted(io, "  memory: {d:.1} MB  threads: {d}\n", .{
-        @as(f32, @floatFromInt(mem_bytes)) / (1024 * 1024), solver_config.num_threads,
-    });
-
     var solver = cfr_mod.Solver.init(arena, &is, solver_config) catch |err| {
         try printFormatted(io, "error: failed to create solver: {}\n", .{err});
         return;
@@ -223,6 +208,15 @@ fn runSolve(
     // Joins the worker thread pool on exit; without this a threaded solve
     // segfaults at process teardown (threads outlive the data they reference).
     defer solver.deinit();
+
+    const mem_bytes = (try is.memoryBytes()) + solver.workingMemoryBytes();
+    try printFormatted(io, "loaded '{s}'\n", .{config_path});
+    try printFormatted(io, "  ranges: {d}/{d} combos  tree: {d} actions, {d} terminals  runouts: {d} turns, {d} rivers\n", .{
+        n0, n1, action_count, terminal_count, turns, rivers,
+    });
+    try printFormatted(io, "  memory: {d:.1} MB  threads: {d}\n", .{
+        @as(f32, @floatFromInt(mem_bytes)) / (1024 * 1024), solver_config.num_threads,
+    });
 
     try printToStderr(io, "solving...\n");
 

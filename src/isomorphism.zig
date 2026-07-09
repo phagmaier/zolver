@@ -97,8 +97,6 @@ pub fn buildRunoutTables(
     flop: [3]Card,
     ranges: [2][]const WeightedCombo,
 ) !RunoutTables {
-    const flop_mask = try boardMask(flop[0..]);
-
     var valid_permutations = std.ArrayList(SuitPermutation).empty;
     errdefer valid_permutations.deinit(allocator);
 
@@ -111,6 +109,29 @@ pub fn buildRunoutTables(
     }
     if (valid_permutations.items.len == 0) return error.NoValidSuitPermutation;
 
+    return buildRunoutTablesForPermutations(allocator, flop, try valid_permutations.toOwnedSlice(allocator));
+}
+
+/// Build the complete physical turn/river space without suit compression.
+///
+/// This is the solver-safe representation until traversal remaps private-hand
+/// reaches and values for every member of a suit orbit. Keeping it separate
+/// from `buildRunoutTables` lets the isomorphism module retain its canonical
+/// tables for isolated tests and future, permutation-aware use.
+pub fn buildUncompressedRunoutTables(allocator: Allocator, flop: [3]Card) !RunoutTables {
+    const identity = try allocator.alloc(SuitPermutation, 1);
+    identity[0] = SuitPermutation.identity();
+    return buildRunoutTablesForPermutations(allocator, flop, identity);
+}
+
+fn buildRunoutTablesForPermutations(
+    allocator: Allocator,
+    flop: [3]Card,
+    valid_permutations: []SuitPermutation,
+) !RunoutTables {
+    errdefer allocator.free(valid_permutations);
+    const flop_mask = try boardMask(flop[0..]);
+
     var turns = std.ArrayList(CanonicalTurn).empty;
     errdefer turns.deinit(allocator);
     var rivers = std.ArrayList(CanonicalRiver).empty;
@@ -122,12 +143,12 @@ pub fn buildRunoutTables(
         const turn = try card.fromIndex(turn_index);
         if ((card.mask(turn) & flop_mask) != 0 or visited_turns[turn_index]) continue;
 
-        const turn_orbit = try cardOrbit(turn, flop_mask, valid_permutations.items);
+        const turn_orbit = try cardOrbit(turn, flop_mask, valid_permutations);
         markOrbitVisited(&visited_turns, turn_orbit.orbit_mask);
 
         const canonical_turn = turn_orbit.card;
         const turn_dead_mask = flop_mask | card.mask(canonical_turn);
-        const turn_group = try turnFixedGroup(allocator, valid_permutations.items, canonical_turn);
+        const turn_group = try turnFixedGroup(allocator, valid_permutations, canonical_turn);
         defer allocator.free(turn_group);
 
         const first_river = try u32Index(rivers.items.len);
@@ -144,15 +165,13 @@ pub fn buildRunoutTables(
         });
     }
 
-    const owned_valid_permutations = try valid_permutations.toOwnedSlice(allocator);
-    errdefer allocator.free(owned_valid_permutations);
     const owned_turns = try turns.toOwnedSlice(allocator);
     errdefer allocator.free(owned_turns);
     const owned_rivers = try rivers.toOwnedSlice(allocator);
 
     return .{
         .allocator = allocator,
-        .valid_permutations = owned_valid_permutations,
+        .valid_permutations = valid_permutations,
         .canonical_turns = owned_turns,
         .canonical_rivers = owned_rivers,
     };

@@ -26,6 +26,10 @@ const Evaluator = evaluator_mod.Evaluator;
 /// Produced once before solving begins.
 pub const SolverInit = struct {
     allocator: Allocator,
+    /// User-requested total solver-memory limit. Storage is checked during
+    /// initialization; `Solver.init` checks this value again once its
+    /// thread-dependent scratch requirement is known.
+    max_budget_bytes: u64,
 
     tree: Tree,
     runout_tables: RunoutTables,
@@ -43,7 +47,8 @@ pub const SolverInit = struct {
     /// two-card combo, or maxInt(u32) if the opponent does not hold that combo.
     same_combo_idx: [2][]u32,
 
-    /// Precomputed chance weights: multiplicity / 49 (turn) and / 48 (river).
+    /// Precomputed chance weights: physical-card probability for a compatible
+    /// private-hand pair, i.e. multiplicity / 45 (turn) and / 44 (river).
     weight_turns: []f32,
     weight_rivers: []f32,
 
@@ -83,11 +88,11 @@ pub const SolverInit = struct {
         var tree = try game_tree.buildGameTree(allocator, tree_config);
         errdefer tree.deinit();
 
-        var runout_tables = try isomorphism.buildRunoutTables(
-            allocator,
-            config.flop,
-            .{ config.oop_range, config.ip_range },
-        );
+        // Suit-orbit compression requires remapping private-hand reaches and
+        // values for every orbit member. Applying one representative's blocking
+        // mask to the entire orbit is not sound, so solve over physical runouts
+        // until that permutation-aware traversal exists.
+        var runout_tables = try isomorphism.buildUncompressedRunoutTables(allocator, config.flop);
         errdefer runout_tables.deinit();
 
         const runout_counts = runout_tables.runoutCounts();
@@ -136,9 +141,9 @@ pub const SolverInit = struct {
         }
 
         // Chance normalization weights: multiplicity / cards_remaining
-        const w_turns = try allocChanceWeights(allocator, runout_tables.canonical_turns, 49.0);
+        const w_turns = try allocChanceWeights(allocator, runout_tables.canonical_turns, 45.0);
         errdefer allocator.free(w_turns);
-        const w_rivers = try allocChanceWeights(allocator, runout_tables.canonical_rivers, 48.0);
+        const w_rivers = try allocChanceWeights(allocator, runout_tables.canonical_rivers, 44.0);
         errdefer allocator.free(w_rivers);
 
         var eval = try Evaluator.init();
@@ -149,6 +154,7 @@ pub const SolverInit = struct {
 
         return .{
             .allocator = allocator,
+            .max_budget_bytes = config.max_budget_bytes,
             .tree = tree,
             .runout_tables = runout_tables,
             .ranges = ranges,
@@ -186,6 +192,43 @@ pub const SolverInit = struct {
         self.ranges[0].deinit();
         self.tree.deinit();
         self.* = undefined;
+    }
+
+    /// Bytes held by the initialized game representation, excluding the
+    /// thread-dependent `Solver` working arenas. This deliberately counts all
+    /// retained solver arrays, not only regret/strategy storage.
+    pub fn memoryBytes(self: *const SolverInit) !u64 {
+        var total: u64 = 0;
+        try addSliceBytes(&total, self.tree.action_nodes.items, game_tree.ActionNode);
+        try addSliceBytes(&total, self.tree.chance_nodes.items, game_tree.ChanceNode);
+        try addSliceBytes(&total, self.tree.terminal_nodes.items, game_tree.TerminalNode);
+        try addSliceBytes(&total, self.tree.edges.items, game_tree.NodeRef);
+        try addSliceBytes(&total, self.runout_tables.valid_permutations, isomorphism.SuitPermutation);
+        try addSliceBytes(&total, self.runout_tables.canonical_turns, isomorphism.CanonicalTurn);
+        try addSliceBytes(&total, self.runout_tables.canonical_rivers, isomorphism.CanonicalRiver);
+        inline for (0..2) |p| {
+            try addSliceBytes(&total, self.ranges[p].hands, Combo);
+            try addSliceBytes(&total, self.ranges[p].weights, f32);
+            try addSliceBytes(&total, self.blocking.blocked_flop[p], bool);
+            try addSliceBytes(&total, self.blocking.blocked_turn[p], bool);
+            try addSliceBytes(&total, self.blocking.blocked_river[p], bool);
+            try addSliceBytes(&total, self.mask_flop[p], f32);
+            try addSliceBytes(&total, self.mask_turn[p], f32);
+            try addSliceBytes(&total, self.mask_river[p], f32);
+            try addSliceBytes(&total, self.same_combo_idx[p], u32);
+            try addSliceBytes(&total, self.card_idx[p], u8);
+            try addSliceBytes(&total, self.showdown.strengths[p], u32);
+            try addSliceBytes(&total, self.showdown.order[p], u32);
+        }
+        try addSliceBytes(&total, self.weight_turns, f32);
+        try addSliceBytes(&total, self.weight_rivers, f32);
+        try addSliceBytes(&total, self.storage.regrets_flop, f32);
+        try addSliceBytes(&total, self.storage.regrets_turn, f32);
+        try addSliceBytes(&total, self.storage.regrets_river, f32);
+        try addSliceBytes(&total, self.storage.strategies_flop, f32);
+        try addSliceBytes(&total, self.storage.strategies_turn, f32);
+        try addSliceBytes(&total, self.storage.strategies_river, f32);
+        return total;
     }
 };
 
@@ -288,6 +331,11 @@ fn allocChanceWeights(allocator: Allocator, cards: anytype, cards_remaining: f32
         weights[i] = @as(f32, @floatFromInt(card_info.multiplicity)) / cards_remaining;
     }
     return weights;
+}
+
+fn addSliceBytes(total: *u64, slice: anytype, comptime T: type) !void {
+    const bytes = try std.math.mul(u64, @as(u64, @intCast(slice.len)), @sizeOf(T));
+    total.* = try std.math.add(u64, total.*, bytes);
 }
 
 test "full init and deinit cycle" {
@@ -504,7 +552,7 @@ test "golden: monotone flop reduces runout counts" {
     const flop = [_]Card{
         card.makeCard(12, 0), // A♠
         card.makeCard(10, 0), // T♠
-        card.makeCard(7, 0),  // 7♠
+        card.makeCard(7, 0), // 7♠
     };
     var rt = try isomorphism.buildRunoutTables(std.testing.allocator, flop, .{ &.{}, &.{} });
     defer rt.deinit();
@@ -878,16 +926,18 @@ test "same_combo_idx dimensions match range sizes" {
     try std.testing.expectEqual(@as(usize, 1), init_state.same_combo_idx[1].len);
 }
 
-test "chance weights sum correctly" {
+test "chance weights use the private-card-conditioned denominators" {
     const flop = [_]Card{
         card.makeCard(12, 0),
         card.makeCard(11, 1),
         card.makeCard(10, 2),
     };
-    const hand = try Combo.init(card.makeCard(0, 3), card.makeCard(1, 3));
-    const input = [_]WeightedCombo{.{ .combo = hand, .weight = 1.0 }};
+    const oop_hand = try Combo.init(card.makeCard(0, 3), card.makeCard(1, 3));
+    const ip_hand = try Combo.init(card.makeCard(2, 3), card.makeCard(3, 3));
+    const oop = [_]WeightedCombo{.{ .combo = oop_hand, .weight = 1.0 }};
+    const ip = [_]WeightedCombo{.{ .combo = ip_hand, .weight = 1.0 }};
 
-    const config = Config.default(flop, &input, &input);
+    const config = Config.default(flop, &oop, &ip);
     var init_state = try SolverInit.init(std.testing.allocator, config);
     defer init_state.deinit();
 
@@ -895,40 +945,32 @@ test "chance weights sum correctly" {
     try std.testing.expectEqual(@as(usize, 49), init_state.weight_turns.len);
     try std.testing.expectEqual(@as(usize, 2352), init_state.weight_rivers.len);
 
-    // Each weight = 1/49 for turns, 1/48 for rivers
+    // Each physical-card weight is conditioned on the four private cards.
     for (init_state.weight_turns) |w| {
-        try std.testing.expect(@abs(1.0 / 49.0 - w) < 1e-7);
+        try std.testing.expect(@abs(1.0 / 45.0 - w) < 1e-7);
     }
     for (init_state.weight_rivers) |w| {
-        try std.testing.expect(@abs(1.0 / 48.0 - w) < 1e-7);
+        try std.testing.expect(@abs(1.0 / 44.0 - w) < 1e-7);
     }
-}
 
-test "chance weights with suit symmetry use multiplicities" {
-    const flop = [_]Card{
-        card.makeCard(12, 0),
-        card.makeCard(10, 0),
-        card.makeCard(7, 0),
-    };
-    const hand = try Combo.init(card.makeCard(0, 1), card.makeCard(1, 1));
-    const input = [_]WeightedCombo{.{ .combo = hand, .weight = 1.0 }};
-
-    const config = Config.default(flop, &input, &input);
-    var init_state = try SolverInit.init(std.testing.allocator, config);
-    defer init_state.deinit();
-
-    // Monotone flop: canonical turns < 49, but multiplicities account for orbits
-    try std.testing.expect(init_state.weight_turns.len < 49);
-
-    // Weighted sum must still be 1.0
+    // For this compatible private-hand pair, exactly 45 turns are live.
     var turn_sum: f32 = 0;
-    for (init_state.weight_turns) |w| turn_sum += w;
+    for (init_state.weight_turns, 0..) |w, t| {
+        const live = init_state.mask_turn[0][t] * init_state.mask_turn[1][t];
+        turn_sum += live * w;
+    }
     try std.testing.expect(@abs(1.0 - turn_sum) < 1e-5);
 
-    // Each weight = multiplicity / 49
-    for (init_state.runout_tables.canonical_turns, 0..) |turn, i| {
-        try std.testing.expect(@abs(
-            @as(f32, @floatFromInt(turn.multiplicity)) / 49.0 - init_state.weight_turns[i],
-        ) < 1e-7);
+    // After any live turn, exactly 44 rivers are live for the same pair.
+    for (init_state.runout_tables.canonical_turns, 0..) |turn, t| {
+        if (init_state.mask_turn[0][t] * init_state.mask_turn[1][t] == 0) continue;
+        var river_sum: f32 = 0;
+        var r: u32 = 0;
+        while (r < turn.num_rivers) : (r += 1) {
+            const full = turn.first_river + r;
+            const live = init_state.mask_river[0][full] * init_state.mask_river[1][full];
+            river_sum += live * init_state.weight_rivers[full];
+        }
+        try std.testing.expect(@abs(1.0 - river_sum) < 1e-5);
     }
 }

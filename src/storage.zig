@@ -5,11 +5,10 @@ const Allocator = std.mem.Allocator;
 const Street = game_tree.Street;
 
 pub const bytes_per_regret: u64 = @sizeOf(f32); // 4
-// The cumulative strategy is a running *sum* that grows unbounded with the
-// iteration count (CFR+ adds t·reach·σ; DCFR a near-unity-scaled sum). f16 tops
-// out at 65504 and loses all precision in the thousands, so it overflowed to
-// Inf (CFR+, ~iter 360) or silently stopped accumulating (DCFR), breaking
-// convergence. It must be f32.
+// Strategy storage holds a globally normalized cumulative average. The solver
+// divides the conceptual DCFR sum by t and the CFR+ sum by t², which preserves
+// extraction ratios while bounding values. f32 is retained for stable repeated
+// updates and SIMD throughput; f16 loses too much precision in long solves.
 pub const bytes_per_strategy: u64 = @sizeOf(f32); // 4
 pub const bytes_per_slot: u64 = bytes_per_regret + bytes_per_strategy; // 8
 

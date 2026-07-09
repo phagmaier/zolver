@@ -374,7 +374,9 @@ pub const Tree = struct {
         var total: u64 = 0;
         for (self.slots_per_runout, 0..) |slots, street_idx| {
             const runout_slots = try std.math.mul(u64, slots, runout_counts[street_idx]);
-            const bytes = try std.math.mul(u64, runout_slots, 6);
+            // Each slot owns one f32 regret and one f32 average-strategy
+            // accumulator. Keep this in sync with storage.bytes_per_slot.
+            const bytes = try std.math.mul(u64, runout_slots, 8);
             total = try std.math.add(u64, total, bytes);
         }
         return total;

@@ -238,7 +238,7 @@ test "Pool: zero items returns immediately" {
 
     pool.forkJoin(struct {
         fn nop(_: *anyopaque, _: u32, _: u32) void {}
-    }.nop, @constCast(@ptrCast(&{})), 0);
+    }.nop, @ptrCast(@constCast(&{})), 0);
 }
 
 test "Pool: single-threaded (0 workers) works" {

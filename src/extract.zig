@@ -293,13 +293,15 @@ fn symmetricRange() ![4]WeightedCombo {
     };
 }
 
-test "two-tone flop exposes a non-trivial diamond↔club symmetry" {
+test "solver initialization keeps physically distinct suit-equivalent boards separate" {
     const alloc = testing.allocator;
     const r = try symmetricRange();
     var is = try buildInit(alloc, two_tone, &r, &r);
     defer is.deinit();
-    // The swap must survive range filtering ⇒ identity + one real permutation.
-    try testing.expectEqual(@as(usize, 2), is.runout_tables.valid_permutations.len);
+    // Solver traversal is intentionally uncompressed until it remaps private
+    // hands per suit orbit, so only the identity is present here.
+    try testing.expectEqual(@as(usize, 1), is.runout_tables.valid_permutations.len);
+    try testing.expectEqual(@as(usize, 49), is.runout_tables.canonical_turns.len);
 }
 
 /// First action node encountered at `target` street in a pre-order walk, or
@@ -324,7 +326,7 @@ fn findActionAtStreet(is: *const SolverInit, ref: NodeRef, street: Street, targe
     }
 }
 
-test "suit expansion: orbit-equivalent turn boards give identical strategies" {
+test "strategy queries retain distinct suit-equivalent turn boards" {
     const alloc = testing.allocator;
     const r = try symmetricRange();
     var is = try buildInit(alloc, two_tone, &r, &r);
@@ -342,30 +344,27 @@ test "suit expansion: orbit-equivalent turn boards give identical strategies" {
 
     const turn_d = card.makeCard(3, 2); // 5d
     const turn_c = card.makeCard(3, 3); // 5c
-    // Both must be the same canonical turn (the diamond↔club orbit), reached via
-    // different permutations — that is what makes the expansion non-trivial.
+    // They remain separate physical boards in solver storage. Treating either
+    // board as the representative of the full orbit is incorrect for hands
+    // containing the other orbit members.
     const res_d = try resolveRunout(&is, turn_d, null);
     const res_c = try resolveRunout(&is, turn_c, null);
-    try testing.expectEqual(res_d.canonical_turn, res_c.canonical_turn);
+    try testing.expect(res_d.canonical_turn != res_c.canonical_turn);
 
-    // A spade hand is fixed by the swap: identical strategy on both boards.
+    // Queries at both physical boards produce valid action distributions.
     const spade_hand = try Combo.init(card.makeCard(9, 0), card.makeCard(8, 0));
     var s_d: [8]f32 = undefined;
     var s_c: [8]f32 = undefined;
     try strategyForHand(&solver, turn_node, spade_hand, turn_d, null, &s_d);
     try strategyForHand(&solver, turn_node, spade_hand, turn_c, null, &s_c);
-    for (0..a) |i| try testing.expectApproxEqAbs(s_d[i], s_c[i], 1e-6);
-
-    // A diamond hand on the diamond board and its club mirror on the club board
-    // are the same situation under the swap ⇒ identical strategies. This path
-    // exercises the non-trivial hand permutation (7c6c ↦ 7d6d).
-    const dia_hand = try Combo.init(card.makeCard(5, 2), card.makeCard(4, 2)); // 7d6d
-    const clb_hand = try Combo.init(card.makeCard(5, 3), card.makeCard(4, 3)); // 7c6c
-    var s_dia: [8]f32 = undefined;
-    var s_clb: [8]f32 = undefined;
-    try strategyForHand(&solver, turn_node, dia_hand, turn_d, null, &s_dia);
-    try strategyForHand(&solver, turn_node, clb_hand, turn_c, null, &s_clb);
-    for (0..a) |i| try testing.expectApproxEqAbs(s_dia[i], s_clb[i], 1e-6);
+    var sum_d: f32 = 0;
+    var sum_c: f32 = 0;
+    for (0..a) |i| {
+        sum_d += s_d[i];
+        sum_c += s_c[i];
+    }
+    try testing.expectApproxEqAbs(@as(f32, 1.0), sum_d, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), sum_c, 1e-5);
 }
 
 test "strategyForHand on the canonical board matches the raw average strategy" {

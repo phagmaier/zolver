@@ -153,12 +153,10 @@ elapsed_s: 9.52
 converged: true
 ```
 
-> **Note on EVs:** `avg_ev_oop` and `avg_ev_ip` sum to `initial_pot` only when
-> every dealt matchup reaches a terminal at full weight. When the spot contains
-> **pre-river all-ins**, each matchup arrives at only the runouts compatible with
-> its private cards (weight < 1), so the two EVs sum to *less* than the pot. This
-> is expected — it is the same effect that makes exploitability measure `v_u`
-> directly rather than assuming the closed-form constant-sum identity.
+> **Note on EVs:** after normalization by compatible range mass,
+> `avg_ev_oop` and `avg_ev_ip` sum to `initial_pot`, including when a line ends
+> all-in before the river. Turn and river chance is conditioned on the four
+> dealt private cards: 45 cards to a flop turn, then 44 to a river.
 
 ### `zolver view <results.json>`
 
@@ -287,7 +285,7 @@ optional. Bad configs report the exact line and reason, e.g.
 | `initial_pot` | integer | Pot size (in chips) at the start of flop betting. |
 | `effective_stack` | integer | The smaller of the two remaining postflop stacks. |
 | `min_bet` | integer | Minimum bet/raise increment in chips. *Optional, default: 1.* |
-| `max_budget_bytes` | integer | Memory limit before solver rejects the config. *Optional, default: 8 GB.* Increase for large trees with many sizings/raises; lower to avoid excessive swap on low-memory machines. |
+| `max_budget_bytes` | integer | Total retained solver-memory limit before a solve starts: tables, storage, and thread-dependent working arenas. *Optional, default: 8 GB.* Increase for large trees with many sizings/raises; lower to avoid excessive swap on low-memory machines. |
 
 ### `[game.sizings]`
 
@@ -425,10 +423,10 @@ turn and river; terminal nodes are folds or showdowns.
 
 ### Suit isomorphism
 
-Rather than considering all 49×48 turn/river combinations, the solver exploits
-suit symmetries to collapse the runout space. On a rainbow flop every turn card
-is canonical; on two-tone or monotone flops many runouts are equivalent,
-dramatically reducing tree size and memory.
+The solver currently evaluates the complete physical 49×48 turn/river space.
+The codebase retains suit-canonicalization utilities for output and future use,
+but solve-time compression is disabled until it can remap private-hand reaches
+and values for every orbit member without changing board-blocking semantics.
 
 ### Exploitability
 
@@ -472,9 +470,9 @@ build, DCFR with α=1.5 β=0 γ=2.
 | Complex (rainbow) | 3×3 | 2/1/1 | 1,332A 1,901T | 2,056 MB | ~1,000 | 141.9s (128 iters) |
 | Complex (monotone) | 3×3 | 2/1/1 | 1,332A 1,901T | 594 MB | ~280 | 35.9s (128 iters) |
 
-Suit isomorphism collapses the monotone flop from 49 → 23 canonical turns
-(3.5× fewer runouts), delivering a proportional speedup with identical strategy
-quality. Convergence is reliable: the bundled example reaches ~0.001%
+The listed measurements predate the physical-runout correctness change;
+rebenchmark monotone and two-tone spots before using those figures for capacity
+planning. Convergence is reliable: the bundled example reaches ~0.001%
 exploitability and keeps improving with iterations. Targeting 0.3–0.5% is the
 practical study sweet spot (tens to a few hundred iterations); tighten it for
 near-exact strategies. Scaling is sublinear beyond ~8 threads due to the serial
@@ -524,4 +522,3 @@ This project draws on the academic literature on CFR and its variants:
 - Tammelin (2014) — CFR+
 - Johanson et al. (2012) — Suit isomorphism for poker
 ```
-

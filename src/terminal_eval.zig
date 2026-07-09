@@ -560,14 +560,21 @@ test "showdownEval: O(N) matches O(N^2) oracle" {
     showdownEval(
         &values_fast,
         &reach_opp,
-        &u_ci, &opp_ci,
+        &u_ci,
+        &opp_ci,
         &u_order,
         &u_strengths,
         &opp_order,
         &opp_strengths,
-        W, C, T,
-        &cardsum, total, &same_reach,
-        &lo_card, &eq_card, &compat,
+        W,
+        C,
+        T,
+        &cardsum,
+        total,
+        &same_reach,
+        &lo_card,
+        &eq_card,
+        &compat,
     );
 
     showdownEvalNaive(
@@ -577,7 +584,9 @@ test "showdownEval: O(N) matches O(N^2) oracle" {
         &opp_hands,
         &u_strengths,
         &opp_strengths,
-        W, C, T,
+        W,
+        C,
+        T,
     );
 
     for (0..3) |i| {
@@ -610,14 +619,21 @@ test "showdownEval: win/loss/tie coefficients applied correctly" {
     showdownEval(
         &values,
         &reach_opp,
-        &u_ci, &opp_ci,
+        &u_ci,
+        &opp_ci,
         &order,
         &u_strengths,
         &order,
         &opp_strengths,
-        10.0, 5.0, 2.0,
-        &cardsum, total, &same_reach,
-        &lo_card, &eq_card, &compat_buf,
+        10.0,
+        5.0,
+        2.0,
+        &cardsum,
+        total,
+        &same_reach,
+        &lo_card,
+        &eq_card,
+        &compat_buf,
     );
 
     // Hands are compatible (A♠K♠ vs 2♦3♦ — no shared cards)
@@ -646,12 +662,21 @@ test "showdownEval: empty U range produces no output" {
     showdownEval(
         &values,
         &reach_opp,
-        &.{}, &opp_ci,
-        &.{}, &.{},
-        &order, &strengths,
-        1.0, 1.0, 1.0,
-        &cardsum, total, &same_reach,
-        &lo_card, &eq_card, &compat_buf,
+        &.{},
+        &opp_ci,
+        &.{},
+        &.{},
+        &order,
+        &strengths,
+        1.0,
+        1.0,
+        1.0,
+        &cardsum,
+        total,
+        &same_reach,
+        &lo_card,
+        &eq_card,
+        &compat_buf,
     );
 }
 
@@ -699,14 +724,21 @@ test "showdownEval: order reversed from strongest→weakest verified" {
     showdownEval(
         &values_fast,
         &reach_opp,
-        &u_ci, &opp_ci,
+        &u_ci,
+        &opp_ci,
         &u_order,
         &u_strengths,
         &opp_order,
         &opp_strengths,
-        1.0, 0.0, 0.5,
-        &cardsum, total, &same_reach,
-        &lo_card, &eq_card, &compat_buf,
+        1.0,
+        0.0,
+        0.5,
+        &cardsum,
+        total,
+        &same_reach,
+        &lo_card,
+        &eq_card,
+        &compat_buf,
     );
 
     showdownEvalNaive(
@@ -716,7 +748,9 @@ test "showdownEval: order reversed from strongest→weakest verified" {
         &opp_hands,
         &u_strengths,
         &opp_strengths,
-        1.0, 0.0, 0.5,
+        1.0,
+        0.0,
+        0.5,
     );
 
     for (0..3) |i| {
@@ -770,14 +804,21 @@ test "showdownEval: constant-sum property on random data" {
     showdownEval(
         &values_fast,
         &reach_opp,
-        &u_ci, &opp_ci,
+        &u_ci,
+        &opp_ci,
         &order,
         &u_strengths,
         &order,
         &opp_strengths,
-        1.0, 0.0, 0.5,
-        &cardsum, total, &same_reach,
-        &lo_card, &eq_card, &compat_buf,
+        1.0,
+        0.0,
+        0.5,
+        &cardsum,
+        total,
+        &same_reach,
+        &lo_card,
+        &eq_card,
+        &compat_buf,
     );
 
     showdownEvalNaive(
@@ -787,7 +828,9 @@ test "showdownEval: constant-sum property on random data" {
         &u_hands,
         &opp_strengths,
         &u_strengths,
-        1.0, 0.0, 0.5,
+        1.0,
+        0.0,
+        0.5,
     );
 
     for (0..3) |i| {
@@ -818,7 +861,6 @@ test "computeCardSum: correct total and per-card sums" {
 
 const blocking_mod = @import("blocking.zig");
 const evaluator_mod = @import("evaluator.zig");
-const WeightedCombo = isomorphism.WeightedCombo;
 
 /// Naive enumeration wrappers (use the O(N²) showdown oracle per runout) — the
 /// reference the fast kernel is validated against.
@@ -867,15 +909,7 @@ const TestEnv = struct {
         u_hands: []const Combo,
         opp_hands: []const Combo,
     ) !TestEnv {
-        // Weighted ranges (for suit-isomorphism range-preservation checks).
-        var wc0 = try allocator.alloc(WeightedCombo, u_hands.len);
-        defer allocator.free(wc0);
-        for (u_hands, 0..) |h, i| wc0[i] = .{ .combo = h, .weight = 1.0 };
-        var wc1 = try allocator.alloc(WeightedCombo, opp_hands.len);
-        defer allocator.free(wc1);
-        for (opp_hands, 0..) |h, i| wc1[i] = .{ .combo = h, .weight = 1.0 };
-
-        var rt = try isomorphism.buildRunoutTables(allocator, flop, .{ wc0, wc1 });
+        var rt = try isomorphism.buildUncompressedRunoutTables(allocator, flop);
         errdefer rt.deinit();
 
         var eval = evaluator_mod.Evaluator{};
@@ -893,12 +927,12 @@ const TestEnv = struct {
         const wt = try allocator.alloc(f32, rt.canonical_turns.len);
         errdefer allocator.free(wt);
         for (rt.canonical_turns, 0..) |t, i| {
-            wt[i] = @as(f32, @floatFromInt(t.multiplicity)) / 49.0;
+            wt[i] = @as(f32, @floatFromInt(t.multiplicity)) / 45.0;
         }
         const wr = try allocator.alloc(f32, rt.canonical_rivers.len);
         errdefer allocator.free(wr);
         for (rt.canonical_rivers, 0..) |riv, i| {
-            wr[i] = @as(f32, @floatFromInt(riv.multiplicity)) / 48.0;
+            wr[i] = @as(f32, @floatFromInt(riv.multiplicity)) / 44.0;
         }
 
         // same_combo_idx: u-hand → opponent index of identical combo, or sentinel.
@@ -1063,6 +1097,50 @@ test "allInEvalFlop: fast sweep matches naive enumeration" {
     allInEvalFlopNaive(&v_naive, &reach_opp, ctx, s);
 
     for (0..3) |i| try testing.expect(@abs(v_fast[i] - v_naive[i]) < 1e-4);
+}
+
+test "allInEvalFlop: preserves constant sum across complete physical runouts" {
+    const alloc = std.testing.allocator;
+    const flop = [_]card.Card{ card.makeCard(12, 0), card.makeCard(8, 1), card.makeCard(5, 2) };
+    const u_hands = [_]Combo{
+        try Combo.init(card.makeCard(11, 3), card.makeCard(10, 3)),
+        try Combo.init(card.makeCard(4, 0), card.makeCard(3, 0)),
+    };
+    const opp_hands = [_]Combo{
+        try Combo.init(card.makeCard(9, 3), card.makeCard(7, 3)),
+        try Combo.init(card.makeCard(2, 0), card.makeCard(1, 0)),
+    };
+    var env = try TestEnv.init(alloc, flop, &u_hands, &opp_hands);
+    defer env.deinit();
+
+    const r0 = [_]f32{ 0.4, 0.9 };
+    const r1 = [_]f32{ 0.7, 0.3 };
+    var v0: [2]f32 = undefined;
+    var v1: [2]f32 = undefined;
+    const s = try makeScratch(alloc, 2, 2);
+    defer freeScratch(alloc, s);
+
+    const ip: f32 = 10.0;
+    const ctx0 = env.ctx(20.0, 10.0, 5.0);
+    allInEvalFlop(&v0, &r1, ctx0, s);
+
+    var same1 = [_]u32{ sentinel, sentinel };
+    var ctx1 = ctx0;
+    ctx1.u = 1;
+    ctx1.same_combo_idx = &same1;
+    allInEvalFlop(&v1, &r0, ctx1, s);
+
+    var total: f32 = 0;
+    for (r0, v0) |r, v| total += r * v;
+    for (r1, v1) |r, v| total += r * v;
+
+    var compatible_mass: f32 = 0;
+    for (u_hands, r0) |uh, ru| {
+        for (opp_hands, r1) |oh, ro| {
+            if ((uh.cardMask() & oh.cardMask()) == 0) compatible_mass += ru * ro;
+        }
+    }
+    try std.testing.expectApproxEqAbs(ip * compatible_mass, total, 2e-3);
 }
 
 test "allInEvalFlop: u-hand sharing a flop card gets exactly zero" {
