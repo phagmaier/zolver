@@ -42,7 +42,7 @@ theory optimal) strategy. It is not a poker bot or a real-time assistant.
 - 🆓 **Free and open source.** Commercial solvers cost hundreds of dollars. This costs nothing.
 - 💻 **Runs on consumer hardware.** Designed for laptops and desktops, not server racks.
 - 🎯 **Exact, no abstraction.** Solves the full game tree — no card bucketing that blurs the answer.
-- ⚡ **Fast.** Multi-threaded, SIMD-accelerated, with suit-isomorphism tree reduction.
+- ⚡ **Fast.** Multi-threaded and SIMD-accelerated, with complete physical runout traversal.
 - 🔁 **Deterministic.** Byte-for-byte identical results regardless of thread count.
 - 📊 **Actually usable output.** Human-readable terminal summaries *and* machine-readable JSON.
 
@@ -57,7 +57,7 @@ theory optimal) strategy. It is not a poker bot or a real-time assistant.
 - **Helpful error messages** — `spot.toml:3: expected integer for 'game.initial_pot', got 'abc'`
 - **Exploitability measurement** — know exactly how close to Nash equilibrium you are
 - **Convergence stopping** — halts automatically once exploitability drops below your threshold
-- **Suit isomorphism** — collapses suit-symmetric runouts to shrink the tree dramatically
+- **Physical runouts** — evaluates every turn/river runout with private-card-aware blocking
 
 ## Quick Start
 
@@ -436,15 +436,11 @@ automatically once it drops below `target_exploitability_pct`.
 
 ## Performance
 
-All measurements on a Ryzen 7 7840U (8 cores / 16 threads), `ReleaseFast`
-build, DCFR with α=1.5 β=0 γ=2.
-
-> **Note (2026):** the cumulative average-strategy buffer was changed from f16 to
-> f32 to fix a convergence bug — the f16 accumulator overflowed at high iteration
-> counts (CFR+ produced NaN; DCFR drifted). Memory figures in the tables below
-> predate that change and are now roughly 30–40% higher for the strategy storage.
-> For a current, reproducible end-to-end benchmark suite (and a cross-validation
-> harness against TexasSolver), see [`bench/`](bench/README.md).
+The end-to-end baseline below was measured on Linux with 8 solver threads,
+`ReleaseFast`, DCFR with α=1.5, β=0, γ=2, at commit `669702c`. Each result is
+the median of three 128-iteration runs after one warm-up. Every spot traverses
+all 49 turns and 2,352 ordered turn-river runouts; memory is total retained
+solver memory plus thread-dependent working arenas.
 
 ### Kernel throughput (bench.zig micro-benchmarks)
 
@@ -455,28 +451,21 @@ build, DCFR with α=1.5 β=0 γ=2.
 | Strategy accumulation | 1,727 Mslots/s | 10,570 Mslots/s | 6.1× |
 | Showdown sweep | — | — | 319 Mhands/s |
 
-### Thread scaling — realistic 3-bet pot (74/76 combos, Qh Jd 6s, 2 sizings, 482 MB)
+### End-to-end physical-runout baseline (8 threads, 128 forced iterations)
 
-| Threads | ms/iter | 64-iter solve | Speedup |
-|---------|---------|---------------|---------|
-| 1 | ~910 | 61.0s | 1.0× |
-| 8 | ~180 | 13.5s | 4.5× |
+| Spot | Tree | Total memory | ms/iter | Exploitability @128 |
+|------|------|--------------|---------|----------------------|
+| SRP dry (rainbow) | 288A / 389T | 764.6 MB | 296 | 1.2902% |
+| SRP two-tone | 288A / 389T | 764.6 MB | 319 | 0.7528% |
+| SRP monotone | 288A / 389T | 764.6 MB | 320 | 0.9446% |
+| 3-bet dry | 204A / 269T | 346.9 MB | 140 | 0.7857% |
+| SRP, three sizings | 1,108A / 1,613T | 3,611.4 MB | 1,417 | 2.3985% |
+| SRP, raise cap 2/1/1 | 372A / 493T | 920.1 MB | 332 | 1.6058% |
 
-### Spot complexity comparison (8 threads, target 0.5% exploitability)
-
-| Spot | Sizings | Raises | Tree | Memory | ms/iter | Solve time |
-|------|---------|--------|------|--------|---------|------------|
-| Standard (rainbow) | 2×3 | 1/0/0 | 348A 477T | 482 MB | ~180 | 13.5s (64 iters) |
-| Complex (rainbow) | 3×3 | 2/1/1 | 1,332A 1,901T | 2,056 MB | ~1,000 | 141.9s (128 iters) |
-| Complex (monotone) | 3×3 | 2/1/1 | 1,332A 1,901T | 594 MB | ~280 | 35.9s (128 iters) |
-
-The listed measurements predate the physical-runout correctness change;
-rebenchmark monotone and two-tone spots before using those figures for capacity
-planning. Convergence is reliable: the bundled example reaches ~0.001%
-exploitability and keeps improving with iterations. Targeting 0.3–0.5% is the
-practical study sweet spot (tens to a few hundred iterations); tighten it for
-near-exact strategies. Scaling is sublinear beyond ~8 threads due to the serial
-flop descent (~3.7% of runtime per Amdahl's law).
+Texture no longer changes runout-table size or total memory: the matched
+rainbow, two-tone, and monotone spots all use the complete physical chance
+space. Their small runtime difference comes from board-specific evaluation work,
+not suit-orbit compression. Extra bet sizes remain the dominant capacity lever.
 
 ## Limitations
 

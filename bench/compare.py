@@ -18,6 +18,7 @@ canonical action path from the flop root.
 Usage: compare.py <zolver.json> <texas.json> [--tol 0.05]
 """
 import json
+import os
 import sys
 
 RANK_ORDER = "23456789TJQKA"
@@ -175,6 +176,14 @@ def compare(zmeta, znodes, tnodes, tol):
         if zc != tc:
             print(f"      note: combo sets differ (z-only {len(zc-tc)}, t-only {len(tc-zc)})")
 
+    summary = {
+        "zolver_flop_nodes": len(zkeys),
+        "texassolver_flop_nodes": len(tkeys),
+        "matched_flop_nodes": len(common),
+        "zolver_only_nodes": len(only_z),
+        "texassolver_only_nodes": len(only_t),
+        "tolerance": tol,
+    }
     if all_diffs:
         all_diffs.sort()
         n = len(all_diffs)
@@ -187,12 +196,21 @@ def compare(zmeta, znodes, tnodes, tol):
         print(f"  p95 abs diff:   {p95:.4f}")
         print(f"  max abs diff:   {all_diffs[-1]:.4f}")
         print(f"  within tol {tol}: {within*100:.1f}%")
+        summary.update({
+            "compared_combo_action_pairs": n,
+            "mean_abs_diff": mean,
+            "p95_abs_diff": p95,
+            "max_abs_diff": all_diffs[-1],
+            "within_tolerance_fraction": within,
+        })
         worst.sort(reverse=True)
         print("  worst 8 disagreements (diff | path | combo | action | zolver | texas):")
         for dd, path, combo, act, zp, tp in worst[:8]:
             print(f"    {dd:.3f}  {pp(path):<28} {combo}  {act}  z={zp:.3f} t={tp:.3f}")
     else:
         print("no comparable (combo,action) pairs found")
+        summary["compared_combo_action_pairs"] = 0
+    return summary
 
 
 def pp(path):
@@ -202,12 +220,34 @@ def pp(path):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     tol = 0.05
-    for a in sys.argv[1:]:
-        if a.startswith("--tol"):
-            tol = float(a.split("=")[1]) if "=" in a else 0.05
-    zpath, tpath = args[0], args[1]
+    summary_path = None
+    args = []
+    i = 0
+    while i < len(sys.argv) - 1:
+        a = sys.argv[i + 1]
+        if a.startswith("--tol="):
+            tol = float(a.split("=", 1)[1])
+        elif a == "--tol":
+            i += 1
+            if i >= len(sys.argv) - 1:
+                raise SystemExit("--tol needs a value")
+            tol = float(sys.argv[i + 1])
+        elif a.startswith("--summary-json="):
+            summary_path = a.split("=", 1)[1]
+        elif a == "--summary-json":
+            i += 1
+            if i >= len(sys.argv) - 1:
+                raise SystemExit("--summary-json needs a path")
+            summary_path = sys.argv[i + 1]
+        elif a.startswith("--"):
+            raise SystemExit(f"unknown option: {a}")
+        else:
+            args.append(a)
+        i += 1
+    if len(args) != 2:
+        raise SystemExit("usage: compare.py <zolver.json> <texas.json> [--tol 0.05] [--summary-json PATH]")
+    zpath, tpath = args
     zmeta, znodes = load_zolver(zpath)
     tnodes = load_texas(tpath)
     if zmeta:
@@ -215,7 +255,14 @@ def main():
         print(f"Zolver meta: expl={zmeta.get('exploitability_pct')}%  "
               f"ev_oop+ev_ip={s:.2f} (pot {zmeta.get('initial_pot')})  "
               f"iters={zmeta.get('iterations')}\n")
-    compare(zmeta, znodes, tnodes, tol)
+    summary = compare(zmeta, znodes, tnodes, tol)
+    if summary_path:
+        os.makedirs(os.path.dirname(os.path.abspath(summary_path)), exist_ok=True)
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+            f.write("\n")
+    if summary["matched_flop_nodes"] == 0 or summary["compared_combo_action_pairs"] == 0:
+        raise SystemExit("validation produced no comparable flop strategies")
 
 
 if __name__ == "__main__":

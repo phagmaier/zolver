@@ -3,36 +3,36 @@ EXEC FROM FILE
 <<<START SOLVING>>>
 Using 8 threads
 Iter: 0
-player 0 exploitability 50.719025
+player 0 exploitability 50.71902
 player 1 exploitability 101.288284
 Total exploitability 380.01828 precent
 -------------------
 Iter: 51
-player 0 exploitability -2.0120125
-player 1 exploitability 3.637868
-Total exploitability 4.0646386 precent
-time used: 6.021
+player 0 exploitability -2.021597
+player 1 exploitability 3.4909463
+Total exploitability 3.6733735 precent
+time used: 6.342
 -------------------
 Iter: 101
-player 0 exploitability -2.238664
-player 1 exploitability 2.9339976
-Total exploitability 1.7383343 precent
-time used: 12.486
+player 0 exploitability -2.2387886
+player 1 exploitability 2.9399574
+Total exploitability 1.7529219 precent
+time used: 13.123
 -------------------
 Iter: 151
-player 0 exploitability -2.2451408
-player 1 exploitability 2.8307033
-Total exploitability 1.4639062 precent
-time used: 18.968
+player 0 exploitability -2.2722924
+player 1 exploitability 2.753411
+Total exploitability 1.2027967 precent
+time used: 20.025
 -------------------
 Iter: 201
-player 0 exploitability -2.308942
-player 1 exploitability 2.5915244
-Total exploitability 0.7064557 precent
-time used: 27.764
+player 0 exploitability -2.3201938
+player 1 exploitability 2.5767052
+Total exploitability 0.6412786 precent
+time used: 27.014
 -------------------
 Iter: 251
-player 0 exploitability -2.3335972
-player 1 exploitability 2.5016198
-Total exploitability 0.42005655 precent
-time used: 34.367
+player 0 exploitability -2.3040528
+player 1 exploitability 2.5156264
+Total exploitability 0.528934 precent
+time used: 33.905

@@ -1,14 +1,14 @@
-loaded 'bench/validation/zolver/v1b.toml'
+loaded '/home/phagmaier/Code/zolver/bench/validation/zolver/v1b.toml'
   ranges: 38/38 combos  tree: 32 actions, 37 terminals  runouts: 49 turns, 2352 rivers
-  memory: 12.5 MB  threads: 8
+  memory: 19.1 MB  threads: 8
 solving...
-  start  exploitability: 346.618% (69.324 chips)
-  iter     32  exploitability: 11.870% (2.374 chips)  0.3s
-  iter     64  exploitability:  2.228% (0.446 chips)  0.6s
-  iter    128  exploitability:  0.794% (0.159 chips)  1.0s
-  iter    192  exploitability:  0.482% (0.096 chips)  1.5s
-  iter    256  exploitability:  0.402% (0.080 chips)  1.9s
-  iter    320  exploitability:  0.398% (0.080 chips)  2.4s
-  iter    384  exploitability:  0.410% (0.082 chips)  2.9s
-solve complete: 400 iterations, 0.410% exploitability, 3.0s elapsed
-output written to 'bench/out/v1b_zolver.json'
+  start  exploitability: 416.546% (83.309 chips)
+  iter     32  exploitability: 15.222% (3.044 chips)  0.3s
+  iter     64  exploitability:  3.490% (0.698 chips)  0.5s
+  iter    128  exploitability:  1.531% (0.306 chips)  1.0s
+  iter    192  exploitability:  1.271% (0.254 chips)  1.5s
+  iter    256  exploitability:  1.204% (0.241 chips)  2.0s
+  iter    320  exploitability:  1.166% (0.233 chips)  2.6s
+  iter    384  exploitability:  1.142% (0.228 chips)  3.1s
+solve complete: 400 iterations, 1.142% exploitability, 3.2s elapsed
+output written to '/home/phagmaier/Code/zolver/bench/out/v1b_zolver.json'

@@ -17,7 +17,7 @@ set_thread_num 8
 set_accuracy 0.05
 set_max_iteration 300
 set_print_interval 50
-set_use_isomorphism 1
+set_use_isomorphism 0
 start_solve
 set_dump_rounds 1
-dump_result /home/phagmaier/Desktop/Code/Zolver/bench/out/v1b_texas.json
+dump_result @OUTPUT@

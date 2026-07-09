@@ -1,8 +1,9 @@
 # Zolver benchmark & cross-validation harness
 
 End-to-end speed benchmarks for the solver, plus accuracy cross-validation
-against [TexasSolver](https://github.com/bupticket/TexasSolver) (the free
-reference solver, vendored in-repo at `../TexasSolver-v0.2.0-Linux/`).
+against [TexasSolver](https://github.com/bupticybee/TexasSolver). The optional
+TexasSolver v0.2.0 package lives at `TexasSolver-v0.2.0-Linux/` in the repository
+root (or set `TEXASSOLVER_DIR` to its location).
 
 ## Layout
 
@@ -21,32 +22,32 @@ bench/
 
 ```bash
 zig build -Doptimize=ReleaseFast
-python3 bench/run_bench.py --runs 1            # speed matrix -> bench/out/results.md
-bench/run_validation.sh v1b v2                 # cross-validate
+python3 bench/run_bench.py                      # 1 warm-up + 3 median samples per spot
+TEXASSOLVER_DIR=/path/to/TexasSolver-v0.2.0-Linux bench/run_validation.sh v1b v2
 ```
 
-## Speed results (8 threads, 128 forced iterations, Ryzen-class 8c/16t)
+## Physical-runout speed results (8 threads, 128 forced iterations)
 
-One axis changed per spot from the SRP baseline (spot 1).
+Measured on Linux at `669702c`, ReleaseFast, DCFR (α=1.5, β=0, γ=2), using
+one warm-up plus three measured samples per spot. All rows assert the full
+49-turn / 2,352 ordered-runout traversal.
 
-| Spot | Tree | Memory | ms/iter | exploit @128 |
+| Spot | Tree | Total memory | ms/iter | exploit @128 |
 |------|------|--------|---------|--------------|
-| 1 srp_dry (rainbow) | 288A 389T | 757 MB | 274 | 0.66% |
-| 2 srp_twotone | 288A 389T | 461 MB | 166 | 0.37% |
-| 3 srp_monotone | 288A 389T | 219 MB | 81 | 0.34% |
-| 4 3bet_dry | 204A 269T | 342 MB | 121 | 0.30% |
-| 5 srp_3sizings | 1108A 1613T | 3604 MB | 1171 | 1.31% |
-| 6 srp_raisecap (2/1/1) | 372A 493T | 913 MB | 324 | 0.57% |
+| 1 srp_dry (rainbow) | 288A 389T | 764.6 MB | 296 | 1.2902% |
+| 2 srp_twotone | 288A 389T | 764.6 MB | 319 | 0.7528% |
+| 3 srp_monotone | 288A 389T | 764.6 MB | 320 | 0.9446% |
+| 4 3bet_dry | 204A 269T | 346.9 MB | 140 | 0.7857% |
+| 5 srp_3sizings | 1108A 1613T | 3611.4 MB | 1417 | 2.3985% |
+| 6 srp_raisecap (2/1/1) | 372A 493T | 920.1 MB | 332 | 1.6058% |
 
 Takeaways:
-- **Suit isomorphism is the dominant memory/speed lever on texture**: identical
-  tree (288A/389T), but rainbow -> two-tone -> monotone cuts memory 757 -> 461
-  -> 219 MB and ms/iter 274 -> 166 -> 81 (~3.4x faster monotone vs rainbow).
+- **Physical chance has a fixed texture footprint**: the matched
+  rainbow/two-tone/monotone trees all retain 764.6 MB and take 296/319/320
+  ms/iter. No solve-time suit compression is active.
 - **Bet-size count is the tree-blowup lever**: going 2 -> 3 sizings per street
-  (spot 5) explodes the tree ~4x (288 -> 1108 actions), memory ~5x (3.6 GB) and
-  ms/iter ~4x. Raise depth (spot 6) is much cheaper than extra sizings.
-- At its operating point (stop ~0.3-0.5%), most realistic single-/two-sizing
-  spots solve in well under a minute on 8 threads.
+  (spot 5) explodes the tree ~4x (288 -> 1108 actions), memory ~4.7x (3.6 GB),
+  and ms/iter ~4.8x. Raise depth (spot 6) is much cheaper than extra sizings.
 
 ## Accuracy cross-validation (vs TexasSolver)
 
@@ -58,17 +59,11 @@ tree. To guarantee an identical tree we use a shallow stack (all-in is a modest
 overbet, not a wild shove) with flop-only betting (turn/river check down), and
 write TexasSolver ranges as explicit hand lists (its console parser rejects `+`).
 
-**V2** (As 8d 3c, pot 20, 18 vs 13 hands, both solvers converged to ~0.05%):
-
-| | Zolver | TexasSolver |
-|--|--------|-------------|
-| OOP root check / bet | 71.5% / 28.5% | 68.8% / 31.2% |
-
-Bet-frequency by made-hand class agrees within ~1-6% on most classes (no-pair,
-set, pocket-pair) and ~13% on the marginal "pair" class. Per-combo differences
-are dominated by indifference (e.g. QQ facing a bet calls in TexasSolver, folds
-in Zolver — equal EV). Conclusion: the two independent solvers agree on the
-equilibrium's aggregate shape.
+The `v1`, `v1b`, and `v2` fixture inputs are retained. `run_validation.sh`
+materializes their output paths, forces TexasSolver's `set_use_isomorphism 0`,
+and saves a JSON comparison summary alongside raw solver outputs. This keeps the
+external check on the same physical-runout convention as Zolver; strategy
+differences are interpreted in aggregate because equilibria may be non-unique.
 
 ## How this harness paid off
 
