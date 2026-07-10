@@ -37,6 +37,15 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
 .range-stats{display:flex;gap:16px;justify-content:center;font-size:11px;color:#8b949e;margin-bottom:10px}
 .range-stats span{color:#c9d1d9}
 
+/* Range paste */
+.range-paste{display:flex;gap:6px;margin:0 0 10px;align-items:stretch}
+.range-paste input{flex:1;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 8px;font-size:11px;font-family:inherit;min-width:0}
+.range-paste input:focus{outline:none;border-color:#58a6ff}
+.range-paste input::placeholder{color:#484f58}
+.range-paste button{background:#1f6feb;color:#fff;border:1px solid #1f6feb;border-radius:4px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:inherit;white-space:nowrap}
+.range-paste button:hover{background:#388bfd}
+.range-paste-hint{font-size:10px;color:#484f58;text-align:center;margin:-4px 0 10px}
+
 /* Presets */
 .presets{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-bottom:10px}
 .preset-btn{background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:10px;cursor:pointer;font-family:inherit}
@@ -110,7 +119,9 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
 
 <div class="header">
   <h1>&#9824; Zolver Config Builder</h1>
-  <div style="display:flex;gap:8px">
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="file" id="importFile" accept=".toml,.txt,text/plain" style="display:none" onchange="handleImportFile(event)">
+    <button class="export-btn" style="background:#21262d;border:1px solid #30363d" onclick="document.getElementById('importFile').click()">Import TOML</button>
     <button class="export-btn" onclick="downloadToml()">Download spot.toml</button>
     <button class="export-btn" style="background:#1f6feb" onclick="copyToml()">Copy TOML</button>
   </div>
@@ -128,6 +139,15 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
     <div id="tab-ip" class="tab-content"></div>
 
     <div class="range-stats" id="rangeStats"></div>
+
+    <div class="range-paste">
+      <input type="text" id="rangeInput" spellcheck="false"
+        placeholder="QQ+, AKs, A5s-A2s:0.5, T9s+ …"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();applyRangePaste();}">
+      <button type="button" onclick="applyRangePaste()">Apply</button>
+    </div>
+    <div class="range-paste-hint">Paste an Equilab/Flopzilla range for the active tab (replaces the grid)</div>
+
     <div class="presets">
       <button class="preset-btn" onclick="preset('clear')">Clear</button>
       <button class="preset-btn" onclick="preset('allPairs')">All Pairs</button>
@@ -223,6 +243,8 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
       <div class="toml-actions">
         <button class="copy" onclick="copyToml()">Copy to Clipboard</button>
         <button onclick="downloadToml()">Download spot.toml</button>
+        <button onclick="document.getElementById('importFile').click()">Import file…</button>
+        <button onclick="importTomlFromPreview()">Import preview</button>
       </div>
       <div class="next-steps" id="nextSteps">
         <div><strong style="color:#c9d1d9">Next</strong> — after saving as <code style="display:inline;padding:1px 4px">spot.toml</code>:</div>
@@ -284,6 +306,225 @@ function initRange() {
   return r;
 }
 
+function clearRangeGrid(range) {
+  for (let r = 0; r < 13; r++) {
+    for (let c = 0; c < 13; c++) {
+      range[r][c].included = false;
+      range[r][c].weight = 1.0;
+    }
+  }
+}
+
+// ── Range string parser (mirrors src/parse.zig parseRange / expandPlus / expandDash)
+// Zig rank indices: 2=0 … A=12. Grid axes: RANKS = A…2 (0…12).
+const RANK_TO_ZIG = {
+  '2':0,'3':1,'4':2,'5':3,'6':4,'7':5,'8':6,'9':7,
+  'T':8,'t':8,'J':9,'j':9,'Q':10,'q':10,'K':11,'k':11,'A':12,'a':12
+};
+
+function zigToGrid(z) { return 12 - z; }
+
+function parseBaseHandJS(s) {
+  s = s.trim();
+  if (s.length < 2 || s.length > 3) throw new Error("invalid hand '" + s + "'");
+  const r1 = RANK_TO_ZIG[s[0]];
+  const r2 = RANK_TO_ZIG[s[1]];
+  if (r1 === undefined || r2 === undefined) throw new Error("invalid rank in '" + s + "'");
+  let suffix = null;
+  if (s.length === 3) {
+    const c = s[2].toLowerCase();
+    if (c !== 's' && c !== 'o') throw new Error("invalid suffix in '" + s + "'");
+    suffix = c;
+  }
+  return { rank1: r1, rank2: r2, suffix: suffix };
+}
+
+function expandPlusJS(base) {
+  const out = [];
+  if (base.rank1 === base.rank2) {
+    for (let r = base.rank1; r <= 12; r++) {
+      out.push({ rank1: r, rank2: r, suffix: null });
+    }
+    return out;
+  }
+  const hi = Math.max(base.rank1, base.rank2);
+  const lo = Math.min(base.rank1, base.rank2);
+  if (hi === 12) {
+    // Ace fixed; kicker climbs toward the King.
+    for (let k = lo; k <= 11; k++) {
+      out.push({ rank1: 12, rank2: k, suffix: base.suffix });
+    }
+  } else {
+    // Preserve gap; both ranks climb until the top hits Ace.
+    const gap = hi - lo;
+    for (let top = hi; top <= 12; top++) {
+      out.push({ rank1: top, rank2: top - gap, suffix: base.suffix });
+    }
+  }
+  return out;
+}
+
+function expandDashJS(a, b) {
+  const aPair = a.rank1 === a.rank2;
+  const bPair = b.rank1 === b.rank2;
+  if (aPair !== bPair) throw new Error('dash range mixes pair and non-pair');
+
+  const out = [];
+  if (aPair) {
+    const lo = Math.min(a.rank1, b.rank1);
+    const hi = Math.max(a.rank1, b.rank1);
+    for (let r = lo; r <= hi; r++) out.push({ rank1: r, rank2: r, suffix: null });
+    return out;
+  }
+
+  if (a.suffix !== b.suffix) throw new Error('dash range suffix mismatch');
+  const suffix = a.suffix;
+  const hiA = Math.max(a.rank1, a.rank2);
+  const loA = Math.min(a.rank1, a.rank2);
+  const hiB = Math.max(b.rank1, b.rank2);
+  const loB = Math.min(b.rank1, b.rank2);
+
+  if (hiA === hiB) {
+    // Same high card: span the kicker.
+    const klo = Math.min(loA, loB);
+    const khi = Math.max(loA, loB);
+    for (let k = klo; k <= khi; k++) out.push({ rank1: hiA, rank2: k, suffix: suffix });
+    return out;
+  }
+
+  const gap = hiA - loA;
+  if (gap !== hiB - loB) throw new Error('dash range gap mismatch');
+  let top = Math.min(hiA, hiB);
+  const topHi = Math.max(hiA, hiB);
+  for (; top <= topHi; top++) {
+    out.push({ rank1: top, rank2: top - gap, suffix: suffix });
+  }
+  return out;
+}
+
+function setGridCell(range, r, c, weight) {
+  if (weight <= 0) {
+    range[r][c].included = false;
+    range[r][c].weight = 1.0;
+  } else {
+    range[r][c].included = true;
+    range[r][c].weight = weight;
+  }
+}
+
+// Apply one hand-class spec (zig ranks) onto the 13×13 grid. Last write wins.
+function applySpecToGrid(range, sp, weight) {
+  const hi = Math.max(sp.rank1, sp.rank2);
+  const lo = Math.min(sp.rank1, sp.rank2);
+  const gHi = zigToGrid(hi);
+  const gLo = zigToGrid(lo);
+  if (hi === lo) {
+    setGridCell(range, gHi, gHi, weight);
+    return;
+  }
+  if (sp.suffix === 's') {
+    setGridCell(range, gHi, gLo, weight); // upper triangle
+  } else if (sp.suffix === 'o') {
+    setGridCell(range, gLo, gHi, weight); // lower triangle
+  } else {
+    // Unsuffixed non-pair = suited + offsuit.
+    setGridCell(range, gHi, gLo, weight);
+    setGridCell(range, gLo, gHi, weight);
+  }
+}
+
+/// Parse a comma-separated range string into a fresh grid.
+/// Throws Error with a human message on invalid tokens/weights; never mutates
+/// the caller's range (commit separately so bad pastes don't partial-apply).
+function parseRangeStringToGrid(str) {
+  const range = initRange();
+  if (!str || !String(str).trim()) return range;
+
+  const parts = String(str).split(',');
+  for (let i = 0; i < parts.length; i++) {
+    const token = parts[i].trim();
+    if (!token) continue;
+
+    const colon = token.indexOf(':');
+    const handPart = (colon >= 0 ? token.slice(0, colon) : token).trim();
+    const weightStr = colon >= 0 ? token.slice(colon + 1).trim() : null;
+
+    let weight = 1.0;
+    if (weightStr !== null) {
+      weight = Number(weightStr);
+      if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+        throw new Error("invalid weight in '" + token + "' (need 0..1)");
+      }
+    }
+    if (weight <= 0) continue;
+    if (!handPart) throw new Error("empty hand in '" + token + "'");
+
+    let specs;
+    if (handPart.charAt(handPart.length - 1) === '+') {
+      const base = parseBaseHandJS(handPart.slice(0, -1));
+      specs = expandPlusJS(base);
+    } else {
+      const dash = handPart.indexOf('-');
+      if (dash >= 0) {
+        const lhs = parseBaseHandJS(handPart.slice(0, dash));
+        const rhs = parseBaseHandJS(handPart.slice(dash + 1));
+        specs = expandDashJS(lhs, rhs);
+      } else {
+        specs = [parseBaseHandJS(handPart)];
+      }
+    }
+
+    for (const sp of specs) applySpecToGrid(range, sp, weight);
+  }
+  return range;
+}
+
+function copyRangeGrid(dst, src) {
+  for (let r = 0; r < 13; r++) {
+    for (let c = 0; c < 13; c++) {
+      dst[r][c].included = src[r][c].included;
+      dst[r][c].weight = src[r][c].weight;
+    }
+  }
+}
+
+function syncRangeInput() {
+  const el = document.getElementById('rangeInput');
+  if (!el) return;
+  // Don't stomp text the user is mid-edit.
+  if (document.activeElement === el) return;
+  const s = getRangeStr(currentTab);
+  el.value = (s === 'AA' && !rangeHasHands(currentTab)) ? '' : s;
+}
+
+function applyRangePaste() {
+  const el = document.getElementById('rangeInput');
+  const raw = el ? el.value : '';
+  const range = currentTab === 'oop' ? oopRange : ipRange;
+  let parsed;
+  try {
+    parsed = parseRangeStringToGrid(raw);
+  } catch (e) {
+    showToast((e && e.message) ? e.message : String(e), true);
+    return;
+  }
+  copyRangeGrid(range, parsed);
+  renderRangeGrid(currentTab);
+  updateStats();
+  updateToml();
+  // Force-refresh the field from the compressed export form.
+  if (el) {
+    const s = getRangeStr(currentTab);
+    el.value = (s === 'AA' && !rangeHasHands(currentTab)) ? '' : s;
+  }
+  const label = currentTab.toUpperCase();
+  if (!rangeHasHands(currentTab)) {
+    showToast(label + ' range cleared');
+  } else {
+    showToast(label + ' range applied');
+  }
+}
+
 // ── Init ────────────────────────────────────────────────────────────────────
 function init() {
   renderCardPicker();
@@ -303,6 +544,7 @@ function switchTab(tab) {
   document.getElementById('tab-ip').classList.toggle('active', tab==='ip');
   renderRangeGrid(tab);
   updateStats();
+  syncRangeInput();
 }
 
 // ── Range Grid ──────────────────────────────────────────────────────────────
@@ -548,6 +790,7 @@ function preset(name) {
   renderRangeGrid(currentTab);
   updateStats();
   updateToml();
+  syncRangeInput();
 }
 
 function setTopPct(pct) {
@@ -582,6 +825,7 @@ function updateStats() {
     '<span>Combos: ' + combos + '</span>' +
     '<span>Weighted: ' + weighted.toFixed(1) + '</span>' +
     '<span>Blocked by board: ' + (selectedCards.filter(c=>c!==null).length > 0 ? 'yes' : 'no') + '</span>';
+  syncRangeInput();
 }
 
 // ── Card Picker ─────────────────────────────────────────────────────────────
@@ -924,6 +1168,201 @@ function downloadToml() {
   a.href = url; a.download = 'spot.toml'; a.click();
   URL.revokeObjectURL(url);
   showToast('Downloaded spot.toml — next: zolver solve spot.toml -o results.json --summary');
+}
+
+// ── TOML import (subset matching zolver's config grammar / builder export) ──
+function stripTomlLineComment(val) {
+  // Remove a trailing # comment when it is not inside a double-quoted string.
+  let inStr = false;
+  for (let i = 0; i < val.length; i++) {
+    const ch = val[i];
+    if (ch === '"') inStr = !inStr;
+    else if (ch === '#' && !inStr) return val.slice(0, i).trim();
+  }
+  return val.trim();
+}
+
+function parseTomlScalar(raw) {
+  const v = stripTomlLineComment(raw);
+  if (v === '') return '';
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (v === 'none' || v === 'unlimited') return v;
+  if (v[0] === '"' && v[v.length - 1] === '"') {
+    // Minimal unescape for \" and \\.
+    return v.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  if (v[0] === "'" && v[v.length - 1] === "'") return v.slice(1, -1);
+  if (v[0] === '[' && v[v.length - 1] === ']') {
+    const inner = v.slice(1, -1).trim();
+    if (!inner) return [];
+    return inner.split(',').map(function(p) {
+      const s = p.trim();
+      const n = Number(s);
+      if (!Number.isFinite(n)) throw new Error('invalid array value: ' + s);
+      return n;
+    });
+  }
+  const n = Number(v);
+  if (Number.isFinite(n) && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(v)) return n;
+  // Bare identifier (e.g. dcfr) — keep as string.
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) return v;
+  throw new Error('unsupported value: ' + v);
+}
+
+function parseSimpleToml(text) {
+  const out = {};
+  let section = '';
+  const lines = String(text).split(/\r?\n/);
+  for (let li = 0; li < lines.length; li++) {
+    let line = lines[li].trim();
+    if (!line || line[0] === '#') continue;
+    const sec = line.match(/^\[([^\]]+)\]$/);
+    if (sec) { section = sec[1].trim(); continue; }
+    const eq = line.indexOf('=');
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim();
+    const valRaw = line.slice(eq + 1);
+    if (!key) continue;
+    const full = section ? (section + '.' + key) : key;
+    try {
+      out[full] = parseTomlScalar(valRaw);
+    } catch (e) {
+      throw new Error('line ' + (li + 1) + ' (' + full + '): ' + (e.message || e));
+    }
+  }
+  return out;
+}
+
+function applyFlopFromString(s) {
+  const parts = String(s).trim().split(/[\s,]+/).filter(Boolean);
+  if (parts.length !== 3) throw new Error('game.flop must be 3 cards (got ' + parts.length + ')');
+  const next = [null, null, null];
+  const used = {};
+  for (let i = 0; i < 3; i++) {
+    const p = parts[i];
+    if (p.length !== 2) throw new Error('invalid card \'' + p + '\'');
+    const rankCh = p[0].toUpperCase();
+    const suit = p[1].toLowerCase();
+    const rank = RANKS.indexOf(rankCh);
+    if (rank < 0 || SUITS.indexOf(suit) < 0) throw new Error('invalid card \'' + p + '\'');
+    const key = rankCh + suit;
+    if (used[key]) throw new Error('duplicate flop card \'' + p + '\'');
+    used[key] = true;
+    next[i] = { rank: rank, suit: suit };
+  }
+  selectedCards = next;
+}
+
+function setNumInput(id, val, fallback) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (val === undefined || val === null || val === '') {
+    if (fallback !== undefined) el.value = fallback;
+    return;
+  }
+  el.value = val;
+}
+
+function setCheck(id, val, fallback) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (typeof val === 'boolean') el.checked = val;
+  else if (fallback !== undefined) el.checked = fallback;
+}
+
+function applyImportedToml(text) {
+  const kv = parseSimpleToml(text);
+
+  if (kv['game.flop'] !== undefined) applyFlopFromString(kv['game.flop']);
+
+  setNumInput('cfgPot', kv['game.initial_pot']);
+  setNumInput('cfgStack', kv['game.effective_stack']);
+  setNumInput('cfgMinBet', kv['game.min_bet']);
+
+  // Sizings — only replace streets that are present.
+  ['flop', 'turn', 'river'].forEach(function(st) {
+    const key = 'game.sizings.' + st;
+    if (kv[key] === undefined) return;
+    if (!Array.isArray(kv[key])) throw new Error(key + ' must be an array');
+    sizings[st] = kv[key].map(function(n) {
+      const v = Number(n);
+      if (!Number.isFinite(v)) throw new Error(key + ' has non-numeric entry');
+      return v;
+    });
+  });
+
+  ['flop', 'turn', 'river'].forEach(function(st) {
+    const key = 'game.raise_cap.' + st;
+    if (kv[key] === undefined) return;
+    const v = kv[key];
+    if (v === 'none' || v === 'unlimited') raiseCaps[st] = 'none';
+    else if (typeof v === 'number' && v >= 0 && v <= 3 && Number.isInteger(v)) raiseCaps[st] = String(v);
+    else if (typeof v === 'number' && v > 3 && Number.isInteger(v)) raiseCaps[st] = 'none'; // treat high as unlimited UI-wise
+    else throw new Error(key + ' must be 0-3 or none');
+  });
+
+  if (kv['ranges.oop'] !== undefined) {
+    copyRangeGrid(oopRange, parseRangeStringToGrid(String(kv['ranges.oop'])));
+  }
+  if (kv['ranges.ip'] !== undefined) {
+    copyRangeGrid(ipRange, parseRangeStringToGrid(String(kv['ranges.ip'])));
+  }
+
+  if (kv['solver.algorithm'] !== undefined) {
+    const algo = String(kv['solver.algorithm']);
+    const sel = document.getElementById('cfgAlgo');
+    if (sel) {
+      sel.value = (algo === 'cfr_plus') ? 'cfr_plus' : 'dcfr';
+    }
+  }
+  setNumInput('cfgMaxIter', kv['solver.max_iterations']);
+  setNumInput('cfgTarget', kv['solver.target_exploitability_pct']);
+  setNumInput('cfgThreads', kv['solver.num_threads']);
+  setCheck('cfgPrune', kv['solver.prune_zero_reach']);
+  setCheck('cfgSimd', kv['solver.use_simd']);
+
+  setNumInput('cfgAlpha', kv['solver.dcfr.alpha']);
+  setNumInput('cfgBeta', kv['solver.dcfr.beta']);
+  setNumInput('cfgGamma', kv['solver.dcfr.gamma']);
+
+  // Refresh UI from state.
+  onAlgoChange();
+  renderCardPicker();
+  renderSizingEditor();
+  renderRangeGrid(currentTab);
+  updateStats();
+  updateToml();
+  syncRangeInput();
+}
+
+function handleImportFile(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  // Allow re-importing the same path later.
+  ev.target.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function() {
+    try {
+      applyImportedToml(String(reader.result || ''));
+      showToast('Imported ' + file.name);
+    } catch (e) {
+      showToast('Import failed: ' + (e.message || e), true);
+    }
+  };
+  reader.onerror = function() { showToast('Failed to read file', true); };
+  reader.readAsText(file);
+}
+
+function importTomlFromPreview() {
+  const el = document.getElementById('tomlOutput');
+  const text = el ? el.textContent : '';
+  try {
+    applyImportedToml(text);
+    showToast('Imported from preview');
+  } catch (e) {
+    showToast('Import failed: ' + (e.message || e), true);
+  }
 }
 
 function showToast(msg, isError) {

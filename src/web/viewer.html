@@ -101,6 +101,25 @@ body {
 .detail-panel .combo-name { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
 .detail-panel .ev-line { margin-bottom: 10px; color: #8b949e; }
 .detail-panel .ev-line .ev-val { color: #d2a8ff; font-weight: bold; }
+.detail-panel .avg-badge { font-size: 10px; color: #8b949e; margin: -4px 0 8px; }
+.detail-panel .combo-list {
+  margin-top: 12px; border-top: 1px solid #21262d; padding-top: 8px;
+  max-height: 200px; overflow-y: auto;
+}
+.detail-panel .combo-list h4 {
+  font-size: 11px; color: #8b949e; font-weight: normal; margin-bottom: 6px;
+}
+.detail-panel .combo-row {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer;
+  font-size: 11px; border: 1px solid transparent;
+}
+.detail-panel .combo-row:hover { background: #21262d; }
+.detail-panel .combo-row.active {
+  background: #1a3a5c; border-color: #58a6ff;
+}
+.detail-panel .combo-row .combo-ev { color: #d2a8ff; white-space: nowrap; }
+.detail-panel .combo-row .combo-txt { color: #c9d1d9; }
 .action-bar { margin-bottom: 6px; }
 .action-bar .action-label {
   display: inline-block; width: 70px; font-size: 11px; color: #8b949e;
@@ -192,7 +211,8 @@ function classifyAction(label) {
 let DATA = null;
 let streetIdx = 0;
 let nodeIdx = 0;   // index into current street's nodes[]
-let selectedCombo = null;
+let selectedCombo = null;      // hand-class label: "AKs", "AA", "AKo"
+let selectedSpecific = null;   // concrete combo "AhKh", or null = class average
 let playerPerspective = null; // 'oop' or 'ip' — null means "show acting player"
 let nodeIndex = {}; // "line|streetIdx" → node array index
 let pathHistory = [];
@@ -237,6 +257,7 @@ function initViewer() {
   streetIdx = 0;
   nodeIdx = 0;
   selectedCombo = null;
+  selectedSpecific = null;
   playerPerspective = null;
   pathHistory = [];
   buildNodeIndex();
@@ -431,13 +452,16 @@ function renderGrid(node, board) {
 
       if (cell.blocked) {
         html += '<td class="blocked' + selClass + '"></td>';
-      } else if (!cell.hand) {
+      } else if (!cell.hands || cell.hands.length === 0) {
         // Empty cell (e.g., suited cell for offsuit combo not in range)
         html += '<td style="background:#161b22;cursor:default"></td>';
       } else {
         const bg = cellColor(cell.strategy, node.actions);
+        const title = cell.hands.length > 1
+          ? (comboKey + ' · ' + cell.hands.length + ' combos (avg)')
+          : (comboKey + ' · ' + cell.hands[0].combo);
         html += '<td class="' + selClass + '" style="background:' + bg +
-          '" onclick="selectCombo(\'' + comboKey + '\')" title="' + comboKey + '">';
+          '" onclick="selectCombo(\'' + comboKey + '\')" title="' + title + '">';
         html += '<div class="combo-label">' + cell.label + '</div>';
         if (cell.maxFreq > 0 && cell.maxFreq < 0.99) {
           html += '<div class="freq">' + Math.round(cell.maxFreq * 100) + '%</div>';
@@ -452,49 +476,74 @@ function renderGrid(node, board) {
   return html;
 }
 
+/// Uniform average of strategies / EVs across the concrete combos in a class cell.
+function averageHands(hands) {
+  if (!hands || hands.length === 0) {
+    return { strategy: null, ev: null, maxFreq: 0 };
+  }
+  const nA = hands[0].strategy ? hands[0].strategy.length : 0;
+  const strategy = new Array(nA).fill(0);
+  let evSum = 0, evCount = 0;
+  for (const h of hands) {
+    for (let i = 0; i < nA; i++) strategy[i] += (h.strategy && h.strategy[i]) || 0;
+    if (h.ev !== null && h.ev !== undefined && Number.isFinite(h.ev)) {
+      evSum += h.ev;
+      evCount += 1;
+    }
+  }
+  for (let i = 0; i < nA; i++) strategy[i] /= hands.length;
+  return {
+    strategy: strategy,
+    ev: evCount > 0 ? evSum / evCount : null,
+    maxFreq: nA > 0 ? Math.max.apply(null, strategy) : 0,
+  };
+}
+
+function handsMatchingLabel(handMap, label) {
+  const out = [];
+  for (const combo in handMap) {
+    if (comboToLabel(combo) === label) out.push(handMap[combo]);
+  }
+  // Stable suit order for the drill-down list.
+  out.sort(function(a, b) { return a.combo < b.combo ? -1 : a.combo > b.combo ? 1 : 0; });
+  return out;
+}
+
 function computeGridCell(r1, r2, handMap, blockedSet) {
   // Determine if this cell represents suited, offsuit, or pair
   const isPair = (r1 === r2);
   const isSuited = (r1 < r2);  // upper right = suited
   const isOffsuit = (r1 > r2); // lower left = offsuit
+  const suits = ['s','h','d','c'];
 
   if (isPair) {
-    // Pair: find any combo matching this pair
-    // Pair is suited or offsuit doesn't matter — all combos of same rank
     const rank = RANKS[r1];
-    let hand = null;
-    // Try all suit combinations
-    const suits = ['s','h','d','c'];
-    for (let i = 0; i < 4 && !hand; i++) {
-      for (let j = i+1; j < 4 && !hand; j++) {
-        const combo = rank + suits[i] + rank + suits[j];
-        if (handMap[combo]) hand = handMap[combo];
-        const combo2 = rank + suits[j] + rank + suits[i];
-        if (!hand && handMap[combo2]) hand = handMap[combo2];
-      }
-    }
     const label = rank + rank;
-    // Check blocked: pair is fully blocked only if 3+ suits of this rank are on board
+    const hands = handsMatchingLabel(handMap, label);
+    const avg = averageHands(hands);
+    // Fully blocked only if 3+ suits of this rank are on board.
     const ri = RANK_MAP[rank];
     let blockedSuits = 0;
     for (let s = 0; s < 4; s++) {
       if (blockedSet.has(ri * 4 + s)) blockedSuits++;
     }
     const blocked = blockedSuits >= 3;
-    return { hand, label, blocked, comboKey: label, strategy: hand ? hand.strategy : null, maxFreq: hand ? Math.max(...hand.strategy) : 0, blockedSuits: blockedSuits };
+    return {
+      hands: hands,
+      label: label,
+      blocked: blocked,
+      comboKey: label,
+      strategy: avg.strategy,
+      ev: avg.ev,
+      maxFreq: avg.maxFreq,
+    };
   }
 
   if (isSuited) {
-    // Suited: find any same-suit combo
     const rHi = RANKS[r1], rLo = RANKS[r2];
-    let hand = null;
-    const suits = ['s','h','d','c'];
-    for (const s of suits) {
-      const combo = rHi + s + rLo + s;
-      if (handMap[combo]) { hand = handMap[combo]; break; }
-    }
     const label = rHi + rLo + 's';
-    // Blocked if either rank has all suits blocked
+    const hands = handsMatchingLabel(handMap, label);
+    const avg = averageHands(hands);
     const riHi = RANK_MAP[rHi], riLo = RANK_MAP[rLo];
     let blocked = true;
     for (const s of suits) {
@@ -502,26 +551,23 @@ function computeGridCell(r1, r2, handMap, blockedSet) {
         blocked = false; break;
       }
     }
-    return { hand, label, blocked, comboKey: label, strategy: hand ? hand.strategy : null, maxFreq: hand ? Math.max(...hand.strategy) : 0 };
+    return {
+      hands: hands,
+      label: label,
+      blocked: blocked,
+      comboKey: label,
+      strategy: avg.strategy,
+      ev: avg.ev,
+      maxFreq: avg.maxFreq,
+    };
   }
 
   if (isOffsuit) {
-    // Lower left (r1 > r2): offsuit. Here r1 is lower rank (bigger index), r2 is higher rank.
-    // So row = lower card rank, col = higher card rank
+    // Lower left (r1 > r2): offsuit. Row = lower rank, col = higher rank.
     const rHi2 = RANKS[r2], rLo2 = RANKS[r1];
-    let hand = null;
-    const suits = ['s','h','d','c'];
-    for (const s1 of suits) {
-      for (const s2 of suits) {
-        if (s1 === s2) continue;
-        const combo = rHi2 + s1 + rLo2 + s2;
-        if (handMap[combo]) { hand = handMap[combo]; break; }
-        const combo2 = rHi2 + s2 + rLo2 + s1;
-        if (!hand && handMap[combo2]) hand = handMap[combo2];
-      }
-      if (hand) break;
-    }
     const label = rHi2 + rLo2 + 'o';
+    const hands = handsMatchingLabel(handMap, label);
+    const avg = averageHands(hands);
     const riHi = RANK_MAP[rHi2], riLo = RANK_MAP[rLo2];
     let blocked = true;
     for (const s1 of suits) {
@@ -533,10 +579,18 @@ function computeGridCell(r1, r2, handMap, blockedSet) {
       }
       if (!blocked) break;
     }
-    return { hand, label, blocked, comboKey: label, strategy: hand ? hand.strategy : null, maxFreq: hand ? Math.max(...hand.strategy) : 0 };
+    return {
+      hands: hands,
+      label: label,
+      blocked: blocked,
+      comboKey: label,
+      strategy: avg.strategy,
+      ev: avg.ev,
+      maxFreq: avg.maxFreq,
+    };
   }
 
-  return { hand: null, label: '', blocked: false, comboKey: '', strategy: null, maxFreq: 0 };
+  return { hands: [], label: '', blocked: false, comboKey: '', strategy: null, ev: null, maxFreq: 0 };
 }
 
 function cellColor(strategy, actions) {
@@ -575,46 +629,109 @@ function dominantAction(strategy, actions) {
 }
 
 // ── Detail panel ────────────────────────────────────────────────────────────
+function renderStrategyBars(htmlActions, strategy) {
+  let html = '';
+  if (!strategy) return html;
+  for (let i = 0; i < strategy.length; i++) {
+    const pct = strategy[i];
+    if (pct <= 0) continue;
+    const cls = classifyAction(htmlActions[i]);
+    const col = ACTION_COLORS[cls] || [0x88,0x88,0x88];
+    const barW = Math.max(pct * 100, 2);
+    html += '<div class="action-bar">';
+    html += '<span class="action-label">' + htmlActions[i] + '</span>';
+    html += '<span class="action-bar-fill" style="width:' + barW + 'px;background:rgb(' +
+      col.join(',') + ')"></span>';
+    html += '<span class="action-pct">' + (pct * 100).toFixed(1) + '%</span>';
+    html += '</div>';
+  }
+  return html;
+}
+
 function renderDetail(node) {
   let html = '<div class="detail-panel">';
 
   if (selectedCombo) {
-    // Find the hand data
-    let hand = null;
+    const classHands = [];
     for (const h of node.hands) {
-      // Match by combo name or by label
-      if (h.combo === selectedCombo || comboToLabel(h.combo) === selectedCombo) {
-        hand = h; break;
-      }
+      if (comboToLabel(h.combo) === selectedCombo) classHands.push(h);
     }
-    if (hand) {
-      html += '<h3>Selected Hand</h3>';
-      html += '<div class="combo-name">' + formatCombo(hand.combo) + '</div>';
-      if (hand.ev !== null && hand.ev !== undefined) {
-        html += '<div class="ev-line">EV: <span class="ev-val">' +
-          (hand.ev >= 0 ? '+' : '') + hand.ev.toFixed(2) + '</span></div>';
-      } else {
-        html += '<div class="ev-line">EV: <span class="ev-val">—</span></div>';
+    classHands.sort(function(a, b) {
+      return a.combo < b.combo ? -1 : a.combo > b.combo ? 1 : 0;
+    });
+
+    if (classHands.length === 0) {
+      html += '<div class="no-data">Hand not in range</div>';
+    } else {
+      // Prefer a concrete combo if still present; otherwise class average.
+      let specific = null;
+      if (selectedSpecific) {
+        for (const h of classHands) {
+          if (h.combo === selectedSpecific) { specific = h; break; }
+        }
+        if (!specific) selectedSpecific = null;
       }
-      for (let i = 0; i < hand.strategy.length; i++) {
-        const pct = hand.strategy[i];
-        if (pct <= 0) continue;
-        const cls = classifyAction(node.actions[i]);
-        const col = ACTION_COLORS[cls] || [0x88,0x88,0x88];
-        const barW = Math.max(pct * 100, 2);
-        html += '<div class="action-bar">';
-        html += '<span class="action-label">' + node.actions[i] + '</span>';
-        html += '<span class="action-bar-fill" style="width:' + barW + 'px;background:rgb(' +
-          col.join(',') + ')"></span>';
-        html += '<span class="action-pct">' + (pct * 100).toFixed(1) + '%</span>';
+
+      if (specific) {
+        html += '<h3>Selected Combo</h3>';
+        html += '<div class="combo-name">' + formatCombo(specific.combo) + '</div>';
+        html += '<div class="avg-badge">' + selectedCombo +
+          ' · click again in the list for class average</div>';
+        if (specific.ev !== null && specific.ev !== undefined) {
+          html += '<div class="ev-line">EV: <span class="ev-val">' +
+            (specific.ev >= 0 ? '+' : '') + specific.ev.toFixed(2) + '</span></div>';
+        } else {
+          html += '<div class="ev-line">EV: <span class="ev-val">—</span></div>';
+        }
+        html += renderStrategyBars(node.actions, specific.strategy);
+      } else {
+        const avg = averageHands(classHands);
+        html += '<h3>Selected Hand</h3>';
+        html += '<div class="combo-name">' + selectedCombo + '</div>';
+        if (classHands.length > 1) {
+          html += '<div class="avg-badge">Average of ' + classHands.length +
+            ' combos · click a combo below to drill in</div>';
+        } else {
+          html += '<div class="avg-badge">' + formatCombo(classHands[0].combo) + '</div>';
+        }
+        if (avg.ev !== null && avg.ev !== undefined) {
+          html += '<div class="ev-line">EV: <span class="ev-val">' +
+            (avg.ev >= 0 ? '+' : '') + avg.ev.toFixed(2) + '</span></div>';
+        } else {
+          html += '<div class="ev-line">EV: <span class="ev-val">—</span></div>';
+        }
+        html += renderStrategyBars(node.actions, avg.strategy);
+      }
+
+      if (classHands.length > 1) {
+        html += '<div class="combo-list">';
+        html += '<h4>Combos in class</h4>';
+        // Average row
+        const avgActive = !selectedSpecific ? ' active' : '';
+        html += '<div class="combo-row' + avgActive + '" onclick="selectSpecificCombo(null)">';
+        html += '<span class="combo-txt">Average (' + classHands.length + ')</span>';
+        const avg = averageHands(classHands);
+        if (avg.ev !== null) {
+          html += '<span class="combo-ev">' + (avg.ev >= 0 ? '+' : '') + avg.ev.toFixed(1) + '</span>';
+        }
+        html += '</div>';
+        for (const h of classHands) {
+          const active = (selectedSpecific === h.combo) ? ' active' : '';
+          html += '<div class="combo-row' + active + '" onclick="selectSpecificCombo(\'' +
+            h.combo + '\')">';
+          html += '<span class="combo-txt">' + formatCombo(h.combo) + '</span>';
+          if (h.ev !== null && h.ev !== undefined) {
+            html += '<span class="combo-ev">' + (h.ev >= 0 ? '+' : '') + h.ev.toFixed(1) + '</span>';
+          }
+          html += '</div>';
+        }
         html += '</div>';
       }
-    } else {
-      html += '<div class="no-data">Hand not in range</div>';
     }
   } else {
     html += '<h3>Hand Detail</h3>';
-    html += '<div style="color:#8b949e;font-size:12px">Click a cell to see per-hand strategy and EV.</div>';
+    html += '<div style="color:#8b949e;font-size:12px">Click a cell to see per-hand strategy and EV. ' +
+      'Cells with multiple combos show a suit-averaged strategy.</div>';
     if (node.hands.length > 0 && node.hands[0].ev !== null) {
       html += '<div style="margin-top:12px;font-size:11px;color:#8b949e">';
       html += node.hands.filter(h => h.ev !== null).length + ' combos with EV data';
@@ -628,7 +745,14 @@ function renderDetail(node) {
 
 function comboToLabel(combo) {
   if (combo.length < 4) return combo;
-  const r1 = combo[0], s1 = combo[1], r2 = combo[2], s2 = combo[3];
+  let r1 = combo[0], s1 = combo[1], r2 = combo[2], s2 = combo[3];
+  // JSON combos are canonical low-card-index first (e.g. "KsAs"). Labels use
+  // high-card-first poker order so they match the 13×13 grid ("AKs").
+  if (RANK_MAP[r1.toUpperCase()] > RANK_MAP[r2.toUpperCase()]) {
+    const tr = r1, ts = s1;
+    r1 = r2; s1 = s2;
+    r2 = tr; s2 = ts;
+  }
   if (r1 === r2) return r1 + r2; // pair
   if (s1 === s2) return r1 + r2 + 's'; // suited
   return r1 + r2 + 'o'; // offsuit
@@ -636,14 +760,35 @@ function comboToLabel(combo) {
 
 function formatCombo(combo) {
   if (combo.length < 4) return combo;
-  return combo[0] + SUIT_SYMBOLS[combo[1].toLowerCase()] + ' ' +
-    combo[2] + SUIT_SYMBOLS[combo[3].toLowerCase()];
+  let r1 = combo[0], s1 = combo[1], r2 = combo[2], s2 = combo[3];
+  if (RANK_MAP[r1.toUpperCase()] > RANK_MAP[r2.toUpperCase()]) {
+    const tr = r1, ts = s1;
+    r1 = r2; s1 = s2;
+    r2 = tr; s2 = ts;
+  }
+  return r1 + SUIT_SYMBOLS[s1.toLowerCase()] + ' ' +
+    r2 + SUIT_SYMBOLS[s2.toLowerCase()];
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 function selectCombo(key) {
-  if (selectedCombo === key) { selectedCombo = null; }
-  else { selectedCombo = key; }
+  if (selectedCombo === key && !selectedSpecific) {
+    selectedCombo = null;
+    selectedSpecific = null;
+  } else {
+    selectedCombo = key;
+    selectedSpecific = null;
+  }
+  render();
+}
+
+function selectSpecificCombo(combo) {
+  // null clears concrete selection and shows the class average.
+  if (combo === null || selectedSpecific === combo) {
+    selectedSpecific = null;
+  } else {
+    selectedSpecific = combo;
+  }
   render();
 }
 
@@ -656,6 +801,7 @@ function changeStreet(idx) {
   streetIdx = parseInt(idx);
   nodeIdx = 0;
   selectedCombo = null;
+  selectedSpecific = null;
   pathHistory = [];
   render();
 }
@@ -687,6 +833,7 @@ function navigateAction(actionIdx) {
   streetIdx = found.streetIdx;
   nodeIdx = found.nodeIdx;
   selectedCombo = null;
+  selectedSpecific = null;
   render();
 }
 
@@ -696,6 +843,7 @@ function goBack() {
   streetIdx = prev.streetIdx;
   nodeIdx = prev.nodeIdx;
   selectedCombo = null;
+  selectedSpecific = null;
   render();
 }
 
@@ -716,7 +864,12 @@ function arraysEqual(a, b) {
 document.addEventListener('keydown', e => {
   if (!DATA) return;
   if (e.key === 'Backspace') { e.preventDefault(); goBack(); }
-  else if (e.key === 'Escape') { e.preventDefault(); selectedCombo = null; render(); }
+  else if (e.key === 'Escape') {
+    e.preventDefault();
+    if (selectedSpecific) { selectedSpecific = null; }
+    else { selectedCombo = null; }
+    render();
+  }
   if (e.key === 'ArrowLeft') { e.preventDefault(); if (streetIdx > 0) changeStreet(streetIdx - 1); }
   if (e.key === 'ArrowRight') { e.preventDefault(); if (streetIdx < DATA.streets.length - 1) changeStreet(streetIdx + 1); }
 });

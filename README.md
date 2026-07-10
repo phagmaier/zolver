@@ -172,8 +172,9 @@ Opens an **interactive strategy viewer** in your browser.
 - The 13×13 grid shows the acting player's range. Each cell is color-coded by
   what the strategy does with that hand — green = check, orange = bet, red =
   fold, purple = raise, pink = all-in. Brighter = higher probability.
-- **Click any cell** to see the exact strategy breakdown and EV for that
-  specific hand in the detail panel on the right.
+- **Click any cell** to see the strategy breakdown and EV in the detail
+  panel. Cells with multiple combos show a **suit-averaged** strategy; expand
+  the combo list in the detail panel to drill into a specific combo.
 - **Click the action buttons** below the grid (\"bet 66\", \"raise 110\", etc.)
   to navigate deeper into the game tree and see how the opponent responds.
 - Use the **player toggle** (OOP / IP / Acting) to view the other player's
@@ -197,6 +198,10 @@ spot without touching a text editor.
    grid automatically grays out hands that share cards with the board.
 
 2. **Set OOP's range** — in the left panel (\"OOP Range\" tab):
+   - **Paste a range string** (Equilab/Flopzilla style) into the box under the
+     grid — e.g. `QQ+, AKs, A5s-A2s:0.5, T9s+` — and hit **Apply** (or Enter).
+     This replaces the active tab's grid. Invalid tokens toast an error and
+     leave the previous range alone.
    - **Left-click** a cell to include that hand in the range (blue highlight).
      Click again to remove it.
    - **Right-click** a cell to open a weight slider — set the hand to 75%, 50%,
@@ -221,9 +226,11 @@ spot without touching a text editor.
    thread count, SIMD, prune options, and DCFR parameters (hidden when
    CFR+ is selected).
 
-6. **Export** — the **TOML Preview** panel updates live as you edit. Click
-   **Copy to Clipboard** or **Download spot.toml**, then run:
-   `zolver solve spot.toml -o results.json`
+6. **Export / Import** — the **TOML Preview** panel updates live as you edit.
+   Click **Copy to Clipboard** or **Download spot.toml**, then run:
+   `zolver solve spot.toml -o results.json`. Use **Import TOML** (header) or
+   **Import file…** under the preview to reload an existing `spot.toml` back
+   into the builder (board, ranges, sizings, solver knobs).
 
 ### `zolver example [--output <path>]`
 
