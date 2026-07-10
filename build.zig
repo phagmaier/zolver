@@ -115,6 +115,29 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // Thread-pool characterization benchmark (follow-up work item 2). Reuses the
+    // `zolver` module so it can drive the real solver/exploitability/output paths.
+    // Run: `zig build bench-threads -Doptimize=ReleaseFast -- <config.toml>`.
+    const bench_threads = b.addExecutable(.{
+        .name = "bench-threads",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_threads.zig"),
+            .target = target,
+            // Always ReleaseFast: a timing benchmark in Debug is meaningless (and
+            // painfully slow), so pin it regardless of the top-level -Doptimize.
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zolver", .module = mod },
+            },
+        }),
+    });
+    const bench_threads_run = b.addRunArtifact(bench_threads);
+    if (b.args) |args| {
+        bench_threads_run.addArgs(args);
+    }
+    const bench_threads_step = b.step("bench-threads", "Thread-pool wall+CPU benchmark (pass a config.toml after --)");
+    bench_threads_step.dependOn(&bench_threads_run.step);
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.

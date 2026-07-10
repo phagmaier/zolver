@@ -425,10 +425,14 @@ turn and river; terminal nodes are folds or showdowns.
 
 ### Suit isomorphism
 
-The solver currently evaluates the complete physical 49×48 turn/river space.
-The codebase retains suit-canonicalization utilities for output and future use,
-but solve-time compression is disabled until it can remap private-hand reaches
-and values for every orbit member without changing board-blocking semantics.
+By default (`compress_suits = true`) the solver collapses suit-symmetric
+turn/river runouts into canonical representatives, exactly remapping each
+player's private-hand reaches and returned values for every orbit member — so
+board-blocking semantics are preserved and the result matches the full physical
+traversal. This is where the memory savings on symmetric boards come from
+(monotone flops shrink the runout tables ~71%). Set `compress_suits = false` to
+evaluate the complete physical 49×48 space directly as a correctness oracle;
+rainbow flops have no board symmetry, so the two modes coincide there.
 
 ### Exploitability
 
@@ -464,10 +468,19 @@ solver memory plus thread-dependent working arenas.
 | SRP, three sizings | 1,108A / 1,613T | 3,611.4 MB | 1,417 | 2.3985% |
 | SRP, raise cap 2/1/1 | 372A / 493T | 920.1 MB | 332 | 1.6058% |
 
-Texture no longer changes runout-table size or total memory: the matched
-rainbow, two-tone, and monotone spots all use the complete physical chance
-space. Their small runtime difference comes from board-specific evaluation work,
-not suit-orbit compression. Extra bet sizes remain the dominant capacity lever.
+These are the **physical-oracle** numbers (`compress_suits = false`), so texture
+does not change runout-table size or total memory — the matched rainbow,
+two-tone, and monotone spots all traverse the complete physical chance space, and
+their small runtime difference is board-specific evaluation work. With the
+default `compress_suits = true`, symmetric boards shrink dramatically (two-tone
+466.2 MB, monotone 221.9 MB) while rainbow is unchanged. Extra bet sizes remain
+the dominant capacity lever.
+
+A separate **thread-pool characterization** (wall + CPU time per phase at
+1/2/4/8 threads) lives in [`bench/README.md`](bench/README.md): the solve
+iteration scales ~6.3× on 8 threads, but the exploitability and output passes are
+serial and the current pool busy-spins idle workers — the motivation for the
+planned spin-then-park pool.
 
 ## Limitations
 
@@ -486,19 +499,39 @@ and human-readable summaries. Convergence is cross-validated against TexasSolver
 
 ## Building
 
-```bash
-# Debug build (assertions + invariant checks)
-zig build
+Requires **Zig 0.16.0**. The project is a single Zig package (`build.zig`)
+exposing several steps, plus a few standalone measurement binaries and helper
+scripts.
 
-# Release build (fast)
-zig build -Doptimize=ReleaseFast
+### Build steps (`zig build <step>`)
 
-# Run the test suite
-zig build test
+| Step | Command | Purpose |
+|------|---------|---------|
+| *(default)* | `zig build` | Debug build → `zig-out/bin/zolver` (assertions + `debug_invariants` NaN/Inf sweeps enabled). |
+| *(default, release)* | `zig build -Doptimize=ReleaseFast` | Optimized build — use this for anything you actually run or time. |
+| `run` | `zig build run -- solve spot.toml --summary` | Build and launch the CLI; everything after `--` is forwarded to `zolver`. |
+| `test` | `zig build test` | Full test suite (~218 tests: unit, suit-compression parity, serial-vs-threaded determinism). |
+| `bench-threads` | `zig build bench-threads -- <spot.toml> [flags]` | Thread-pool benchmark: wall **and** CPU time for the solve / exploitability / output passes at 1/2/4/8 threads. Always compiles ReleaseFast. Flags: `--iters N --warmup N --exploit-reps N --output-reps N`. Prints JSON to stdout, a table to stderr. |
 
-# Run benchmarks
-zig run -OReleaseFast src/bench.zig
-```
+### Standalone measurement binaries (`zig run`)
+
+These time work rather than assert; they're intentionally excluded from `zig build test`.
+
+| Command | Purpose |
+|---------|---------|
+| `zig run -OReleaseFast src/bench.zig` | Kernel microbenchmarks (regret matching, DCFR update, strategy accumulation, showdown sweep) plus one full CFR iteration with a memory-bandwidth figure. |
+| `PERF_ITERS=40 PERF_THREADS=8 zig run -OReleaseFast src/perf_profile.zig` | Runs *only* the solve hot path in a tight loop, for profiling under `perf record --call-graph dwarf`. |
+
+### Benchmark & validation scripts (`bench/`)
+
+| Command | Purpose |
+|---------|---------|
+| `python3 bench/run_bench.py [spot.toml ...]` | End-to-end solve benchmark over `bench/spots/` → `bench/out/results.md` + JSON. One warm-up + three median samples; asserts the full 49-turn / 2,352-runout space. |
+| `bench/run_thread_bench.sh [spot.toml ...]` | Runs `bench-threads` across the texture spots → `bench/out/threads/` (+ a combined `summary.md`). |
+| `TEXASSOLVER_DIR=/path/to/TexasSolver bench/run_validation.sh v1 v1b v2` | Cross-validates flop strategies against TexasSolver v0.2.0. |
+
+See [`bench/README.md`](bench/README.md) for methodology, results, and how the
+harness has caught real bugs.
 
 ## License
 

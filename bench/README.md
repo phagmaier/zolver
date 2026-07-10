@@ -13,6 +13,7 @@ bench/
   validation/zolver/*.toml   # Zolver cross-validation configs
   validation/texassolver/*.txt
   run_bench.py               # runs spots/, parses output, writes out/results.md
+  run_thread_bench.sh        # thread-pool wall+CPU benchmark (1/2/4/8 threads)
   run_validation.sh          # runs both solvers + compare.py for each Vn
   compare.py                 # aligns Zolver vs TexasSolver flop strategies
   out/                       # generated outputs (gitignored if you prefer)
@@ -25,6 +26,69 @@ zig build -Doptimize=ReleaseFast
 python3 bench/run_bench.py                      # 1 warm-up + 3 median samples per spot
 TEXASSOLVER_DIR=/path/to/TexasSolver-v0.2.0-Linux bench/run_validation.sh v1b v2
 ```
+
+## Thread-pool benchmark (follow-up work item 2)
+
+Before touching the persistent pool we measure what it actually costs. The pool
+busy-spins its idle workers (`src/threading.zig` `workerLoop`), so wall time
+alone hides the waste. `bench/run_thread_bench.sh` drives the three real solver
+consumers — a **solve iteration**, an **exploitability pass**, and the default
+**JSON output pass** — at 1/2/4/8 threads and reports, for each, both wall time
+and total process CPU time. The key column is `cores_busy = CPU / wall`: the
+average number of cores kept busy, spinning included. On a serial phase that
+number climbing toward the thread count for no speedup is pure spin overhead a
+spin-then-park pool could reclaim.
+
+```bash
+zig build bench-threads -- bench/spots/1_srp_dry.toml   # one spot, prints a table + JSON
+bench/run_thread_bench.sh                               # all 3 texture spots -> out/threads/
+```
+
+The binary is pinned to ReleaseFast in `build.zig`; JSON goes to stdout, the
+human table to stderr. Defaults are deliberately low-rep (a single long serial
+call already gives a stable CPU ratio); raise them with `--iters/--warmup/`
+`--exploit-reps/--output-reps` for tighter wall numbers.
+
+Measured at `d933f48`, ReleaseFast, DCFR, 16 logical CPUs, on `1_srp_dry`
+(rainbow); `2_srp_twotone` and `3_srp_monotone` agree within ~5% (all use the
+764.6 MB physical runout space). `cores_busy` is CPU/wall; efficiency is
+speedup ÷ threads.
+
+| Phase | 1t | 2t | 4t | 8t | 8t speedup | 8t cores_busy | 8t efficiency |
+|-------|----|----|----|----|-----------|---------------|---------------|
+| solve (ms/iter)   | 1239 | 632 | 337 | **197** | 6.29× | 7.93 | **79%** |
+| exploit (ms/pass) | 3107 | 2187 | 1887 | **1741** | 1.78× | 7.97 | **22%** |
+| output (ms/pass)  | 24457 | 21382 | 21136 | **21751** | 1.12× | 7.98 | **~0%** |
+
+Findings:
+- **The solve iteration parallelizes well** (6.3× on 8 threads, 79%
+  efficiency). This is the hot path and it earns its threads. The ~20% gap to
+  linear is the serial flop descent plus busy-spin in the sub-millisecond gaps
+  between fork–join batches.
+- **Exploitability barely scales but burns every core** (1.78× for 8 cores
+  pinned, 22% efficiency). It runs four fork–join passes (`bestResponseEV` ×2,
+  `averageEV` ×2) each with a serial reduction, so the pool spends most of its
+  time spinning around barriers rather than working.
+- **The output pass is serial and pins the whole machine for nothing**: wall
+  time is flat across thread counts (~22 s) while `cores_busy` climbs to 7.98 —
+  ~7 cores busy-spinning for the entire ~22 s dump, zero speedup. This is the
+  single clearest waste the benchmark exposes.
+- **Note on the headline ms/iter:** the pure solve iteration is ~197 ms at 8
+  threads, *below* the 296–320 ms/iter in the table above — because that older
+  number folds in the periodic exploitability passes and init, which this
+  harness times separately. The solver did **not** get slower after the
+  compression/accuracy work.
+
+**Conclusion (item 2 decision): the busy-spin pool does matter.** Whenever the
+main thread does serial work — all of output, most of exploitability, and the
+per-iteration flop descent — the N−1 idle workers each burn a full core doing
+nothing. On a laptop that means needless heat, throttling, and battery drain,
+and it starves any co-resident process of CPU during serial phases. An adaptive
+spin-then-park pool (short bounded spin to cover the sub-ms solve-loop gaps,
+then park on a futex/`std.Thread` primitive until the next generation bump) would
+reclaim essentially all of it with negligible impact on the solve hot path,
+while keeping the existing deterministic canonical-order reduction. That work is
+the remaining half of follow-up item 2.
 
 ## Physical-runout speed results (8 threads, 128 forced iterations)
 
