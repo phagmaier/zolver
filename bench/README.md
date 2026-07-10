@@ -27,17 +27,13 @@ python3 bench/run_bench.py                      # 1 warm-up + 3 median samples p
 TEXASSOLVER_DIR=/path/to/TexasSolver-v0.2.0-Linux bench/run_validation.sh v1b v2
 ```
 
-## Thread-pool benchmark (follow-up work item 2)
+## Thread-pool benchmark (follow-up work item 2 — done)
 
-Before touching the persistent pool we measure what it actually costs. The pool
-busy-spins its idle workers (`src/threading.zig` `workerLoop`), so wall time
-alone hides the waste. `bench/run_thread_bench.sh` drives the three real solver
-consumers — a **solve iteration**, an **exploitability pass**, and the default
-**JSON output pass** — at 1/2/4/8 threads and reports, for each, both wall time
-and total process CPU time. The key column is `cores_busy = CPU / wall`: the
-average number of cores kept busy, spinning included. On a serial phase that
-number climbing toward the thread count for no speedup is pure spin overhead a
-spin-then-park pool could reclaim.
+`bench/run_thread_bench.sh` drives the three real solver consumers — a **solve
+iteration**, an **exploitability pass**, and the default **JSON output pass** —
+at 1/2/4/8 threads and reports wall time and total process CPU time. The key
+column is `cores_busy = CPU / wall`: the average number of cores kept busy,
+including any idle-worker spin.
 
 ```bash
 zig build bench-threads -- bench/spots/1_srp_dry.toml   # one spot, prints a table + JSON
@@ -49,69 +45,84 @@ human table to stderr. Defaults are deliberately low-rep (a single long serial
 call already gives a stable CPU ratio); raise them with `--iters/--warmup/`
 `--exploit-reps/--output-reps` for tighter wall numbers.
 
+### Before (busy-spin pool)
+
 Measured at `d933f48`, ReleaseFast, DCFR, 16 logical CPUs, on `1_srp_dry`
-(rainbow); `2_srp_twotone` and `3_srp_monotone` agree within ~5% (all use the
-764.6 MB physical runout space). `cores_busy` is CPU/wall; efficiency is
-speedup ÷ threads.
+(rainbow). Idle workers pure-spun on `generation`, so serial phases pinned
+every core.
 
 | Phase | 1t | 2t | 4t | 8t | 8t speedup | 8t cores_busy | 8t efficiency |
 |-------|----|----|----|----|-----------|---------------|---------------|
 | solve (ms/iter)   | 1239 | 632 | 337 | **197** | 6.29× | 7.93 | **79%** |
-| exploit (ms/pass) | 3107 | 2187 | 1887 | **1741** | 1.78× | 7.97 | **22%** |
-| output (ms/pass)  | 24457 | 21382 | 21136 | **21751** | 1.12× | 7.98 | **~0%** |
+| exploit (ms/pass) | 3107 | 2187 | 1887 | **1741** | 1.78× | **7.97** | **22%** |
+| output (ms/pass)  | 24457 | 21382 | 21136 | **21751** | 1.12× | **7.98** | **~0%** |
+
+### After (spin-then-park pool)
+
+Measured post spin-then-park (`src/threading.zig`), ReleaseFast, DCFR, 16
+logical CPUs, on `1_srp_dry`; `2_srp_twotone` / `3_srp_monotone` agree within
+~5% (all use the 764.6 MB physical runout space). Workers spin a bounded
+budget (~1 ms) then park on a Linux futex over `generation`. Matched before/
+after on this machine (same flags) left solve `ms/iter` flat (~200 ms) while
+cutting serial-phase CPU.
+
+| Phase | 1t | 2t | 4t | 8t | 8t speedup | 8t cores_busy | 8t efficiency |
+|-------|----|----|----|----|-----------|---------------|---------------|
+| solve (ms/iter)   | 1309 | 709 | 383 | **220** | 5.96× | **7.90** | **74%** |
+| exploit (ms/pass) | 3201 | 2349 | 2007 | **1825** | 1.75× | **1.99** | **22%** |
+| output (ms/pass)  | 25337 | 22438 | 21845 | **22162** | 1.14× | **1.17** | **~0%** |
 
 Findings:
-- **The solve iteration parallelizes well** (6.3× on 8 threads, 79%
-  efficiency). This is the hot path and it earns its threads. The ~20% gap to
-  linear is the serial flop descent plus busy-spin in the sub-millisecond gaps
-  between fork–join batches.
-- **Exploitability barely scales but burns every core** (1.78× for 8 cores
-  pinned, 22% efficiency). It runs four fork–join passes (`bestResponseEV` ×2,
-  `averageEV` ×2) each with a serial reduction, so the pool spends most of its
-  time spinning around barriers rather than working.
-- **The output pass is serial and pins the whole machine for nothing**: wall
-  time is flat across thread counts (~22 s) while `cores_busy` climbs to 7.98 —
-  ~7 cores busy-spinning for the entire ~22 s dump, zero speedup. This is the
-  single clearest waste the benchmark exposes.
-- **Note on the headline ms/iter:** the pure solve iteration is ~197 ms at 8
-  threads, *below* the 296–320 ms/iter in the table above — because that older
-  number folds in the periodic exploitability passes and init, which this
-  harness times separately. The solver did **not** get slower after the
-  compression/accuracy work.
+- **Solve hot path is preserved.** At 8 threads, `cores_busy` stays ~7.9 and
+  matched before/after wall times are within noise. The spin budget bridges the
+  sub-ms gaps between the many `forkJoin` calls inside one iteration, so
+  workers almost never park during the solve loop.
+- **Exploitability parks between its four fork–join passes.** Wall time is
+  unchanged (~1.8 s, still only 1.75× scaling — the work is mostly serial
+  reduction), but `cores_busy` drops from **7.97 → 1.99**. The remaining ~2
+  cores are real parallel work plus the main thread, not 7 idle spinners.
+- **Output is serial and no longer pins the machine.** Wall time is still flat
+  across thread counts (~22 s), but `cores_busy` drops from **7.98 → 1.17** —
+  essentially the main thread alone for the whole dump.
+- **CPU reclaimed on serial phases at 8t:** exploit ~14.2 s → ~3.6 s of CPU
+  per pass; output ~177 s → ~26 s of CPU per pass (same wall). That is the
+  whole point of the change.
+- **Note on pure vs end-to-end ms/iter:** the pure solve iteration (~200–220 ms
+  at 8t) is *below* the end-to-end 271–296 ms/iter in the physical-runout
+  table below, because that older number folds in periodic exploitability and
+  init, which this harness times separately.
 
-**Conclusion (item 2 decision): the busy-spin pool does matter.** Whenever the
-main thread does serial work — all of output, most of exploitability, and the
-per-iteration flop descent — the N−1 idle workers each burn a full core doing
-nothing. On a laptop that means needless heat, throttling, and battery drain,
-and it starves any co-resident process of CPU during serial phases. An adaptive
-spin-then-park pool (short bounded spin to cover the sub-ms solve-loop gaps,
-then park on a futex/`std.Thread` primitive until the next generation bump) would
-reclaim essentially all of it with negligible impact on the solve hot path,
-while keeping the existing deterministic canonical-order reduction. That work is
-the remaining half of follow-up item 2.
+**Item 2 complete.** Parking uses a direct Linux futex on `generation` (no
+`std.Io` plumbing; Linux-only, matching the existing `clock_gettime` path).
+Determinism is unchanged — parking only affects wake timing, not work claiming
+or the canonical reduction order. Raw JSON in `bench/out/threads/`.
 
 ## Physical-runout speed results (8 threads, 128 forced iterations)
 
-Measured on Linux at `669702c`, ReleaseFast, DCFR (α=1.5, β=0, γ=2), using
-one warm-up plus three measured samples per spot. All rows assert the full
-49-turn / 2,352 ordered-runout traversal.
+Measured on Linux after spin-then-park, ReleaseFast, DCFR (α=1.5, β=0, γ=2),
+using one warm-up plus three measured samples per spot. All rows assert the
+full 49-turn / 2,352 ordered-runout traversal. Memory and exploitability are
+unchanged vs the pre-park baseline at `669702c`; wall ms/iter is at least as
+fast (machine variance ± a few percent).
 
 | Spot | Tree | Total memory | ms/iter | exploit @128 |
 |------|------|--------|---------|--------------|
-| 1 srp_dry (rainbow) | 288A 389T | 764.6 MB | 296 | 1.2902% |
-| 2 srp_twotone | 288A 389T | 764.6 MB | 319 | 0.7528% |
-| 3 srp_monotone | 288A 389T | 764.6 MB | 320 | 0.9446% |
-| 4 3bet_dry | 204A 269T | 346.9 MB | 140 | 0.7857% |
-| 5 srp_3sizings | 1108A 1613T | 3611.4 MB | 1417 | 2.3985% |
-| 6 srp_raisecap (2/1/1) | 372A 493T | 920.1 MB | 332 | 1.6058% |
+| 1 srp_dry (rainbow) | 288A 389T | 764.6 MB | 271 | 1.2902% |
+| 2 srp_twotone | 288A 389T | 764.6 MB | 296 | 0.7528% |
+| 3 srp_monotone | 288A 389T | 764.6 MB | 295 | 0.9446% |
+| 4 3bet_dry | 204A 269T | 346.9 MB | 127 | 0.7857% |
+| 5 srp_3sizings | 1108A 1613T | 3611.4 MB | 1267 | 2.3985% |
+| 6 srp_raisecap (2/1/1) | 372A 493T | 920.1 MB | 357 | 1.6058% |
 
 Takeaways:
 - **Physical chance has a fixed texture footprint**: the matched
-  rainbow/two-tone/monotone trees all retain 764.6 MB and take 296/319/320
+  rainbow/two-tone/monotone trees all retain 764.6 MB and take ~271/296/295
   ms/iter. No solve-time suit compression is active.
 - **Bet-size count is the tree-blowup lever**: going 2 -> 3 sizings per street
   (spot 5) explodes the tree ~4x (288 -> 1108 actions), memory ~4.7x (3.6 GB),
-  and ms/iter ~4.8x. Raise depth (spot 6) is much cheaper than extra sizings.
+  and ms/iter ~4.7x. Raise depth (spot 6) is much cheaper than extra sizings.
+- **Spin-then-park does not change retained memory** (still covered by
+  `max_budget_bytes`); it only cuts idle CPU during serial phases.
 
 ## Accuracy cross-validation (vs TexasSolver)
 

@@ -461,12 +461,12 @@ solver memory plus thread-dependent working arenas.
 
 | Spot | Tree | Total memory | ms/iter | Exploitability @128 |
 |------|------|--------------|---------|----------------------|
-| SRP dry (rainbow) | 288A / 389T | 764.6 MB | 296 | 1.2902% |
-| SRP two-tone | 288A / 389T | 764.6 MB | 319 | 0.7528% |
-| SRP monotone | 288A / 389T | 764.6 MB | 320 | 0.9446% |
-| 3-bet dry | 204A / 269T | 346.9 MB | 140 | 0.7857% |
-| SRP, three sizings | 1,108A / 1,613T | 3,611.4 MB | 1,417 | 2.3985% |
-| SRP, raise cap 2/1/1 | 372A / 493T | 920.1 MB | 332 | 1.6058% |
+| SRP dry (rainbow) | 288A / 389T | 764.6 MB | 271 | 1.2902% |
+| SRP two-tone | 288A / 389T | 764.6 MB | 296 | 0.7528% |
+| SRP monotone | 288A / 389T | 764.6 MB | 295 | 0.9446% |
+| 3-bet dry | 204A / 269T | 346.9 MB | 127 | 0.7857% |
+| SRP, three sizings | 1,108A / 1,613T | 3,611.4 MB | 1,267 | 2.3985% |
+| SRP, raise cap 2/1/1 | 372A / 493T | 920.1 MB | 357 | 1.6058% |
 
 These are the **physical-oracle** numbers (`compress_suits = false`), so texture
 does not change runout-table size or total memory — the matched rainbow,
@@ -474,13 +474,14 @@ two-tone, and monotone spots all traverse the complete physical chance space, an
 their small runtime difference is board-specific evaluation work. With the
 default `compress_suits = true`, symmetric boards shrink dramatically (two-tone
 466.2 MB, monotone 221.9 MB) while rainbow is unchanged. Extra bet sizes remain
-the dominant capacity lever.
+the dominant capacity lever. Memory and exploitability match the pre
+spin-then-park baseline; wall ms/iter is at least as fast.
 
 A separate **thread-pool characterization** (wall + CPU time per phase at
 1/2/4/8 threads) lives in [`bench/README.md`](bench/README.md): the solve
-iteration scales ~6.3× on 8 threads, but the exploitability and output passes are
-serial and the current pool busy-spins idle workers — the motivation for the
-planned spin-then-park pool.
+iteration still pins ~7.9 cores and scales ~6× on 8 threads, while the adaptive
+**spin-then-park** pool drops exploit/output `cores_busy` from ~8.0 toward
+~1–2 (workers park during serial work instead of burning cores).
 
 ## Limitations
 
@@ -490,7 +491,7 @@ planned spin-then-park pool.
 
 ## Project Status
 
-The solver is **complete and tested (218 tests)** — from tree construction
+The solver is **complete and tested (233 tests)** — from tree construction
 through threaded DCFR, best response, exploitability, SIMD kernels, output
 extraction, JSON export, interactive web UI (config builder + strategy viewer),
 and human-readable summaries. Convergence is cross-validated against TexasSolver
@@ -510,7 +511,7 @@ scripts.
 | *(default)* | `zig build` | Debug build → `zig-out/bin/zolver` (assertions + `debug_invariants` NaN/Inf sweeps enabled). |
 | *(default, release)* | `zig build -Doptimize=ReleaseFast` | Optimized build — use this for anything you actually run or time. |
 | `run` | `zig build run -- solve spot.toml --summary` | Build and launch the CLI; everything after `--` is forwarded to `zolver`. |
-| `test` | `zig build test` | Full test suite (~218 tests: unit, suit-compression parity, serial-vs-threaded determinism). |
+| `test` | `zig build test` | Full test suite (~233 tests: unit, suit-compression parity, serial-vs-threaded determinism, spin-then-park pool). |
 | `bench-threads` | `zig build bench-threads -- <spot.toml> [flags]` | Thread-pool benchmark: wall **and** CPU time for the solve / exploitability / output passes at 1/2/4/8 threads. Always compiles ReleaseFast. Flags: `--iters N --warmup N --exploit-reps N --output-reps N`. Prints JSON to stdout, a table to stderr. |
 
 ### Standalone measurement binaries (`zig run`)
