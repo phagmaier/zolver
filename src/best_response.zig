@@ -338,22 +338,26 @@ test "solve stops early when exploitability plateaus below no target" {
     var is = try buildInit(alloc, mono_flop, &oop, &ip);
     defer is.deinit();
 
-    // Unreachable target + high iteration cap: without stall detection this
-    // would run all 4096 iterations. With it, the solve stops once progress
-    // flatlines, well short of the cap.
+    // Unreachable target with an aggressive stall config: a check only counts
+    // as progress if exploitability drops by 90% in one interval, which DCFR
+    // never does. So after the first (baseline) check the detector trips within
+    // `patience` checks — here at t≈32 — far below `max_iterations`. Kept cheap
+    // (few iterations of the full-oracle walk) so it doesn't slow the Debug
+    // test suite; the stall *logic* is covered exhaustively by the unit tests
+    // above.
     var solver = try Solver.init(alloc, &is, .{
         .target_exploitability_pct = 0.0,
-        .max_iterations = 4096,
-        .check_interval = 16,
-        .stall_patience = 4,
-        .stall_rel_improvement = 0.01,
+        .max_iterations = 128,
+        .check_interval = 8,
+        .stall_patience = 3,
+        .stall_rel_improvement = 0.9,
     });
     defer solver.deinit();
 
     const result = solve(&solver);
     try testing.expect(result.stalled);
     try testing.expect(!result.converged);
-    try testing.expect(result.iterations < 4096);
+    try testing.expect(result.iterations < 128);
 }
 
 test "exploitability stays non-negative on a single-combo game" {

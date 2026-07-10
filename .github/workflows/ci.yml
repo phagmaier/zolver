@@ -8,11 +8,9 @@ on:
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    # Zolver is Linux-only by design: the thread pool parks workers on a raw
+    # Linux futex (see src/threading.zig), so it does not build on macOS/Windows.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

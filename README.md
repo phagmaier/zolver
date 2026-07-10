@@ -6,7 +6,8 @@ no cloud, no bloat. A config file and a terminal are all you need.
 
 ![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-238%20passing-brightgreen)
+![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)
 
 ```text
 $ zolver solve spot.toml --summary
@@ -56,7 +57,7 @@ theory optimal) strategy. It is not a poker bot or a real-time assistant.
 - **JSON output** — per-street strategy grids + per-hand EVs for any runout
 - **Helpful error messages** — `spot.toml:3: expected integer for 'game.initial_pot', got 'abc'`
 - **Exploitability measurement** — know exactly how close to Nash equilibrium you are
-- **Convergence stopping** — halts automatically once exploitability drops below your threshold
+- **Convergence stopping** — halts once exploitability hits your target, or automatically when it plateaus at the precision floor (no wasted iterations)
 - **Physical runouts** — evaluates every turn/river runout with private-card-aware blocking
 
 ## Quick Start
@@ -103,7 +104,8 @@ Running `zolver` with no arguments opens the config builder automatically.
 
 ### Build from source
 
-Requires **Zig 0.16.0**.
+Requires **Zig 0.16.0** on **Linux** (see [Limitations](#limitations) — the
+thread pool uses a Linux futex, so macOS/Windows are not supported).
 
 ```bash
 git clone https://github.com/phagmaier/zolver.git
@@ -111,6 +113,9 @@ cd zolver
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolver example
 ```
+
+Prebuilt Linux binaries (x86_64 and aarch64) are attached to each
+[release](https://github.com/phagmaier/zolver/releases).
 
 ## CLI Reference
 
@@ -357,6 +362,8 @@ ip  = "JJ+, AKs, KQs, A5s-A2s:0.5"
 | `prune_zero_reach` | boolean | `false` | Skip subtrees where the opponent has zero probability mass. Safe to enable. |
 | `use_simd` | boolean | `true` | Use SIMD vectorized kernels (8-wide f32). Recommended. |
 | `check_interval` | integer | `64` | Exploitability re-check cadence after iterations 32, 64, 128. |
+| `stall_patience` | integer | `5` | Stop early after this many exploitability checks with no real improvement (the solve has hit the precision floor). `0` disables. |
+| `stall_rel_improvement` | float | `0.01` | Minimum fractional drop in exploitability that counts as progress for `stall_patience`. |
 | `debug_invariants` | boolean | `true` (Debug) | Run NaN/Inf scans of regret arrays after every pass. |
 
 ### `[solver.dcfr]`
@@ -400,6 +407,8 @@ max_iterations = 1000
 target_exploitability_pct = 0.5
 num_threads = 4
 prune_zero_reach = true
+stall_patience = 5            # stop early once exploitability plateaus (0 = off)
+stall_rel_improvement = 0.01
 
 [solver.dcfr]
 alpha = 1.5
@@ -485,13 +494,22 @@ iteration still pins ~7.9 cores and scales ~6× on 8 threads, while the adaptive
 
 ## Limitations
 
+- **Linux only.** The thread pool parks idle workers on a raw Linux futex (a
+  deliberate trade-off to keep the pool allocation-only — see
+  [`src/threading.zig`](src/threading.zig)), so the code does not build on
+  macOS or Windows.
 - **Heads-up only.** Multi-way pots are not supported.
 - **Post-flop only.** The solver always begins at the flop; preflop solving is out of scope.
 - **No abstraction.** It solves the full game tree with no card bucketing — exact, but the tree can grow large with many bet sizes.
+- **~0.2% exploitability floor.** Regret/strategy storage is `f32`, which keeps
+  memory light but caps how close to Nash a solve can get (~0.2% of pot for
+  DCFR). Convergence is fast to that floor; the solver then stops automatically
+  rather than spinning. This is within the range commercial solvers are commonly
+  run to. See [`bench/README.md`](bench/README.md#convergence-characteristics-speed-vs-accuracy-floor).
 
 ## Project Status
 
-The solver is **complete and tested (233 tests)** — from tree construction
+The solver is **complete and tested (238 tests)** — from tree construction
 through threaded DCFR, best response, exploitability, SIMD kernels, output
 extraction, JSON export, interactive web UI (config builder + strategy viewer),
 and human-readable summaries. Convergence is cross-validated against TexasSolver
@@ -511,7 +529,7 @@ scripts.
 | *(default)* | `zig build` | Debug build → `zig-out/bin/zolver` (assertions + `debug_invariants` NaN/Inf sweeps enabled). |
 | *(default, release)* | `zig build -Doptimize=ReleaseFast` | Optimized build — use this for anything you actually run or time. |
 | `run` | `zig build run -- solve spot.toml --summary` | Build and launch the CLI; everything after `--` is forwarded to `zolver`. |
-| `test` | `zig build test` | Full test suite (~233 tests: unit, suit-compression parity, serial-vs-threaded determinism, spin-then-park pool). |
+| `test` | `zig build test` | Full test suite (238 tests: unit, suit-compression parity, serial-vs-threaded determinism, spin-then-park pool). |
 | `bench-threads` | `zig build bench-threads -- <spot.toml> [flags]` | Thread-pool benchmark: wall **and** CPU time for the solve / exploitability / output passes at 1/2/4/8 threads. Always compiles ReleaseFast. Flags: `--iters N --warmup N --exploit-reps N --output-reps N`. Prints JSON to stdout, a table to stderr. |
 
 ### Standalone measurement binaries (`zig run`)

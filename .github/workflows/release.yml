@@ -4,8 +4,9 @@ on:
   push:
     tags: ["v*"]
 
-# Zig is a cross-compiler, so every target is built from a single Linux runner.
-# This is faster than a per-OS matrix and avoids waiting on scarce macOS runners.
+# Zolver is Linux-only (the thread pool parks on a raw Linux futex; see
+# src/threading.zig), so the release ships the two Linux ABIs only. Zig
+# cross-compiles both from a single Linux runner.
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -21,21 +22,15 @@ jobs:
       - name: Run tests
         run: zig build test
 
-      - name: Cross-compile all targets
+      - name: Cross-compile Linux targets
         run: |
           mkdir -p dist
           build() { # <zig-target> <output-name>
             zig build -Doptimize=ReleaseFast -Dtarget="$1" -p "out/$1"
-            if [ -f "out/$1/bin/zolver.exe" ]; then
-              cp "out/$1/bin/zolver.exe" "dist/$2"
-            else
-              cp "out/$1/bin/zolver" "dist/$2"
-            fi
+            cp "out/$1/bin/zolver" "dist/$2"
           }
-          build x86_64-linux   zolver-linux-x86_64
-          build aarch64-macos  zolver-macos-arm64
-          build x86_64-macos   zolver-macos-x86_64
-          build x86_64-windows zolver-windows-x86_64.exe
+          build x86_64-linux  zolver-linux-x86_64
+          build aarch64-linux zolver-linux-aarch64
           ls -la dist
 
       - name: Create release
