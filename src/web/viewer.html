@@ -126,6 +126,21 @@ body {
 .action-buttons button:hover { background: #30363d; }
 .action-buttons button.primary { background: #238636; border-color: #238636; }
 .action-buttons button.danger { background: #da3633; border-color: #da3633; }
+.action-buttons button.dead {
+  opacity: 0.45; cursor: default; text-decoration: line-through;
+}
+.action-buttons button.dead:hover { background: #21262d; }
+.action-buttons button:disabled { pointer-events: none; }
+
+.legend {
+  display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+  margin: 0 0 14px; font-size: 11px; color: #8b949e;
+}
+.legend .item { display: flex; align-items: center; gap: 5px; }
+.legend .swatch {
+  width: 12px; height: 12px; border-radius: 3px; display: inline-block;
+  border: 1px solid rgba(255,255,255,0.08);
+}
 
 .no-data { text-align: center; color: #8b949e; padding: 40px; }
 .drop-zone {
@@ -276,6 +291,22 @@ function render() {
   html += metaItem('Converged', DATA.meta.converged ? 'yes' : 'no', DATA.meta.converged ? 'good' : 'warn');
   html += '</div>';
 
+  // Action color legend (matches cellColor / detail bars)
+  html += '<div class="legend">';
+  const legend = [
+    ['check', ACTION_COLORS.check],
+    ['call', ACTION_COLORS.call],
+    ['bet', ACTION_COLORS.bet],
+    ['raise', ACTION_COLORS.raise],
+    ['all-in', ACTION_COLORS.allin],
+    ['fold', ACTION_COLORS.fold],
+  ];
+  for (const [name, col] of legend) {
+    html += '<span class="item"><span class="swatch" style="background:rgb(' +
+      col.join(',') + ')"></span>' + name + '</span>';
+  }
+  html += '</div>';
+
   // Board cards
   html += '<div class="board-cards">';
   const boardCards = (street.board || '').split(' ').filter(function(c) { return c.length >= 2; });
@@ -330,13 +361,22 @@ function render() {
   html += renderDetail(displayNode);
   html += '</div>';
 
-  // Action buttons (for navigation — only for acting player's actual node)
+  // Action buttons (for navigation — only for acting player's actual node).
+  // Terminal actions (fold / lines with no child node) are shown disabled so
+  // they don't look clickable and silently fail.
   html += '<div class="action-buttons">';
   for (let a = 0; a < node.actions.length; a++) {
     const cls = classifyAction(node.actions[a]);
-    const btnClass = (cls === 'fold') ? 'danger' : (cls === 'check') ? 'primary' : '';
-    html += '<button class="' + btnClass + '" onclick="navigateAction(' + a + ')">' +
-      node.actions[a] + '</button>';
+    const navigable = canNavigateAction(a);
+    let btnClass = (cls === 'fold') ? 'danger' : (cls === 'check') ? 'primary' : '';
+    if (!navigable) btnClass = (btnClass ? btnClass + ' ' : '') + 'dead';
+    if (navigable) {
+      html += '<button class="' + btnClass + '" onclick="navigateAction(' + a + ')">' +
+        node.actions[a] + '</button>';
+    } else {
+      html += '<button class="' + btnClass + '" disabled title="Terminal action — no deeper node">' +
+        node.actions[a] + '</button>';
+    }
   }
   html += '</div>';
 
@@ -620,29 +660,34 @@ function changeStreet(idx) {
   render();
 }
 
-function navigateAction(actionIdx) {
+function findChildNode(actionIdx) {
   const street = DATA.streets[streetIdx];
-  if (!street || !street.nodes[nodeIdx]) return;
+  if (!street || !street.nodes[nodeIdx]) return null;
   const node = street.nodes[nodeIdx];
-  if (actionIdx >= node.actions.length) return;
+  if (actionIdx >= node.actions.length) return null;
   const newLine = [...node.line, node.actions[actionIdx]];
   // Search all streets for the child node (cross-street navigation)
-  let found = null, foundStreet = streetIdx;
   for (let s = 0; s < DATA.streets.length; s++) {
     const key = newLine.join('|') + '|' + s;
     if (nodeIndex[key] !== undefined) {
-      found = nodeIndex[key];
-      foundStreet = s;
-      break;
+      return { streetIdx: s, nodeIdx: nodeIndex[key] };
     }
   }
-  if (found !== null) {
-    pathHistory.push({ streetIdx, nodeIdx });
-    streetIdx = foundStreet;
-    nodeIdx = found;
-    selectedCombo = null;
-    render();
-  }
+  return null;
+}
+
+function canNavigateAction(actionIdx) {
+  return findChildNode(actionIdx) !== null;
+}
+
+function navigateAction(actionIdx) {
+  const found = findChildNode(actionIdx);
+  if (!found) return;
+  pathHistory.push({ streetIdx, nodeIdx });
+  streetIdx = found.streetIdx;
+  nodeIdx = found.nodeIdx;
+  selectedCombo = null;
+  render();
 }
 
 function goBack() {

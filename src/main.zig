@@ -330,6 +330,7 @@ fn runSolve(
         try file_writer.interface.flush();
 
         try printFormatted(io, "output written to '{s}'\n", .{path});
+        try printFormatted(io, "next: zolver view {s}\n", .{path});
     }
 }
 

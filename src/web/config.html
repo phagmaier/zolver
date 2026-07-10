@@ -98,8 +98,12 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
 .wt-val{font-size:10px;color:#58a6ff;text-align:center;display:block}
 
 /* Toast */
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#238636;color:#fff;padding:10px 24px;border-radius:8px;font-size:12px;z-index:200;opacity:0;transition:opacity 0.3s}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#238636;color:#fff;padding:10px 24px;border-radius:8px;font-size:12px;z-index:200;opacity:0;transition:opacity 0.3s;max-width:min(560px,90vw);text-align:center}
 .toast.show{opacity:1}
+.toast.error{background:#da3633}
+.next-steps{margin-top:10px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;font-size:11px;color:#8b949e;line-height:1.5}
+.next-steps code{display:block;margin-top:4px;color:#c9d1d9;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:6px 8px;white-space:pre-wrap;word-break:break-all}
+.next-steps .hint{margin-top:6px;color:#484f58;font-size:10px}
 </style>
 </head>
 <body>
@@ -159,10 +163,10 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
     <div class="config-section">
       <h3>Game</h3>
       <div class="config-row">
-        <label>Initial Pot</label><input type="number" id="cfgPot" value="200" min="1" onchange="updateToml()">
+        <label>Initial Pot</label><input type="number" id="cfgPot" value="100" min="1" onchange="updateToml()">
       </div>
       <div class="config-row">
-        <label>Eff Stack</label><input type="number" id="cfgStack" value="800" min="1" onchange="updateToml()">
+        <label>Eff Stack</label><input type="number" id="cfgStack" value="150" min="1" onchange="updateToml()">
       </div>
       <div class="config-row">
         <label>Min Bet</label><input type="number" id="cfgMinBet" value="1" min="1" onchange="updateToml()">
@@ -183,13 +187,13 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
         <select id="cfgAlgo" onchange="onAlgoChange()"><option>dcfr</option><option>cfr_plus</option></select>
       </div>
       <div class="config-row">
-        <label>Max Iters</label><input type="number" id="cfgMaxIter" value="500" min="1" onchange="updateToml()">
+        <label>Max Iters</label><input type="number" id="cfgMaxIter" value="1000" min="1" onchange="updateToml()">
       </div>
       <div class="config-row">
         <label>Target Expl%</label><input class="wide" type="number" id="cfgTarget" value="0.5" step="0.1" min="0.01" onchange="updateToml()">
       </div>
       <div class="config-row">
-        <label>Threads</label><input type="number" id="cfgThreads" value="8" min="0" max="128" onchange="updateToml()">
+        <label>Threads</label><input type="number" id="cfgThreads" value="4" min="0" max="128" onchange="updateToml()">
       </div>
       <div class="config-row">
         <label></label>
@@ -197,7 +201,7 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
       </div>
       <div class="config-row">
         <label></label>
-        <div class="config-check"><input type="checkbox" id="cfgPrune" checked onchange="updateToml()"><span style="font-size:11px">Prune zero reach</span></div>
+        <div class="config-check"><input type="checkbox" id="cfgPrune" onchange="updateToml()"><span style="font-size:11px">Prune zero reach</span></div>
       </div>
       <div id="dcfrFields">
       <div class="config-row" style="margin-top:4px">
@@ -219,6 +223,12 @@ body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;c
       <div class="toml-actions">
         <button class="copy" onclick="copyToml()">Copy to Clipboard</button>
         <button onclick="downloadToml()">Download spot.toml</button>
+      </div>
+      <div class="next-steps" id="nextSteps">
+        <div><strong style="color:#c9d1d9">Next</strong> — after saving as <code style="display:inline;padding:1px 4px">spot.toml</code>:</div>
+        <code id="nextCmd">zolver solve spot.toml -o results.json --summary
+zolver view results.json</code>
+        <div class="hint">Pick a flop and both ranges before export. Empty exports are blocked.</div>
       </div>
     </div>
   </div>
@@ -255,13 +265,13 @@ let weightPopup = { visible: false, tab: '', r: 0, c: 0, cell: null };
 let oopRange = initRange();
 let ipRange = initRange();
 
-// Sizings
+// Sizings — match `zolver example` starter profile (small, fast-solving tree).
 let sizings = {
-  flop: [33,66,100],
-  turn: [66,150],
-  river: [75,150]
+  flop: [33, 75],
+  turn: [66],
+  river: [75]
 };
-let raiseCaps = { flop: '1', turn: 'none', river: 'none' };
+let raiseCaps = { flop: '1', turn: '1', river: '0' };
 
 function initRange() {
   const r = [];
@@ -773,6 +783,8 @@ function getRangeStr(tab) {
     }
   }
 
+  // Empty ranges should never reach export (validateExport blocks them). Keep a
+  // non-empty fallback so the live preview still shows a legal-looking string.
   return tokens.join(', ') || 'AA';
 }
 
@@ -784,8 +796,36 @@ function getSizingsStr(street) {
 
 function getRaiseCapStr(street) {
   const v = raiseCaps[street];
-  if (v === 'none') return '"none"';
+  // Bare identifier — the config parser accepts `none`/`unlimited`, not a quoted string.
+  if (v === 'none') return 'none';
   return v;
+}
+
+function rangeHasHands(tab) {
+  const range = tab === 'oop' ? oopRange : ipRange;
+  for (let r = 0; r < 13; r++) {
+    for (let c = 0; c < 13; c++) {
+      if (!range[r][c].included) continue;
+      // Fully board-blocked cells never make it into the exported range string.
+      if (isBlocked(r, c)) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateExport() {
+  const cards = selectedCards.filter(c => c !== null);
+  if (cards.length !== 3) {
+    return 'Pick exactly 3 flop cards before exporting.';
+  }
+  if (!rangeHasHands('oop')) {
+    return 'OOP range is empty (or fully blocked by the board).';
+  }
+  if (!rangeHasHands('ip')) {
+    return 'IP range is empty (or fully blocked by the board).';
+  }
+  return null;
 }
 
 function generateToml() {
@@ -853,32 +893,46 @@ function onAlgoChange() {
 }
 
 function copyToml() {
+  const err = validateExport();
+  if (err) { showToast(err, true); return; }
   const toml = generateToml();
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(toml).then(function() { showToast('TOML copied!'); }).catch(function() { showToast('Copy failed'); });
+    navigator.clipboard.writeText(toml).then(function() {
+      showToast('TOML copied — next: zolver solve spot.toml -o results.json --summary');
+    }).catch(function() { showToast('Copy failed', true); });
   } else {
     // Fallback for older browsers
     var ta = document.createElement('textarea');
     ta.value = toml; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); showToast('TOML copied!'); } catch(e) { showToast('Copy failed'); }
+    try {
+      document.execCommand('copy');
+      showToast('TOML copied — next: zolver solve spot.toml -o results.json --summary');
+    } catch(e) {
+      showToast('Copy failed', true);
+    }
     document.body.removeChild(ta);
   }
 }
 
 function downloadToml() {
+  const err = validateExport();
+  if (err) { showToast(err, true); return; }
   const blob = new Blob([generateToml()], {type:'text/plain'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = 'spot.toml'; a.click();
   URL.revokeObjectURL(url);
+  showToast('Downloaded spot.toml — next: zolver solve spot.toml -o results.json --summary');
 }
 
-function showToast(msg) {
+function showToast(msg, isError) {
   const t = document.getElementById('toast');
   t.textContent = msg;
+  t.classList.toggle('error', !!isError);
   t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2000);
+  clearTimeout(showToast._timer);
+  showToast._timer = setTimeout(() => t.classList.remove('show'), isError ? 3500 : 2800);
 }
 
 document.addEventListener('click', function(e) {
