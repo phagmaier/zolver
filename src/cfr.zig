@@ -303,10 +303,15 @@ pub const WalkCtx = struct {
         switch (next_street) {
             .turn => {
                 if (self.is.compress_suits) {
-                    // Compressed: visit each physical member of every canonical
-                    // turn orbit, remapping reaches/CFVs through its permutation.
-                    // (Parallel turn dispatch is not yet wired for the compressed
-                    // path; it runs serially.)
+                    // One task owns one canonical turn and all of its physical
+                    // members. This keeps every canonical turn/river storage
+                    // block single-writer while distributing independent turns.
+                    if (comptime mode.parallel()) {
+                        if (self.pool) |pool| {
+                            self.walkChanceTurnRemappedParallel(node.child, n_u, n_opp, reach_u, reach_opp, node_v, depth, mode, pool);
+                            return node_v;
+                        }
+                    }
                     const rm = &self.is.remap.?;
                     for (self.is.runout_tables.canonical_turns, 0..) |_, t| {
                         const cr: u32 = @intCast(t);
@@ -604,6 +609,112 @@ pub const WalkCtx = struct {
         }
     }
 
+    /// Parallel compressed flop→turn dispatch. Each task owns an entire
+    /// canonical turn orbit so its member visits can update that canonical
+    /// subtree without races; canonical-order reduction remains deterministic.
+    const CompressedTurnTask = struct {
+        wc: *WalkCtx,
+        child_ref: NodeRef,
+        n_u: u32,
+        n_opp: u32,
+        parent_ru: []const f32,
+        parent_ro: []const f32,
+        results: []f32,
+        depth: u32,
+        mode: WalkMode,
+        worker_scratches: []Scratch,
+        rm: *const remap.RemapTables,
+
+        fn process(ctx_ptr: *anyopaque, t: u32, worker_id: u32) void {
+            const ctx: *CompressedTurnTask = @ptrCast(@alignCast(ctx_ptr));
+            var worker_ctx = ctx.wc.*;
+            worker_ctx.scratch = &ctx.worker_scratches[worker_id];
+
+            const result_slot = ctx.results[t * ctx.n_u ..][0..ctx.n_u];
+            @memset(result_slot, 0);
+            const m_u = worker_ctx.is.mask_turn[worker_ctx.u][t * ctx.n_u ..][0..ctx.n_u];
+            const m_opp = worker_ctx.is.mask_turn[worker_ctx.opp][t * ctx.n_opp ..][0..ctx.n_opp];
+            for (ctx.rm.turn_members[t]) |member| {
+                // Pool callbacks are runtime functions, while the recursive
+                // walk is specialized by mode. The task is only created for
+                // solve/BR modes; dispatch back to the matching specialization.
+                switch (ctx.mode) {
+                    .solve => worker_ctx.descendChanceRemapped(
+                        ctx.child_ref,
+                        .turn,
+                        t,
+                        m_u,
+                        m_opp,
+                        ctx.rm.weight_turn,
+                        ctx.rm.hand_perms[member.perm_index],
+                        ctx.parent_ru,
+                        ctx.parent_ro,
+                        result_slot,
+                        ctx.depth,
+                        .solve,
+                    ),
+                    .best_response => worker_ctx.descendChanceRemapped(
+                        ctx.child_ref,
+                        .turn,
+                        t,
+                        m_u,
+                        m_opp,
+                        ctx.rm.weight_turn,
+                        ctx.rm.hand_perms[member.perm_index],
+                        ctx.parent_ru,
+                        ctx.parent_ro,
+                        result_slot,
+                        ctx.depth,
+                        .best_response,
+                    ),
+                    .evaluate, .average => unreachable,
+                }
+            }
+        }
+    };
+
+    fn walkChanceTurnRemappedParallel(
+        self: *WalkCtx,
+        child_ref: NodeRef,
+        n_u: u32,
+        n_opp: u32,
+        reach_u: []f32,
+        reach_opp: []f32,
+        node_v: []f32,
+        depth: u32,
+        comptime mode: WalkMode,
+        pool: *threading.Pool,
+    ) void {
+        const num_turns: u32 = @intCast(self.is.runout_tables.canonical_turns.len);
+        const needed: usize = @as(usize, num_turns) * n_u;
+        std.debug.assert(needed <= self.turn_results.len);
+        const results = self.turn_results[0..needed];
+
+        var task = CompressedTurnTask{
+            .wc = self,
+            .child_ref = child_ref,
+            .n_u = n_u,
+            .n_opp = n_opp,
+            .parent_ru = reach_u,
+            .parent_ro = reach_opp,
+            .results = results,
+            .depth = depth,
+            .mode = mode,
+            .worker_scratches = self.worker_scratches,
+            .rm = &self.is.remap.?,
+        };
+        pool.forkJoin(CompressedTurnTask.process, @ptrCast(&task), num_turns);
+
+        for (0..num_turns) |t| {
+            const r = results[t * n_u ..][0..n_u];
+            if (self.use_simd) {
+                kernels.unweightedAccumulateSimd(node_v, r);
+            } else {
+                kernels.unweightedAccumulate(node_v, r);
+            }
+        }
+    }
+
     const AllInFlopTask = struct {
         wc: *WalkCtx,
         n_u: u32,
@@ -623,8 +734,12 @@ pub const WalkCtx = struct {
             const result_slot = task.results[t * task.n_u ..][0..task.n_u];
             @memset(result_slot, 0);
 
-            const turn = task.ctx.rt.canonical_turns[t];
-            terminal_eval.accumulateTurnRivers(result_slot, task.reach_opp, turn, task.ctx.weight_turns[t], false, task.ctx, ais);
+            if (task.ctx.rm != null) {
+                terminal_eval.allInEvalFlopRemappedTurn(result_slot, task.reach_opp, t, task.ctx, ais);
+            } else {
+                const turn = task.ctx.rt.canonical_turns[t];
+                terminal_eval.accumulateTurnRivers(result_slot, task.reach_opp, turn, task.ctx.weight_turns[t], false, task.ctx, ais);
+            }
         }
     };
 
@@ -771,11 +886,10 @@ pub const WalkCtx = struct {
                             terminal_eval.allInEvalTurn(node_v, reach_opp, runout_id, ctx, ais);
                         }
                     } else {
-                        if (is.compress_suits) {
-                            terminal_eval.allInEvalFlopRemapped(node_v, reach_opp, ctx, ais);
-                        } else {
-                            self.allInEvalFlopParallel(n_u, n_opp, reach_opp, node_v, ctx);
-                        }
+                        // A task owns one canonical turn group. For compressed
+                        // all-ins that group includes all physical members, so
+                        // no showdown scratch or result slot is shared.
+                        self.allInEvalFlopParallel(n_u, n_opp, reach_opp, node_v, ctx);
                     }
                 }
             },
@@ -1158,6 +1272,9 @@ fn buildInit(allocator: Allocator, flop: [3]card.Card, oop: []const WeightedComb
         .oop_range = oop,
         .ip_range = ip,
         .max_budget_bytes = std.math.maxInt(u64),
+        // Most solver tests exercise the full physical oracle. Compression has
+        // dedicated parity/threading coverage below.
+        .compress_suits = false,
     };
     return init_mod.SolverInit.init(allocator, config);
 }
@@ -1534,6 +1651,32 @@ test "compressed two-tone matches physical root/BR EVs at uniform profile" {
     const alloc = testing.allocator;
     const r = try twoToneSymRanges();
     try expectUniformProfileParity(alloc, two_tone_flop, &r[0], &r[1]);
+}
+
+test "compressed threaded solve matches serial values and remains constant-sum" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const r = try monoSymRanges();
+
+    var is_serial = try buildInitC(alloc, mono_flop, &r[0], &r[1], true);
+    defer is_serial.deinit();
+    var serial = try Solver.init(alloc, &is_serial, .{});
+    defer serial.deinit();
+    serial.iterate(4);
+
+    var is_parallel = try buildInitC(alloc, mono_flop, &r[0], &r[1], true);
+    defer is_parallel.deinit();
+    var parallel = try Solver.init(alloc, &is_parallel, .{ .num_threads = 2 });
+    defer parallel.deinit();
+    parallel.iterate(4);
+
+    // Task-local reductions can round differently from the serial member walk,
+    // but they must evaluate the same physical game and preserve chance mass.
+    try testing.expectApproxEqAbs(serial.rootEV(0), parallel.rootEV(0), 1e-3);
+    try testing.expectApproxEqAbs(serial.rootEV(1), parallel.rootEV(1), 1e-3);
+    try testing.expectApproxEqAbs(serial.bestResponseEV(0), parallel.bestResponseEV(0), 1e-3);
+    try testing.expectApproxEqAbs(serial.bestResponseEV(1), parallel.bestResponseEV(1), 1e-3);
+    try checkConstantSum(&parallel, 1e-2);
 }
 
 test "compressed monotone solve stays constant-sum and tracks the oracle" {

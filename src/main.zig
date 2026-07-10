@@ -342,6 +342,9 @@ fn runExample(arena: std.mem.Allocator, io: std.Io, output_path: ?[]const u8) !v
         \\# Max memory budget in bytes (optional, default: 8 GB)
         \\# Increase for large trees with many sizings/raises; lower to avoid swap
         \\max_budget_bytes = 8589934592
+        \\# Canonical suit-isomorphic runouts (optional, default: true). Set false
+        \\# only for the full physical-runout correctness oracle.
+        \\compress_suits = true
         \\
         \\[game.sizings]
         \\# Bet size fractions as percentages of the pot

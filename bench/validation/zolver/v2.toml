@@ -8,6 +8,8 @@ flop = "As 8d 3c"
 initial_pot = 20
 effective_stack = 400
 min_bet = 1
+# Match TexasSolver's disabled suit isomorphism for fixture parity.
+compress_suits = false
 
 [game.sizings]
 flop = [75]

@@ -286,6 +286,7 @@ optional. Bad configs report the exact line and reason, e.g.
 | `effective_stack` | integer | The smaller of the two remaining postflop stacks. |
 | `min_bet` | integer | Minimum bet/raise increment in chips. *Optional, default: 1.* |
 | `max_budget_bytes` | integer | Total retained solver-memory limit before a solve starts: tables, storage, and thread-dependent working arenas. *Optional, default: 8 GB.* Increase for large trees with many sizings/raises; lower to avoid excessive swap on low-memory machines. |
+| `compress_suits` | boolean | Solve using canonical suit-isomorphic turn/river runouts while exactly remapping private-hand reaches and values. *Optional, default: true.* Set `false` only to use the full physical-runout correctness oracle. |
 
 ### `[game.sizings]`
 
@@ -377,6 +378,7 @@ initial_pot = 100
 effective_stack = 200
 min_bet = 1
 max_budget_bytes = 8589934592  # 8 GB — increase for large trees
+compress_suits = true          # Set false only for physical-runout oracle checks
 
 [game.sizings]
 flop = [25, 50, 75]

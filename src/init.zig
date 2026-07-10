@@ -109,15 +109,27 @@ pub const SolverInit = struct {
         const runout_counts = runout_tables.runoutCounts();
         _ = storage.memoryEstimate(tree.slots_per_runout, runout_counts); // logged by caller if desired
 
+        const hands: [2][]const Combo = .{ ranges[0].hands, ranges[1].hands };
+
+        // Build the compression-specific retained tables before allocating
+        // strategy storage. Reserve their exact footprint from Storage's
+        // pre-allocation budget check rather than discovering an over-budget
+        // compressed solve only after all large arrays have been allocated.
+        var remap: ?remap_mod.RemapTables = null;
+        if (config.compress_suits) {
+            remap = try remap_mod.build(allocator, hands, config.flop, &runout_tables);
+        }
+        errdefer if (remap) |*rm| rm.deinit();
+        const remap_bytes: u64 = if (remap) |*rm| rm.memoryBytes() else 0;
+        if (remap_bytes > config.max_budget_bytes) return error.StorageBudgetExceeded;
+
         var store = try Storage.init(
             allocator,
             tree.slots_per_runout,
             runout_counts,
-            config.max_budget_bytes,
+            config.max_budget_bytes - remap_bytes,
         );
         errdefer store.deinit();
-
-        const hands: [2][]const Combo = .{ ranges[0].hands, ranges[1].hands };
 
         var blk = try BlockingTables.init(allocator, hands, config.flop, &runout_tables);
         errdefer blk.deinit();
@@ -162,14 +174,6 @@ pub const SolverInit = struct {
 
         var sd = try ShowdownTables.init(allocator, hands, config.flop, &runout_tables, &eval);
         errdefer sd.deinit();
-
-        // Orbit-member remap tables: only needed when compressing. For the
-        // physical oracle every orbit is trivially size one, so we skip the build.
-        var remap: ?remap_mod.RemapTables = null;
-        if (config.compress_suits) {
-            remap = try remap_mod.build(allocator, hands, config.flop, &runout_tables);
-        }
-        errdefer if (remap) |*rm| rm.deinit();
 
         return .{
             .allocator = allocator,
@@ -265,13 +269,13 @@ pub const Config = struct {
     raise_cap: [3]?u8,
     oop_range: []const WeightedCombo,
     ip_range: []const WeightedCombo,
-    /// Refuse allocation if the regret + strategy arrays exceed this byte count.
+    /// Total solver-memory limit. `SolverInit` reserves remap + storage before
+    /// allocating storage; `Solver.init` also checks all retained and working data.
     max_budget_bytes: u64,
-    /// When true, solve over suit-isomorphic canonical runouts and remap
-    /// private-hand reaches/values per orbit member (memory win on symmetric
-    /// boards). When false (default), solve the full physical runout space — the
+    /// Solve over suit-isomorphic canonical runouts and remap private-hand
+    /// reaches/values per orbit member. Disable only to use the physical-runout
     /// correctness oracle. See `AGENTS.md` follow-up #1.
-    compress_suits: bool = false,
+    compress_suits: bool = true,
 
     pub fn default(
         flop: [3]Card,
@@ -430,6 +434,34 @@ test "budget exceeded propagates" {
     };
 
     try std.testing.expectError(error.StorageBudgetExceeded, SolverInit.init(std.testing.allocator, config));
+}
+
+test "compressed remap footprint is reserved before storage allocation" {
+    const flop = [_]Card{
+        card.makeCard(12, 0),
+        card.makeCard(10, 0),
+        card.makeCard(7, 0),
+    };
+    // These ranges are closed under swaps of the three non-flop suits, so the
+    // compressed init retains non-identity remap tables.
+    const hands = [_]WeightedCombo{
+        .{ .combo = try Combo.init(card.makeCard(0, 1), card.makeCard(1, 1)), .weight = 1.0 },
+        .{ .combo = try Combo.init(card.makeCard(0, 2), card.makeCard(1, 2)), .weight = 1.0 },
+        .{ .combo = try Combo.init(card.makeCard(0, 3), card.makeCard(1, 3)), .weight = 1.0 },
+    };
+
+    var full_config = Config.default(flop, &hands, &hands);
+    full_config.max_budget_bytes = std.math.maxInt(u64);
+    var full = try SolverInit.init(std.testing.allocator, full_config);
+    const storage_bytes = storage.memoryEstimate(full.tree.slots_per_runout, full.runout_tables.runoutCounts());
+    try std.testing.expect(full.remap.?.memoryBytes() > 0);
+    full.deinit();
+
+    // The strategy arrays alone fit exactly; the remap reservation must still
+    // reject the allocation before Storage.init can allocate those arrays.
+    var tight_config = full_config;
+    tight_config.max_budget_bytes = storage_bytes;
+    try std.testing.expectError(error.StorageBudgetExceeded, SolverInit.init(std.testing.allocator, tight_config));
 }
 
 test "default config produces usable init" {

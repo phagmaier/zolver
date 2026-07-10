@@ -396,15 +396,29 @@ pub fn allInEvalFlopRemapped(
 ) void {
     @memset(values, 0);
     const rm = ctx.rm.?;
+    const partial = scratch.term_partial[0..values.len];
+    for (0..rm.flop_runouts.len) |t| {
+        allInEvalFlopRemappedTurn(partial, reach_opp, @intCast(t), ctx, scratch);
+        for (values, partial) |*value, contribution| value.* += contribution;
+    }
+}
+
+/// Contribution of one canonical turn orbit to a compressed flop all-in.
+/// `values` is fully written and may be used as a per-turn worker result slot;
+/// this makes compressed flop all-ins safe to dispatch in parallel while keeping
+/// the caller's final reduction in canonical-turn order.
+pub fn allInEvalFlopRemappedTurn(
+    values: []f32,
+    reach_opp: []const f32,
+    turn_id: u32,
+    ctx: AllInContext,
+    scratch: AllInScratch,
+) void {
+    @memset(values, 0);
+    const rm = ctx.rm.?;
     const w = rm.weight_turn * rm.weight_river;
-    const N_u = values.len;
-    const partial = scratch.term_partial[0..N_u];
-    for (rm.flop_runouts) |group| {
-        @memset(partial, 0);
-        for (group) |run| {
-            accumulateRiverMemberRemapped(partial, reach_opp, run.canonical_river, rm.hand_perms[run.perm_index], w, ctx, scratch);
-        }
-        for (0..N_u) |h| values[h] += partial[h];
+    for (rm.flop_runouts[turn_id]) |run| {
+        accumulateRiverMemberRemapped(values, reach_opp, run.canonical_river, rm.hand_perms[run.perm_index], w, ctx, scratch);
     }
 }
 

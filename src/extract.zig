@@ -230,6 +230,8 @@ fn buildInit(allocator: std.mem.Allocator, flop: [3]Card, oop: []const WeightedC
         .oop_range = oop,
         .ip_range = ip,
         .max_budget_bytes = std.math.maxInt(u64),
+        // Query canonicalization tests require the physical-board oracle.
+        .compress_suits = false,
     };
     return init_mod.SolverInit.init(allocator, config);
 }
@@ -250,8 +252,8 @@ test "resolveRunout: flop and identity turn/river round-trip onto canonical card
     // Rainbow flop ⇒ only the identity permutation; every real card is its own
     // canonical representative.
     const flop = [_]Card{ card.makeCard(12, 0), card.makeCard(10, 1), card.makeCard(7, 2) };
-    const oop = [_]WeightedCombo{ try wc(card.makeCard(11, 0), card.makeCard(9, 0)) };
-    const ip = [_]WeightedCombo{ try wc(card.makeCard(8, 3), card.makeCard(6, 3)) };
+    const oop = [_]WeightedCombo{try wc(card.makeCard(11, 0), card.makeCard(9, 0))};
+    const ip = [_]WeightedCombo{try wc(card.makeCard(8, 3), card.makeCard(6, 3))};
 
     var is = try buildInit(alloc, flop, &oop, &ip);
     defer is.deinit();
@@ -298,8 +300,8 @@ test "solver initialization keeps physically distinct suit-equivalent boards sep
     const r = try symmetricRange();
     var is = try buildInit(alloc, two_tone, &r, &r);
     defer is.deinit();
-    // Solver traversal is intentionally uncompressed until it remaps private
-    // hands per suit orbit, so only the identity is present here.
+    // The test helper explicitly selects the full physical-runout oracle, so
+    // only the identity permutation is present here.
     try testing.expectEqual(@as(usize, 1), is.runout_tables.valid_permutations.len);
     try testing.expectEqual(@as(usize, 49), is.runout_tables.canonical_turns.len);
 }

@@ -4,6 +4,8 @@ flop = "Js Ts 6c"
 initial_pot = 100
 effective_stack = 400
 min_bet = 2
+# Preserve the physical-runout baseline after compression became the CLI default.
+compress_suits = false
 
 [game.sizings]
 flop = [33, 75]

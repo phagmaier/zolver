@@ -405,6 +405,7 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
     const debug_invariants = try f.expectBool("solver.debug_invariants", @import("builtin").mode == .Debug);
 
     const max_budget_bytes = try f.expectOptionalIntDefaultU64("game.max_budget_bytes", 8 * 1024 * 1024 * 1024);
+    const compress_suits = try f.expectBool("game.compress_suits", true);
 
     const game = Config{
         .flop = flop,
@@ -416,6 +417,7 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
         .oop_range = oop_range,
         .ip_range = ip_range,
         .max_budget_bytes = max_budget_bytes,
+        .compress_suits = compress_suits,
     };
 
     const solver = SolverConfig{
@@ -484,6 +486,34 @@ test "parse minimal config string" {
     try std.testing.expectEqual(cfr_mod.Algorithm.dcfr, bundle.solver.algorithm);
     try std.testing.expectEqual(@as(u32, 100), bundle.solver.max_iterations);
     try std.testing.expectEqual(@as(u32, 0), bundle.solver.num_threads);
+    try std.testing.expect(bundle.game.compress_suits);
+}
+
+test "parse config can disable suit compression" {
+    const cfg =
+        \\[game]
+        \\flop = "As Kd 7h"
+        \\initial_pot = 100
+        \\effective_stack = 200
+        \\compress_suits = false
+        \\[game.sizings]
+        \\flop = [50]
+        \\turn = [50]
+        \\river = [50]
+        \\[game.raise_cap]
+        \\flop = 1
+        \\turn = 1
+        \\river = 1
+        \\[ranges]
+        \\oop = "AK"
+        \\ip = "AK"
+        \\[solver]
+        \\algorithm = "dcfr"
+    ;
+
+    var bundle = try parseConfig(std.testing.allocator, cfg);
+    defer bundle.deinit();
+    try std.testing.expect(!bundle.game.compress_suits);
 }
 
 test "parse config with unlimited raise cap" {
