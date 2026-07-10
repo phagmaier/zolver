@@ -124,6 +124,34 @@ Takeaways:
 - **Spin-then-park does not change retained memory** (still covered by
   `max_budget_bytes`); it only cuts idle CPU during serial phases.
 
+## Convergence characteristics (speed vs accuracy floor)
+
+Measured on the `v2` cross-validation spot (As8d3c, 400bb, flop-only), DCFR,
+8 threads, ReleaseFast:
+
+| Solver | ~iters | wall | exploitability |
+|--------|--------|------|----------------|
+| Zolver | 1000 | 17 s | 0.272% |
+| Zolver | 2240 (plateau) | 34 s | 0.201% |
+| TexasSolver | ~1000 | ~270 s | 0.047% |
+
+- **Per-iteration throughput is the strength**: Zolver reaches a given iteration
+  count ~15× faster in wall time than TexasSolver on the same tree.
+- **There is an f32 precision floor** at ~0.2% of pot for DCFR. Exploitability
+  drops fast to ~0.2% then flatlines — iterations 2000→5250 move it only
+  0.200%→0.195%. CFR+ floors higher (~1.1%) and even drifts up, confirming the
+  limit is accumulation precision (`storage.zig` regrets/strategy are f32), not
+  a bug. DCFR is the right default. f32 keeps the dominant storage light (going
+  f64 would up to double it — e.g. spot 5 from 3.6 GB); ~0.2% is within the
+  range commercial solvers are commonly run to.
+- **Stall detection stops at the floor.** Because a target below ~0.2% is
+  unreachable, `SolverConfig.stall_patience`/`stall_rel_improvement` (defaults
+  5 / 0.01) end the solve once exploitability has not improved for several
+  checks, instead of spinning to `max_iterations` running a full
+  best-response + average pass at every check. On `v2` this stops at ~2240
+  iters (0.201%) rather than the 6000 cap; a reachable target (e.g. 0.5%) is hit
+  first and never triggers a stall. Set `stall_patience = 0` to disable.
+
 ## Accuracy cross-validation (vs TexasSolver)
 
 Method: per-hand frequency matching is confounded by equilibrium multiplicity
@@ -139,6 +167,17 @@ materializes their output paths, forces TexasSolver's `set_use_isomorphism 0`,
 and saves a JSON comparison summary alongside raw solver outputs. This keeps the
 external check on the same physical-runout convention as Zolver; strategy
 differences are interpreted in aggregate because equilibria may be non-unique.
+
+`compare.py` aligns flop nodes by an action *path* whose bet steps are ranked
+within the node's sibling set (bet#0, bet#1=all-in, …). This is what lets
+Zolver's `all-in` label match TexasSolver's `BET <stack>`: previously the two
+encodings diverged and **only 4 of 8 flop nodes matched, silently dropping every
+all-in line** — exactly the physical-runout all-in code with the least other
+coverage. All 8/8 now match. Notably the all-in branches agree tightly with
+TexasSolver (on `v2`, the all-in raise node: mean abs diff 0.004), independent
+evidence the runout enumeration is correct; residual disagreement concentrates
+at the near-indifferent root check/bet decision and shrinks as the Zolver side
+is solved closer to its floor.
 
 ## How this harness paid off
 

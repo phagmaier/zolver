@@ -93,6 +93,47 @@ pub const SolveResult = struct {
     iterations: u32,
     exploitability: Exploitability,
     converged: bool,
+    /// True when the solve stopped because exploitability plateaued (see
+    /// `StallDetector`) rather than hitting the target or `max_iterations`.
+    /// Mutually informative with `converged`: a stalled solve is never
+    /// converged (it stopped *above* target).
+    stalled: bool = false,
+};
+
+/// Detects when the average strategy's exploitability has plateaued. DCFR on
+/// f32 regret/strategy storage converges fast but hits a precision floor
+/// (~0.2% of pot); past that, extra iterations only burn time — each check runs
+/// a full best-response + average pass. Feed every exploitability reading to
+/// `update`; it reports when the solve should stop.
+///
+/// "Improvement" is measured relatively against the best value seen so far, so
+/// the test is scale-free (works whether exploitability is 5% or 0.05%). After
+/// `patience` consecutive checks without a `rel_improvement` fractional drop,
+/// `update` returns true. `patience == 0` disables the detector entirely.
+pub const StallDetector = struct {
+    best_pct: f32 = std.math.inf(f32),
+    stalls: u32 = 0,
+    patience: u32,
+    rel_improvement: f32,
+
+    pub fn init(patience: u32, rel_improvement: f32) StallDetector {
+        return .{ .patience = patience, .rel_improvement = rel_improvement };
+    }
+
+    /// Record one exploitability check (percent of pot). Returns true once the
+    /// solve has stalled. A meaningful improvement resets the patience counter;
+    /// otherwise it advances. Non-finite readings are ignored here — the caller
+    /// stops on divergence separately — so they can't poison `best_pct`.
+    pub fn update(self: *StallDetector, pct: f32) bool {
+        if (self.patience == 0 or !std.math.isFinite(pct)) return false;
+        if (pct < self.best_pct * (1.0 - self.rel_improvement)) {
+            self.best_pct = pct;
+            self.stalls = 0;
+            return false;
+        }
+        self.stalls += 1;
+        return self.stalls >= self.patience;
+    }
 };
 
 /// Run DCFR until exploitability reaches `target_exploitability_pct` or
@@ -101,6 +142,7 @@ pub const SolveResult = struct {
 pub fn solve(solver: *Solver) SolveResult {
     const cfg = solver.config;
     var last = exploitability(solver);
+    var stall = StallDetector.init(cfg.stall_patience, cfg.stall_rel_improvement);
     while (solver.t < cfg.max_iterations) {
         solver.iterate(1);
         if (shouldCheck(solver.t, cfg.check_interval)) {
@@ -108,6 +150,9 @@ pub fn solve(solver: *Solver) SolveResult {
             std.log.debug("cfr t={d} exploitability={d:.4}% ({d:.5} chips)", .{ solver.t, last.pct, last.chips });
             if (last.pct <= cfg.target_exploitability_pct) {
                 return .{ .iterations = solver.t, .exploitability = last, .converged = true };
+            }
+            if (stall.update(last.pct)) {
+                return .{ .iterations = solver.t, .exploitability = last, .converged = false, .stalled = true };
             }
         }
     }
@@ -233,6 +278,82 @@ test "solve stops at the exploitability target" {
     const result = solve(&solver);
     try testing.expect(result.exploitability.pct <= 5.0);
     try testing.expect(result.iterations <= 64);
+}
+
+test "StallDetector: disabled with patience 0" {
+    var d = StallDetector.init(0, 0.01);
+    // Never stalls no matter how flat the readings are.
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) try testing.expect(!d.update(0.2));
+}
+
+test "StallDetector: steady improvement never stalls" {
+    var d = StallDetector.init(3, 0.01);
+    // Each reading is >1% below the last: always counts as progress.
+    var pct: f32 = 5.0;
+    var i: u32 = 0;
+    while (i < 50) : (i += 1) {
+        try testing.expect(!d.update(pct));
+        pct *= 0.9; // 10% relative drop each check
+    }
+}
+
+test "StallDetector: flat readings stall after patience checks" {
+    var d = StallDetector.init(3, 0.01);
+    // First reading sets the baseline (counts as improvement vs +inf).
+    try testing.expect(!d.update(0.20));
+    // Three consecutive non-improving checks trip the detector on the third.
+    try testing.expect(!d.update(0.20));
+    try testing.expect(!d.update(0.199)); // <1% better: not an improvement
+    try testing.expect(d.update(0.200));
+}
+
+test "StallDetector: a late meaningful improvement resets patience" {
+    var d = StallDetector.init(3, 0.01);
+    try testing.expect(!d.update(0.20));
+    try testing.expect(!d.update(0.20));
+    try testing.expect(!d.update(0.20));
+    // A >1% drop resets the counter, buying more checks.
+    try testing.expect(!d.update(0.19));
+    try testing.expect(!d.update(0.19));
+    try testing.expect(!d.update(0.19));
+    try testing.expect(d.update(0.19));
+}
+
+test "StallDetector: non-finite readings are ignored" {
+    var d = StallDetector.init(2, 0.01);
+    try testing.expect(!d.update(0.20));
+    // A NaN check (handled as divergence by the caller) neither stalls nor
+    // corrupts the best-so-far.
+    try testing.expect(!d.update(std.math.nan(f32)));
+    try testing.expect(!d.update(0.20));
+    try testing.expect(d.update(0.20));
+}
+
+test "solve stops early when exploitability plateaus below no target" {
+    const alloc = testing.allocator;
+    const oop = [_]WeightedCombo{ try wc(card.makeCard(9, 0), card.makeCard(8, 0)), try wc(card.makeCard(3, 0), card.makeCard(1, 0)) };
+    const ip = [_]WeightedCombo{ try wc(card.makeCard(7, 0), card.makeCard(6, 0)), try wc(card.makeCard(4, 0), card.makeCard(2, 0)) };
+
+    var is = try buildInit(alloc, mono_flop, &oop, &ip);
+    defer is.deinit();
+
+    // Unreachable target + high iteration cap: without stall detection this
+    // would run all 4096 iterations. With it, the solve stops once progress
+    // flatlines, well short of the cap.
+    var solver = try Solver.init(alloc, &is, .{
+        .target_exploitability_pct = 0.0,
+        .max_iterations = 4096,
+        .check_interval = 16,
+        .stall_patience = 4,
+        .stall_rel_improvement = 0.01,
+    });
+    defer solver.deinit();
+
+    const result = solve(&solver);
+    try testing.expect(result.stalled);
+    try testing.expect(!result.converged);
+    try testing.expect(result.iterations < 4096);
 }
 
 test "exploitability stays non-negative on a single-combo game" {

@@ -73,38 +73,57 @@ def node_action_keys(labels):
     return out
 
 
+def canon_step(label, siblings):
+    """Canonicalize a single action step into a path key, ranking bets by their
+    position among the *sibling* action set at that node (bet#0, bet#1=all-in,
+    ...). This is the same rank scheme `node_action_keys` uses to align
+    probability vectors, so it makes the two solvers' all-in encodings agree:
+    Zolver's `all-in` and TexasSolver's `BET <stack>` are both the highest-ranked
+    bet at their node and collapse to the same ('bet', rank) key.
+
+    `siblings` is the full ordered action-label list at the node the step departs
+    from. When it is unavailable we fall back to a name/amount token (which will
+    only misalign an all-in, the case this function exists to fix)."""
+    if not siblings:
+        k, amt = parse_action(label)
+        return (k, None) if k != "bet" else ("bet", amt)
+    keys = node_action_keys(siblings)
+    idx = None
+    if label in siblings:
+        idx = siblings.index(label)
+    else:
+        pk = parse_action(label)
+        for j, s in enumerate(siblings):
+            if parse_action(s) == pk:
+                idx = j
+                break
+    if idx is None:
+        k, amt = parse_action(label)
+        return (k, None) if k != "bet" else ("bet", amt)
+    return keys[idx]
+
+
 # ---------- Zolver ----------
 def load_zolver(path):
     d = json.load(open(path))
     flop = next(s for s in d["streets"] if s["street"] == "flop")
+    raw_nodes = flop["nodes"]
+    # line-prefix -> action set at that node, so each line step can be ranked
+    # against the siblings that were actually available there.
+    line_actions = {tuple(n["line"]): n["actions"] for n in raw_nodes}
     nodes = {}
-    for n in flop["nodes"]:
+    for n in raw_nodes:
         keys = node_action_keys(n["actions"])
-        path = canon_path_from_labels(n["line"])
+        line = n["line"]
+        path = tuple(
+            canon_step(step, line_actions.get(tuple(line[:i])))
+            for i, step in enumerate(line)
+        )
         strat = {}
         for h in n["hands"]:
             strat[canon_combo(h["combo"])] = {keys[i]: h["strategy"][i] for i in range(len(keys))}
         nodes[path] = {"player": n["player"], "strat": strat, "labels": n["actions"]}
     return d.get("meta", {}), nodes
-
-
-def canon_path_from_labels(labels):
-    """Canonicalize a Zolver 'line' (list of action labels) into a path tuple.
-    Bets along a line need per-step rank, but a line only records the single
-    action taken, so we rank against the *known* sibling set is unavailable here.
-    Instead we encode bet steps by a stable token: check/fold/call by name, and
-    any bet by its amount token ('bet' for the small size, 'allin' for all-in).
-    TexasSolver paths are encoded the same way (see walk_texas)."""
-    out = []
-    for l in labels:
-        k, amt = parse_action(l)
-        if k != "bet":
-            out.append((k, None))
-        elif amt == float("inf"):
-            out.append(("allin", None))
-        else:
-            out.append(("bet", amt))
-    return tuple(out)
 
 
 # ---------- TexasSolver ----------
@@ -130,13 +149,9 @@ def walk_texas(node, path, nodes):
         player = "oop" if node.get("player") == 0 else "ip"
         nodes[path] = {"player": player, "strat": strat, "labels": labels}
         for label, child in node.get("childrens", {}).items():
-            k, amt = parse_action(label)
-            if k != "bet":
-                step = (k, None)
-            elif amt == float("inf"):
-                step = ("allin", None)
-            else:
-                step = ("bet", amt)
+            # Rank the step against the node's full action set (not just the
+            # explored children) so bet ranks match Zolver's sibling ranks.
+            step = canon_step(label, labels)
             walk_texas(child, path + (step,), nodes)
     # chance_node / terminal: stop (we only compare the flop street)
 

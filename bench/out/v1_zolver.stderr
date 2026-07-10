@@ -3,10 +3,10 @@ loaded '/home/phagmaier/Code/zolver/bench/validation/zolver/v1.toml'
   memory: 93.3 MB  threads: 8
 solving...
   start  exploitability: 105.841% (21.168 chips)
-  iter     32  exploitability:  7.490% (1.498 chips)  1.2s
-  iter     64  exploitability:  3.843% (0.769 chips)  2.5s
-  iter    128  exploitability:  1.582% (0.316 chips)  4.7s
-  iter    192  exploitability:  1.240% (0.248 chips)  6.8s
-  iter    256  exploitability:  1.000% (0.200 chips)  8.9s
-solve complete: 300 iterations, 1.000% exploitability, 10.5s elapsed
+  iter     32  exploitability:  7.490% (1.498 chips)  1.1s
+  iter     64  exploitability:  3.843% (0.769 chips)  2.3s
+  iter    128  exploitability:  1.582% (0.316 chips)  4.4s
+  iter    192  exploitability:  1.240% (0.248 chips)  6.5s
+  iter    256  exploitability:  1.000% (0.200 chips)  8.5s
+solve complete: 300 iterations, 1.000% exploitability, 9.9s elapsed
 output written to '/home/phagmaier/Code/zolver/bench/out/v1_zolver.json'

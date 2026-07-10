@@ -225,6 +225,7 @@ fn runSolve(
 
     const cfg = solver.config;
     const solve_start = std.Io.Clock.now(.awake, io);
+    var stall = best_response.StallDetector.init(cfg.stall_patience, cfg.stall_rel_improvement);
 
     while (solver.t < cfg.max_iterations) {
         solver.iterate(1);
@@ -244,6 +245,14 @@ fn runSolve(
                 break;
             }
             if (last_exp.pct <= cfg.target_exploitability_pct) break;
+            // Stop once exploitability has plateaued at the storage precision
+            // floor: further iterations only cost time (see StallDetector).
+            if (stall.update(last_exp.pct)) {
+                try printFormatted(io, "  plateaued at {d:.3}% (no improvement for {d} checks); stopping short of the {d:.3}% target\n", .{
+                    last_exp.pct, cfg.stall_patience, cfg.target_exploitability_pct,
+                });
+                break;
+            }
         }
     }
 
@@ -393,6 +402,11 @@ fn runExample(arena: std.mem.Allocator, io: std.Io, output_path: ?[]const u8) !v
         \\use_simd = true
         \\# Interval between exploitability checks after 128 iters (default: 64)
         \\check_interval = 64
+        \\# Stop early once exploitability plateaus: consecutive non-improving
+        \\# checks tolerated before stopping (0 disables; default: 5), and the
+        \\# minimum fractional drop that counts as improvement (default: 0.01).
+        \\stall_patience = 5
+        \\stall_rel_improvement = 0.01
         \\
         \\[solver.dcfr]
         \\# DCFR discounting parameters (defaults shown)

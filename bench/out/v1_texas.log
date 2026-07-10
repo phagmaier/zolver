@@ -11,16 +11,16 @@ Iter: 51
 player 0 exploitability -1.2998209
 player 1 exploitability 2.0882573
 Total exploitability 1.9710909 precent
-time used: 23.218
+time used: 23.083
 -------------------
 Iter: 101
 player 0 exploitability -1.5657262
 player 1 exploitability 1.7893829
 Total exploitability 0.55914193 precent
-time used: 47.413
+time used: 47.27
 -------------------
 Iter: 151
 player 0 exploitability -1.6273339
 player 1 exploitability 1.7312187
 Total exploitability 0.25971204 precent
-time used: 71.441
+time used: 72.031

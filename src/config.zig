@@ -399,6 +399,8 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
     const max_iterations = try f.expectOptionalIntDefault("solver.max_iterations", 1000);
     const target_exploitability_pct = try f.expectOptionalFloat("solver.target_exploitability_pct", 0.5);
     const check_interval = try f.expectOptionalIntDefault("solver.check_interval", 64);
+    const stall_patience = try f.expectOptionalIntDefault("solver.stall_patience", 5);
+    const stall_rel_improvement = try f.expectOptionalFloat("solver.stall_rel_improvement", 0.01);
     const num_threads = try f.expectOptionalIntDefault("solver.num_threads", 0);
     const prune_zero_reach = try f.expectBool("solver.prune_zero_reach", false);
     const use_simd = try f.expectBool("solver.use_simd", true);
@@ -428,6 +430,8 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
         .max_iterations = max_iterations,
         .target_exploitability_pct = target_exploitability_pct,
         .check_interval = check_interval,
+        .stall_patience = stall_patience,
+        .stall_rel_improvement = stall_rel_improvement,
         .num_threads = num_threads,
         .debug_invariants = debug_invariants,
     };
@@ -655,6 +659,8 @@ test "parse config with defaults for optional fields" {
     try std.testing.expectEqual(@as(f32, 0.5), bundle.solver.target_exploitability_pct);
     try std.testing.expectEqual(@as(u32, 0), bundle.solver.num_threads);
     try std.testing.expectEqual(@as(u32, 64), bundle.solver.check_interval);
+    try std.testing.expectEqual(@as(u32, 5), bundle.solver.stall_patience);
+    try std.testing.expectEqual(@as(f32, 0.01), bundle.solver.stall_rel_improvement);
 }
 
 test "missing required field" {

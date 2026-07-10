@@ -46,6 +46,17 @@ pub const SolverConfig = struct {
     max_iterations: u32 = 1000,
     target_exploitability_pct: f32 = 0.5,
     check_interval: u32 = 64,
+    /// Early-stop when the average strategy's exploitability stops improving. A
+    /// solve plateaus above `target_exploitability_pct` at the f32 storage
+    /// precision floor (~0.2% of pot for DCFR); without this guard it spins to
+    /// `max_iterations` running a costly best-response + average pass at every
+    /// check while making no measurable progress. After `stall_patience`
+    /// consecutive checks that fail to drop exploitability by at least
+    /// `stall_rel_improvement` (a fraction of the best value seen) the solve
+    /// stops. Set `stall_patience = 0` to disable and always run to the target
+    /// or `max_iterations`. See `best_response.StallDetector`.
+    stall_patience: u32 = 5,
+    stall_rel_improvement: f32 = 0.01,
     num_threads: u32 = 0,
     /// When true, run debug invariant sweeps (NaN/Inf scan of the regret arrays)
     /// after every pass. Defaults on in Debug builds, off otherwise; the spec
@@ -60,6 +71,10 @@ pub const SolverConfig = struct {
         if (!std.math.isFinite(self.dcfr.gamma) or self.dcfr.gamma < 0) return error.InvalidSolverConfig;
         if (self.max_iterations == 0) return error.InvalidSolverConfig;
         if (!std.math.isFinite(self.target_exploitability_pct) or self.target_exploitability_pct < 0) return error.InvalidSolverConfig;
+        // A relative-improvement threshold outside [0, 1) makes the stall test
+        // ill-defined (>=1 requires exploitability to more than halve every
+        // check; negative would let it "improve" by getting worse).
+        if (!std.math.isFinite(self.stall_rel_improvement) or self.stall_rel_improvement < 0 or self.stall_rel_improvement >= 1) return error.InvalidSolverConfig;
     }
 };
 
