@@ -51,7 +51,7 @@ theory optimal) strategy. It is not a poker bot or a real-time assistant.
 
 - **Post-flop solving** from any flop, turn, or river state
 - **Discounted CFR (DCFR)** and CFR+ algorithms
-- **Interactive web UI** — visual config builder (range grid + card picker) and strategy viewer (per-hand grid with game tree navigation)
+- **Interactive web UI** — config builder (range grid, card picker, Equilab-style paste, TOML import/export) and strategy viewer (color grid, suit-averaged cells, combo drill-down, tree navigation)
 - **Standard range formats** — `QQ+`, `ATs+`, `A5s-A2s`, `JTs-87s`, weights, just like Equilab/Flopzilla
 - **Human-readable summaries** (`--summary`) — see your strategy by hand class at a glance
 - **JSON output** — per-street strategy grids + per-hand EVs for any runout
@@ -73,12 +73,13 @@ alias zolver=./zig-out/bin/zolver
 **The fast path — no text editor needed:**
 
 ```bash
-# 1. Build your spot in the browser: pick a flop, draw both ranges, set sizings
-zolver config                       # interactive range grid + card picker
-#    → export to spot.toml when done
+# 1. Build your spot in the browser (or import an existing spot.toml)
+zolver config                       # range grid, card picker, paste ranges, TOML import/export
+#    → download spot.toml when done
 
 # 2. Solve it, then explore the result visually
 zolver solve spot.toml -o results.json --summary
+# stderr ends with: next: zolver view results.json
 zolver view results.json            # interactive strategy viewer in the browser
 ```
 
@@ -114,8 +115,10 @@ zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolver example
 ```
 
-Prebuilt Linux binaries (x86_64 and aarch64) are attached to each
-[release](https://github.com/phagmaier/zolver/releases).
+Prebuilt Linux binaries (`zolver-linux-x86_64` and `zolver-linux-aarch64`)
+are attached to each [GitHub release](https://github.com/phagmaier/zolver/releases).
+Releases are published automatically when a version tag `v*` is pushed (see
+`.github/workflows/release.yml`).
 
 ## CLI Reference
 
@@ -158,6 +161,13 @@ elapsed_s: 9.52
 converged: true
 ```
 
+When you pass `-o` / `--output`, stderr also prints a one-line next step:
+
+```text
+output written to 'results.json'
+next: zolver view results.json
+```
+
 > **Note on EVs:** after normalization by compatible range mass,
 > `avg_ev_oop` and `avg_ev_ip` sum to `initial_pot`, including when a line ends
 > all-in before the river. Turn and river chance is conditioned on the four
@@ -175,14 +185,16 @@ Opens an **interactive strategy viewer** in your browser.
 - **Click any cell** to see the strategy breakdown and EV in the detail
   panel. Cells with multiple combos show a **suit-averaged** strategy; expand
   the combo list in the detail panel to drill into a specific combo.
-- **Click the action buttons** below the grid (\"bet 66\", \"raise 110\", etc.)
+- **Click the action buttons** below the grid ("bet 66", "raise 110", etc.)
   to navigate deeper into the game tree and see how the opponent responds.
 - Use the **player toggle** (OOP / IP / Acting) to view the other player's
   perspective at the same decision point.
 - If you solved with `--turn` or `--all-runouts`, use the **street dropdown**
   to switch between flop, turn, and river.
-- **Keyboard shortcuts:** `Backspace` goes back up the tree, `Escape` deselects
-  the current hand, arrow keys switch streets.
+- **Color legend** under the meta strip maps check / call / bet / raise / all-in / fold.
+- **Keyboard shortcuts:** `Backspace` goes back up the tree; `Escape` steps out of a
+  concrete combo, then clears the selection; arrow keys switch streets. Terminal
+  actions (fold / lines with no child) are disabled rather than silent no-ops.
 - The viewer also works **standalone** — open the HTML file directly and
   drag-and-drop any `results.json` onto it.
 
@@ -197,7 +209,7 @@ spot without touching a text editor.
    the right panel. The selected cards appear in the board slots. The range
    grid automatically grays out hands that share cards with the board.
 
-2. **Set OOP's range** — in the left panel (\"OOP Range\" tab):
+2. **Set OOP's range** — in the left panel ("OOP Range" tab):
    - **Paste a range string** (Equilab/Flopzilla style) into the box under the
      grid — e.g. `QQ+, AKs, A5s-A2s:0.5, T9s+` — and hit **Apply** (or Enter).
      This replaces the active tab's grid. Invalid tokens toast an error and
@@ -209,18 +221,19 @@ spot without touching a text editor.
      percentage in the cell. Click **Apply** to confirm or **Cancel** to discard.
    - **Click and drag** across multiple cells to select or deselect a region
      of hands at once.
-   - Use the **preset buttons** (\"All Pairs\", \"Suited Aces\", \"Top 20%\",
+   - Use the **preset buttons** ("All Pairs", "Suited Aces", "Broadway",
      etc.) to quickly populate common ranges. Presets replace the current
-     selection.
+     selection. ("Top N%" buttons are coarse matrix shortcuts, not true equity
+     percentiles.)
 
-3. **Set IP's range** — switch to the \"IP Range\" tab and repeat. The two
+3. **Set IP's range** — switch to the "IP Range" tab and repeat. The two
    ranges are independent.
 
 4. **Configure the game** — in the right panel:
    - Set **Initial Pot**, **Effective Stack**, and **Min Bet**.
    - Add or remove **bet sizings** per street (as percentages of the pot).
      Click **+ Add** to add a sizing, the × button to remove one.
-   - Set **raise caps** per street (\"none\" = unlimited raising).
+   - Set **raise caps** per street ("none" = unlimited raising).
 
 5. **Configure the solver** — algorithm, max iterations, target exploitability,
    thread count, SIMD, prune options, and DCFR parameters (hidden when
@@ -228,9 +241,15 @@ spot without touching a text editor.
 
 6. **Export / Import** — the **TOML Preview** panel updates live as you edit.
    Click **Copy to Clipboard** or **Download spot.toml**, then run:
-   `zolver solve spot.toml -o results.json`. Use **Import TOML** (header) or
-   **Import file…** under the preview to reload an existing `spot.toml` back
-   into the builder (board, ranges, sizings, solver knobs).
+
+   ```bash
+   zolver solve spot.toml -o results.json --summary
+   zolver view results.json
+   ```
+
+   Incomplete spots (missing flop or empty ranges) are blocked from export.
+   Use **Import TOML** (header) or **Import file…** / **Import preview** under
+   the preview to reload an existing `spot.toml` back into the builder.
 
 ### `zolver example [--output <path>]`
 
@@ -516,11 +535,11 @@ iteration still pins ~7.9 cores and scales ~6× on 8 threads, while the adaptive
 
 ## Project Status
 
-The solver is **complete and tested (238 tests)** — from tree construction
-through threaded DCFR, best response, exploitability, SIMD kernels, output
-extraction, JSON export, interactive web UI (config builder + strategy viewer),
-and human-readable summaries. Convergence is cross-validated against TexasSolver
-(see [`bench/`](bench/README.md)).
+The solver is **complete and tested (238 tests)** — tree construction,
+threaded DCFR, best response, exploitability, SIMD kernels, suit compression,
+JSON export, terminal summaries, and the browser config builder / strategy
+viewer. Convergence is cross-validated against TexasSolver (see
+[`bench/`](bench/README.md)).
 
 ## Building
 
@@ -570,4 +589,4 @@ This project draws on the academic literature on CFR and its variants:
 - Brown & Sandholm (2019) — Discounted CFR
 - Tammelin (2014) — CFR+
 - Johanson et al. (2012) — Suit isomorphism for poker
-```
+
