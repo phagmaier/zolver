@@ -1,6 +1,7 @@
 const std = @import("std");
 const card = @import("card.zig");
 const isomorphism = @import("isomorphism.zig");
+const remap_mod = @import("remap.zig");
 const showdown_mod = @import("showdown.zig");
 
 const Combo = card.Combo;
@@ -214,6 +215,10 @@ pub const AllInContext = struct {
     win_amount: f32,
     loss_amount: f32,
     tie_amount: f32,
+    /// Suit-orbit remap tables; non-null only when compression is enabled, in
+    /// which case the `*Remapped` all-in kernels enumerate physical members over
+    /// the canonical river tables. When null the physical kernels are used.
+    rm: ?*const remap_mod.RemapTables = null,
 };
 
 /// Per-thread scratch for the all-in kernel. Sized once; never allocated in the
@@ -227,6 +232,9 @@ pub const AllInScratch = struct {
     lo_card: []f32,
     eq_card: []f32,
     cardsum: []f32,
+    /// Per-canonical-turn partial-sum buffer for the compressed flop all-in
+    /// reduction. Length N_u. Unused by the physical kernels.
+    term_partial: []f32 = &.{},
 };
 
 /// All-in terminal reached on the turn (one card to come). `reach_opp` is the
@@ -347,6 +355,129 @@ pub fn accumulateTurnRivers(
         for (0..N_u) |h| {
             values[h] += m_u[h] * scratch.child_values[h];
         }
+    }
+}
+
+/// Compressed all-in on the turn: enumerate physical river members of each
+/// canonical river under `turn_id`, remapping reach/values through each member's
+/// permutation while using the canonical river showdown/mask tables. `values` and
+/// `reach_opp` are in the canonical-turn hand frame. `values` is fully written.
+pub fn allInEvalTurnRemapped(
+    values: []f32,
+    reach_opp: []const f32,
+    turn_id: usize,
+    ctx: AllInContext,
+    scratch: AllInScratch,
+) void {
+    @memset(values, 0);
+    const rm = ctx.rm.?;
+    const turn = ctx.rt.canonical_turns[turn_id];
+    const first: usize = @intCast(turn.first_river);
+    var r: usize = 0;
+    while (r < turn.num_rivers) : (r += 1) {
+        const full = first + r;
+        for (rm.river_members[full]) |member| {
+            accumulateRiverMemberRemapped(values, reach_opp, full, rm.hand_perms[member.perm_index], rm.weight_river, ctx, scratch);
+        }
+    }
+}
+
+/// Compressed all-in on the flop: enumerate every physical turn→river runout,
+/// grouped by canonical turn, using the composed permutation onto its canonical
+/// river board. `values`/`reach_opp` are in the flop hand frame. Each canonical
+/// turn's contributions are summed into a partial buffer first, then folded into
+/// `values` — matching the physical `allInEvalFlop`'s two-level reduction so the
+/// rainbow case is bit-identical.
+pub fn allInEvalFlopRemapped(
+    values: []f32,
+    reach_opp: []const f32,
+    ctx: AllInContext,
+    scratch: AllInScratch,
+) void {
+    @memset(values, 0);
+    const rm = ctx.rm.?;
+    const w = rm.weight_turn * rm.weight_river;
+    const N_u = values.len;
+    const partial = scratch.term_partial[0..N_u];
+    for (rm.flop_runouts) |group| {
+        @memset(partial, 0);
+        for (group) |run| {
+            accumulateRiverMemberRemapped(partial, reach_opp, run.canonical_river, rm.hand_perms[run.perm_index], w, ctx, scratch);
+        }
+        for (0..N_u) |h| values[h] += partial[h];
+    }
+}
+
+/// One physical river member's contribution to a compressed all-in CFV.
+///
+/// `reach_opp`/`values` are in the *current* (canonical-turn or flop) hand frame;
+/// `full` selects the canonical river's showdown/mask tables. `hp` carries the
+/// current frame onto the canonical river frame. Mirrors one iteration of
+/// `accumulateTurnRivers`, with a reach gather in and a value gather out.
+fn accumulateRiverMemberRemapped(
+    values: []f32,
+    reach_opp: []const f32,
+    full: usize,
+    hp: remap_mod.HandPerm,
+    w: f32,
+    ctx: AllInContext,
+    scratch: AllInScratch,
+) void {
+    const N_u: usize = values.len;
+    const N_opp: usize = reach_opp.len;
+    const u: usize = ctx.u;
+    const opp: usize = 1 - @as(usize, ctx.u);
+    const u_card_idx = ctx.card_idx[u];
+    const opp_card_idx = ctx.card_idx[opp];
+
+    const m_opp = ctx.mask_river[opp][full * N_opp ..][0..N_opp];
+    const fo = hp.from_canon[opp];
+    @memset(scratch.cardsum[0..52], 0);
+    var total: f32 = 0;
+    for (0..N_opp) |j| {
+        const mr = reach_opp[fo[j]] * m_opp[j] * w;
+        total += mr;
+        scratch.reach_opp[j] = mr;
+        scratch.cardsum[opp_card_idx[2 * j]] += mr;
+        scratch.cardsum[opp_card_idx[2 * j + 1]] += mr;
+    }
+
+    // same_reach is indexed in the canonical frame; same_combo_idx is
+    // frame-independent (identical-combo pairing is a property of the two cards).
+    for (0..N_u) |j| {
+        const same = ctx.same_combo_idx[j];
+        scratch.same_reach[j] = if (same != sentinel) scratch.reach_opp[same] else 0.0;
+    }
+
+    @memset(scratch.lo_card[0..52], 0);
+    showdownEval(
+        scratch.child_values[0..N_u],
+        scratch.reach_opp[0..N_opp],
+        u_card_idx,
+        opp_card_idx,
+        ctx.sd.order[u][full * N_u ..][0..N_u],
+        ctx.sd.strengths[u][full * N_u ..][0..N_u],
+        ctx.sd.order[opp][full * N_opp ..][0..N_opp],
+        ctx.sd.strengths[opp][full * N_opp ..][0..N_opp],
+        ctx.win_amount,
+        ctx.loss_amount,
+        ctx.tie_amount,
+        scratch.cardsum,
+        total,
+        scratch.same_reach,
+        scratch.lo_card,
+        scratch.eq_card,
+        scratch.compat,
+    );
+
+    // Fold canonical-river values back into the current frame: current-frame
+    // u-hand h maps to canonical u-hand tu[h]; its physical mask equals the
+    // canonical mask at that index.
+    const m_u = ctx.mask_river[u][full * N_u ..][0..N_u];
+    const tu = hp.to_canon[u];
+    for (0..N_u) |h| {
+        const g = tu[h];
+        values[h] += m_u[g] * scratch.child_values[g];
     }
 }
 

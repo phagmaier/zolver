@@ -11,6 +11,7 @@ pub const range = @import("range.zig");
 pub const storage = @import("storage.zig");
 pub const blocking = @import("blocking.zig");
 pub const showdown = @import("showdown.zig");
+pub const remap = @import("remap.zig");
 pub const init = @import("init.zig");
 pub const kernels = @import("kernels.zig");
 pub const terminal_eval = @import("terminal_eval.zig");
@@ -34,6 +35,7 @@ test {
     std.testing.refAllDecls(storage);
     std.testing.refAllDecls(blocking);
     std.testing.refAllDecls(showdown);
+    std.testing.refAllDecls(remap);
     std.testing.refAllDecls(init);
     std.testing.refAllDecls(kernels);
     std.testing.refAllDecls(terminal_eval);

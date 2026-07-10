@@ -5,6 +5,7 @@ const scratch_mod = @import("scratch.zig");
 const kernels = @import("kernels.zig");
 const terminal_eval = @import("terminal_eval.zig");
 const threading = @import("threading.zig");
+const remap = @import("remap.zig");
 
 const Allocator = std.mem.Allocator;
 const SolverInit = init_mod.SolverInit;
@@ -301,6 +302,35 @@ pub const WalkCtx = struct {
 
         switch (next_street) {
             .turn => {
+                if (self.is.compress_suits) {
+                    // Compressed: visit each physical member of every canonical
+                    // turn orbit, remapping reaches/CFVs through its permutation.
+                    // (Parallel turn dispatch is not yet wired for the compressed
+                    // path; it runs serially.)
+                    const rm = &self.is.remap.?;
+                    for (self.is.runout_tables.canonical_turns, 0..) |_, t| {
+                        const cr: u32 = @intCast(t);
+                        const cmu = self.is.mask_turn[self.u][cr * n_u ..][0..n_u];
+                        const cmo = self.is.mask_turn[self.opp][cr * n_opp ..][0..n_opp];
+                        for (rm.turn_members[t]) |member| {
+                            self.descendChanceRemapped(
+                                node.child,
+                                .turn,
+                                cr,
+                                cmu,
+                                cmo,
+                                rm.weight_turn,
+                                rm.hand_perms[member.perm_index],
+                                reach_u,
+                                reach_opp,
+                                node_v,
+                                depth,
+                                mode,
+                            );
+                        }
+                    }
+                    return node_v;
+                }
                 if (comptime mode.parallel()) {
                     if (self.pool) |pool| {
                         self.walkChanceTurnParallel(node.child, n_u, n_opp, reach_u, reach_opp, node_v, depth, mode, pool);
@@ -326,6 +356,35 @@ pub const WalkCtx = struct {
             },
             .river => {
                 const turn = self.is.runout_tables.canonical_turns[runout_id];
+                if (self.is.compress_suits) {
+                    // We are in the canonical-turn frame (reaches already permuted
+                    // by the turn seam). Visit each physical river member of every
+                    // canonical river orbit under this turn.
+                    const rm = &self.is.remap.?;
+                    var r: u32 = 0;
+                    while (r < turn.num_rivers) : (r += 1) {
+                        const full = turn.first_river + r;
+                        const cmu = self.is.mask_river[self.u][full * n_u ..][0..n_u];
+                        const cmo = self.is.mask_river[self.opp][full * n_opp ..][0..n_opp];
+                        for (rm.river_members[full]) |member| {
+                            self.descendChanceRemapped(
+                                node.child,
+                                .river,
+                                full,
+                                cmu,
+                                cmo,
+                                rm.weight_river,
+                                rm.hand_perms[member.perm_index],
+                                reach_u,
+                                reach_opp,
+                                node_v,
+                                depth,
+                                mode,
+                            );
+                        }
+                    }
+                    return node_v;
+                }
                 var r: u32 = 0;
                 while (r < turn.num_rivers) : (r += 1) {
                     const full = turn.first_river + r;
@@ -381,6 +440,60 @@ pub const WalkCtx = struct {
             kernels.weightedAccumulateSimd(node_v, m_u, child_v);
         } else {
             kernels.weightedAccumulate(node_v, m_u, child_v);
+        }
+    }
+
+    /// Compressed-runout descent for one physical orbit member. The canonical
+    /// subtree at `canonical_runout` uses canonical masks/showdown/storage, so we
+    /// permute the parent reaches into canonical hand order on the way in and
+    /// permute the returned CFVs back to physical order on the way out.
+    ///
+    /// `cmask_u`/`cmask_opp` are the *canonical* runout's blocking masks. Because
+    /// a valid permutation carries a hand live on the member board onto a hand
+    /// live on the canonical board, applying the canonical mask to the permuted
+    /// reach equals applying the member's physical mask to the original reach — so
+    /// no per-member physical mask array is needed. `weight` is the plain physical
+    /// chance probability (1/45 or 1/44), not multiplicity-scaled.
+    ///
+    /// With an identity permutation (rainbow: every orbit is size one) the gathers
+    /// are pure copies and the arithmetic is bit-identical to `descendChance` with
+    /// the SIMD kernels, keeping compressed==physical exact on rainbow flops.
+    fn descendChanceRemapped(
+        self: *WalkCtx,
+        child_ref: NodeRef,
+        child_street: Street,
+        canonical_runout: u32,
+        cmask_u: []const f32,
+        cmask_opp: []const f32,
+        weight: f32,
+        hp: remap.HandPerm,
+        reach_u: []const f32,
+        reach_opp: []const f32,
+        node_v: []f32,
+        depth: u32,
+        comptime mode: WalkMode,
+    ) void {
+        const n_u = self.N[self.u];
+        const n_opp = self.N[self.opp];
+        const child_ru = self.scratch.reachU(depth + 1, n_u);
+        const child_ro = self.scratch.reachOpp(depth + 1, n_opp);
+
+        // Gather parent reach into canonical hand order and apply the canonical
+        // mask (and chance weight on the opponent side), fused into one pass.
+        const fu = hp.from_canon[self.u];
+        const fo = hp.from_canon[self.opp];
+        for (0..n_u) |j| child_ru[j] = reach_u[fu[j]] * cmask_u[j];
+        for (0..n_opp) |j| child_ro[j] = reach_opp[fo[j]] * cmask_opp[j] * weight;
+
+        const child_v = self.walk(child_ref, child_street, canonical_runout, child_ru, child_ro, depth + 1, mode);
+
+        // Fold the canonical CFV back into physical hand order: for physical hand
+        // h, its canonical image is tu[h], and the physical mask for h equals the
+        // canonical mask at tu[h].
+        const tu = hp.to_canon[self.u];
+        for (0..n_u) |h| {
+            const g = tu[h];
+            node_v[h] += cmask_u[g] * child_v[g];
         }
     }
 
@@ -648,12 +761,21 @@ pub const WalkCtx = struct {
                         .win_amount = c.win,
                         .loss_amount = c.loss,
                         .tie_amount = c.tie,
+                        .rm = if (is.compress_suits) &is.remap.? else null,
                     };
                     const ais = self.scratch.allInScratch(n_u, n_opp);
                     if (street == .turn) {
-                        terminal_eval.allInEvalTurn(node_v, reach_opp, runout_id, ctx, ais);
+                        if (is.compress_suits) {
+                            terminal_eval.allInEvalTurnRemapped(node_v, reach_opp, runout_id, ctx, ais);
+                        } else {
+                            terminal_eval.allInEvalTurn(node_v, reach_opp, runout_id, ctx, ais);
+                        }
                     } else {
-                        self.allInEvalFlopParallel(n_u, n_opp, reach_opp, node_v, ctx);
+                        if (is.compress_suits) {
+                            terminal_eval.allInEvalFlopRemapped(node_v, reach_opp, ctx, ais);
+                        } else {
+                            self.allInEvalFlopParallel(n_u, n_opp, reach_opp, node_v, ctx);
+                        }
                     }
                 }
             },
@@ -1282,4 +1404,184 @@ test "parallel solve is byte-identical to serial across worker counts" {
         p.iterate(4);
         try expectIdenticalStorage(&is_ref, &is_p);
     }
+}
+
+// ── Suit-isomorphism compression parity (AGENTS.md follow-up #1) ─────────────
+
+fn buildInitC(
+    allocator: Allocator,
+    flop: [3]card.Card,
+    oop: []const WeightedCombo,
+    ip: []const WeightedCombo,
+    compress: bool,
+) !SolverInit {
+    const config = init_mod.Config{
+        .flop = flop,
+        .initial_pot = 10,
+        .effective_stack = 16,
+        .min_bet = 2,
+        .sizings = test_sizings,
+        .raise_cap = .{ 0, 0, 0 },
+        .oop_range = oop,
+        .ip_range = ip,
+        .max_budget_bytes = std.math.maxInt(u64),
+        .compress_suits = compress,
+    };
+    return init_mod.SolverInit.init(allocator, config);
+}
+
+const rainbow_flop = [_]card.Card{ card.makeCard(12, 0), card.makeCard(11, 1), card.makeCard(7, 2) };
+const two_tone_flop = [_]card.Card{ card.makeCard(12, 0), card.makeCard(11, 0), card.makeCard(5, 1) };
+
+test "compressed rainbow solve is byte-identical to the physical oracle" {
+    const alloc = testing.allocator;
+    // Distinct suits and ranks → the only board-preserving permutation is the
+    // identity, so compression is a structural no-op: same runout counts, and the
+    // remapped chance/all-in code paths must reproduce the physical arithmetic
+    // bit-for-bit (identity gathers are pure copies; the kernels use no FMA).
+    const oop = [_]WeightedCombo{
+        try wc(card.makeCard(9, 3), card.makeCard(8, 3)),
+        try wc(card.makeCard(5, 2), card.makeCard(4, 2)),
+    };
+    const ip = [_]WeightedCombo{
+        try wc(card.makeCard(7, 3), card.makeCard(6, 3)),
+        try wc(card.makeCard(3, 1), card.makeCard(2, 1)),
+    };
+
+    var is_u = try buildInitC(alloc, rainbow_flop, &oop, &ip, false);
+    defer is_u.deinit();
+    var su = try Solver.init(alloc, &is_u, .{});
+    defer su.deinit();
+    su.iterate(6);
+
+    var is_c = try buildInitC(alloc, rainbow_flop, &oop, &ip, true);
+    defer is_c.deinit();
+    var sc = try Solver.init(alloc, &is_c, .{});
+    defer sc.deinit();
+    sc.iterate(6);
+
+    try expectIdenticalStorage(&is_u, &is_c);
+    try testing.expectEqual(su.rootEV(0), sc.rootEV(0));
+    try testing.expectEqual(su.rootEV(1), sc.rootEV(1));
+}
+
+// Symmetric ranges closed under the flop's suit-symmetry group, so compression
+// keeps non-trivial permutations and actually collapses runouts.
+fn monoSymRanges() ![2][3]WeightedCombo {
+    const oop = [3]WeightedCombo{
+        try wc(card.makeCard(0, 1), card.makeCard(1, 1)),
+        try wc(card.makeCard(0, 2), card.makeCard(1, 2)),
+        try wc(card.makeCard(0, 3), card.makeCard(1, 3)),
+    };
+    const ip = [3]WeightedCombo{
+        try wc(card.makeCard(3, 1), card.makeCard(4, 1)),
+        try wc(card.makeCard(3, 2), card.makeCard(4, 2)),
+        try wc(card.makeCard(3, 3), card.makeCard(4, 3)),
+    };
+    return .{ oop, ip };
+}
+
+fn twoToneSymRanges() ![2][2]WeightedCombo {
+    // Two-tone A♠K♠7♥: only the diamond↔club swap fixes the board.
+    const oop = [2]WeightedCombo{
+        try wc(card.makeCard(0, 2), card.makeCard(1, 2)),
+        try wc(card.makeCard(0, 3), card.makeCard(1, 3)),
+    };
+    const ip = [2]WeightedCombo{
+        try wc(card.makeCard(3, 2), card.makeCard(4, 2)),
+        try wc(card.makeCard(3, 3), card.makeCard(4, 3)),
+    };
+    return .{ oop, ip };
+}
+
+/// At the uniform profile (fresh solver, zero regrets), every runout value is a
+/// linear/max function of the ranges and board. A lossless suit-isomorphism
+/// compression must reproduce root EVs and best-response EVs of the physical
+/// oracle exactly (to f32 tolerance) — this is the exact remap gate for boards
+/// that actually compress.
+fn expectUniformProfileParity(
+    alloc: Allocator,
+    flop: [3]card.Card,
+    oop: []const WeightedCombo,
+    ip: []const WeightedCombo,
+) !void {
+    var is_u = try buildInitC(alloc, flop, oop, ip, false);
+    defer is_u.deinit();
+    var su = try Solver.init(alloc, &is_u, .{});
+    defer su.deinit();
+
+    var is_c = try buildInitC(alloc, flop, oop, ip, true);
+    defer is_c.deinit();
+    var sc = try Solver.init(alloc, &is_c, .{});
+    defer sc.deinit();
+
+    // Compression must have actually collapsed the runout space.
+    try testing.expect(is_c.runout_tables.canonical_turns.len < is_u.runout_tables.canonical_turns.len);
+
+    try testing.expectApproxEqAbs(su.rootEV(0), sc.rootEV(0), 1e-3);
+    try testing.expectApproxEqAbs(su.rootEV(1), sc.rootEV(1), 1e-3);
+    try testing.expectApproxEqAbs(su.bestResponseEV(0), sc.bestResponseEV(0), 1e-3);
+    try testing.expectApproxEqAbs(su.bestResponseEV(1), sc.bestResponseEV(1), 1e-3);
+}
+
+test "compressed monotone matches physical root/BR EVs at uniform profile" {
+    const alloc = testing.allocator;
+    const r = try monoSymRanges();
+    try expectUniformProfileParity(alloc, mono_flop, &r[0], &r[1]);
+}
+
+test "compressed two-tone matches physical root/BR EVs at uniform profile" {
+    const alloc = testing.allocator;
+    const r = try twoToneSymRanges();
+    try expectUniformProfileParity(alloc, two_tone_flop, &r[0], &r[1]);
+}
+
+test "compressed monotone solve stays constant-sum and tracks the oracle" {
+    const alloc = testing.allocator;
+    const r = try monoSymRanges();
+
+    var is_u = try buildInitC(alloc, mono_flop, &r[0], &r[1], false);
+    defer is_u.deinit();
+    var su = try Solver.init(alloc, &is_u, .{});
+    defer su.deinit();
+    su.iterate(8);
+
+    var is_c = try buildInitC(alloc, mono_flop, &r[0], &r[1], true);
+    defer is_c.deinit();
+    var sc = try Solver.init(alloc, &is_c, .{});
+    defer sc.deinit();
+    sc.iterate(8);
+
+    // Compression is a lossless abstraction: constant-sum must hold exactly on
+    // the compressed solver, independent of the oracle.
+    try checkConstantSum(&sc, 1e-2);
+
+    // The compressed solve is genuinely converging on the same game: a best
+    // response can only beat (never lose to) the average strategy, so
+    // exploitability is non-negative for both players.
+    try testing.expect(sc.bestResponseEV(0) - sc.averageEV(0) >= -1e-2);
+    try testing.expect(sc.bestResponseEV(1) - sc.averageEV(1) >= -1e-2);
+
+    // Both are valid DCFR on the same game and head to the same equilibrium.
+    // Their trajectories differ (a canonical infoset is discounted once per orbit
+    // member per iteration, so per-iteration values are not bit-equal — see the
+    // plan), so this is only a gross-divergence sanity bound, not an exact match;
+    // the exact remap check lives in the uniform-profile parity tests above.
+    try testing.expectApproxEqAbs(su.averageEV(0), sc.averageEV(0), 1.0);
+    try testing.expectApproxEqAbs(su.averageEV(1), sc.averageEV(1), 1.0);
+}
+
+test "compression reduces total solver memory on symmetric boards" {
+    const alloc = testing.allocator;
+    const r = try monoSymRanges();
+
+    var is_u = try buildInitC(alloc, mono_flop, &r[0], &r[1], false);
+    defer is_u.deinit();
+    var is_c = try buildInitC(alloc, mono_flop, &r[0], &r[1], true);
+    defer is_c.deinit();
+
+    // The whole point: fewer canonical runouts shrink storage/board tables.
+    try testing.expect(is_c.runout_tables.canonical_turns.len < is_u.runout_tables.canonical_turns.len);
+    try testing.expect(is_c.runout_tables.canonical_rivers.len < is_u.runout_tables.canonical_rivers.len);
+    try testing.expect(try is_c.memoryBytes() < try is_u.memoryBytes());
 }

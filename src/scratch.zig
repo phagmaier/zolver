@@ -66,7 +66,7 @@ pub fn maxChildren(tree: *const Tree) u32 {
 /// all-in kernel's `reach_opp` / `child_values` staging buffers and the three
 /// 52-float card buffers used by every terminal kernel.
 ///
-/// Total: `max_depth × (3 + 2·a_max) × n_max + 4·n_max + 3·52` floats.
+/// Total: `max_depth × (3 + 2·a_max) × n_max + 5·n_max + 3·52` floats.
 pub const Scratch = struct {
     allocator: Allocator,
     max_depth: u32,
@@ -93,6 +93,10 @@ pub const Scratch = struct {
     /// Precomputed per-hand compat scratch for showdownEval (Section 4.2),
     /// populated once before the sorted sweep. Sized to n_max per thread.
     compat: []f32,
+    /// Per-canonical-turn partial-sum buffer for the compressed flop all-in
+    /// reduction (`allInEvalFlopRemapped`), so it accumulates in the same
+    /// two-level order as the physical path. Sized to n_max.
+    term_partial: []f32,
 
     /// Build an arena sized directly to `tree`'s depth and branching factor.
     /// `n_max` must be the larger of the two players' range sizes.
@@ -141,6 +145,8 @@ pub const Scratch = struct {
         off += n;
         const compat = slab[off..][0..n];
         off += n;
+        const term_partial = slab[off..][0..n];
+        off += n;
         std.debug.assert(off == total);
 
         return .{
@@ -161,6 +167,7 @@ pub const Scratch = struct {
             .eq_card = eq_card,
             .same_reach = same_reach,
             .compat = compat,
+            .term_partial = term_partial,
         };
     }
 
@@ -227,6 +234,7 @@ pub const Scratch = struct {
             .lo_card = self.lo_card,
             .eq_card = self.eq_card,
             .cardsum = self.cardsum,
+            .term_partial = self.term_partial[0..n_u],
         };
     }
 };
@@ -239,7 +247,7 @@ fn slabLen(max_depth: u32, n_max: u32, a_max: u32) !usize {
     const wide = try std.math.mul(usize, small, a);
     var total = try std.math.mul(usize, small, 3);
     total = try std.math.add(usize, total, try std.math.mul(usize, wide, 2));
-    total = try std.math.add(usize, total, try std.math.mul(usize, n, 4));
+    total = try std.math.add(usize, total, try std.math.mul(usize, n, 5));
     return std.math.add(usize, total, card_scratch_len * 3);
 }
 
@@ -309,7 +317,7 @@ test "Scratch: layout sizes and total memory" {
     defer s.deinit();
 
     const expected_floats: usize =
-        @as(usize, max_depth) * (3 + 2 * a_max) * n_max + 2 * n_max + 3 * card_scratch_len + n_max * 2;
+        @as(usize, max_depth) * (3 + 2 * a_max) * n_max + 2 * n_max + 3 * card_scratch_len + n_max * 3;
     try testing.expectEqual(expected_floats, s.slab.len);
     try testing.expectEqual(expected_floats * @sizeOf(f32), s.memoryBytes());
 }

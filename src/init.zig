@@ -6,6 +6,7 @@ const range = @import("range.zig");
 const storage = @import("storage.zig");
 const blocking = @import("blocking.zig");
 const showdown = @import("showdown.zig");
+const remap_mod = @import("remap.zig");
 const evaluator_mod = @import("evaluator.zig");
 
 const Allocator = std.mem.Allocator;
@@ -37,6 +38,12 @@ pub const SolverInit = struct {
     storage: Storage,
     blocking: BlockingTables,
     showdown: ShowdownTables,
+
+    /// Whether the solver traverses compressed canonical runouts (remapping
+    /// reaches/values per orbit member) or the full physical runout space.
+    compress_suits: bool,
+    /// Suit-orbit remap tables; populated only when `compress_suits` is true.
+    remap: ?remap_mod.RemapTables,
 
     /// f32 mask arrays (1.0 = live, 0.0 = blocked) for SIMD branching-free masking.
     mask_flop: [2][]f32,
@@ -89,10 +96,14 @@ pub const SolverInit = struct {
         errdefer tree.deinit();
 
         // Suit-orbit compression requires remapping private-hand reaches and
-        // values for every orbit member. Applying one representative's blocking
-        // mask to the entire orbit is not sound, so solve over physical runouts
-        // until that permutation-aware traversal exists.
-        var runout_tables = try isomorphism.buildUncompressedRunoutTables(allocator, config.flop);
+        // values for every orbit member (see `remap` below and `cfr.zig`). When
+        // disabled we solve the full physical runout space — the correctness
+        // oracle. `buildRunoutTables` keeps only permutations that preserve both
+        // ranges, so its identity element always survives (no error in practice).
+        var runout_tables = if (config.compress_suits)
+            try isomorphism.buildRunoutTables(allocator, config.flop, .{ config.oop_range, config.ip_range })
+        else
+            try isomorphism.buildUncompressedRunoutTables(allocator, config.flop);
         errdefer runout_tables.deinit();
 
         const runout_counts = runout_tables.runoutCounts();
@@ -152,6 +163,14 @@ pub const SolverInit = struct {
         var sd = try ShowdownTables.init(allocator, hands, config.flop, &runout_tables, &eval);
         errdefer sd.deinit();
 
+        // Orbit-member remap tables: only needed when compressing. For the
+        // physical oracle every orbit is trivially size one, so we skip the build.
+        var remap: ?remap_mod.RemapTables = null;
+        if (config.compress_suits) {
+            remap = try remap_mod.build(allocator, hands, config.flop, &runout_tables);
+        }
+        errdefer if (remap) |*rm| rm.deinit();
+
         return .{
             .allocator = allocator,
             .max_budget_bytes = config.max_budget_bytes,
@@ -168,10 +187,13 @@ pub const SolverInit = struct {
             .weight_turns = w_turns,
             .weight_rivers = w_rivers,
             .card_idx = card_idx,
+            .compress_suits = config.compress_suits,
+            .remap = remap,
         };
     }
 
     pub fn deinit(self: *SolverInit) void {
+        if (self.remap) |*rm| rm.deinit();
         self.allocator.free(self.card_idx[1]);
         self.allocator.free(self.card_idx[0]);
         self.allocator.free(self.weight_rivers);
@@ -222,6 +244,7 @@ pub const SolverInit = struct {
         }
         try addSliceBytes(&total, self.weight_turns, f32);
         try addSliceBytes(&total, self.weight_rivers, f32);
+        if (self.remap) |*rm| total = try std.math.add(u64, total, rm.memoryBytes());
         try addSliceBytes(&total, self.storage.regrets_flop, f32);
         try addSliceBytes(&total, self.storage.regrets_turn, f32);
         try addSliceBytes(&total, self.storage.regrets_river, f32);
@@ -244,6 +267,11 @@ pub const Config = struct {
     ip_range: []const WeightedCombo,
     /// Refuse allocation if the regret + strategy arrays exceed this byte count.
     max_budget_bytes: u64,
+    /// When true, solve over suit-isomorphic canonical runouts and remap
+    /// private-hand reaches/values per orbit member (memory win on symmetric
+    /// boards). When false (default), solve the full physical runout space — the
+    /// correctness oracle. See `AGENTS.md` follow-up #1.
+    compress_suits: bool = false,
 
     pub fn default(
         flop: [3]Card,
