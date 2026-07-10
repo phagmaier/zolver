@@ -513,8 +513,7 @@ The solver is **complete and tested (238 tests)** — from tree construction
 through threaded DCFR, best response, exploitability, SIMD kernels, output
 extraction, JSON export, interactive web UI (config builder + strategy viewer),
 and human-readable summaries. Convergence is cross-validated against TexasSolver
-(see [`bench/`](bench/README.md)). See
-[`AGENTS.md`](AGENTS.md) for detailed implementation notes.
+(see [`bench/`](bench/README.md)).
 
 ## Building
 
@@ -529,7 +528,7 @@ scripts.
 | *(default)* | `zig build` | Debug build → `zig-out/bin/zolver` (assertions + `debug_invariants` NaN/Inf sweeps enabled). |
 | *(default, release)* | `zig build -Doptimize=ReleaseFast` | Optimized build — use this for anything you actually run or time. |
 | `run` | `zig build run -- solve spot.toml --summary` | Build and launch the CLI; everything after `--` is forwarded to `zolver`. |
-| `test` | `zig build test` | Full test suite (238 tests: unit, suit-compression parity, serial-vs-threaded determinism, spin-then-park pool). |
+| `test` | `zig build test` | Full test suite (238 tests: unit, suit-compression parity, serial-vs-threaded determinism, spin-then-park pool). Runs in **ReleaseSafe** (all asserts/bounds checks kept, just optimized — the solver tests iterate real CFR, so this is ~6× faster than Debug with identical results). Add `-Dtest-filter=<substr>` to run a subset, or `-Dtest-optimize=Debug` for the fully unoptimized run (also enables the Debug-only invariant sweeps). |
 | `bench-threads` | `zig build bench-threads -- <spot.toml> [flags]` | Thread-pool benchmark: wall **and** CPU time for the solve / exploitability / output passes at 1/2/4/8 threads. Always compiles ReleaseFast. Flags: `--iters N --warmup N --exploit-reps N --output-reps N`. Prints JSON to stdout, a table to stderr. |
 
 ### Standalone measurement binaries (`zig run`)

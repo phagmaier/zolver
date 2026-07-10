@@ -141,8 +141,31 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
+    // Optional `-Dtest-filter=<substring>` to run only matching tests (handy
+    // for iterating on one module without paying for the whole solver suite).
+    const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this substring") orelse &.{};
+
+    // Tests run in ReleaseSafe by default. The suite iterates real CFR over the
+    // full physical-runout space, which is ~10× slower unoptimized, so a Debug
+    // build turns a seconds-long run into minutes. ReleaseSafe keeps every
+    // `assert`, bounds/overflow check, and `unreachable` trap — the same
+    // bug-catching as Debug — while optimizing the hot loops. There is no
+    // fast-math anywhere in the solver (no `@setFloatMode`/`@mulAdd`), so float
+    // results are bit-identical to Debug and the byte-exact determinism/parity
+    // gates still hold. Use `-Dtest-optimize=Debug` for the fully unoptimized
+    // run, which additionally enables the Debug-only `debug_invariants` sweeps.
+    const test_optimize = b.option(std.builtin.OptimizeMode, "test-optimize", "Optimize mode for the test binaries (default: ReleaseSafe)") orelse .ReleaseSafe;
+
+    // Dedicated test modules so the exposed `zolver` module stays at the user's
+    // chosen optimize level; only the test binaries move to `test_optimize`.
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = test_optimize,
+    });
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = test_mod,
+        .filters = test_filters,
     });
 
     // A run step that will run the test executable.
@@ -151,8 +174,15 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
+    const exe_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = test_optimize,
+        .imports = &.{.{ .name = "zolver", .module = test_mod }},
+    });
     const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .root_module = exe_test_mod,
+        .filters = test_filters,
     });
 
     // A run step that will run the second test executable.

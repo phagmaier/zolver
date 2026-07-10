@@ -274,7 +274,7 @@ pub const Config = struct {
     max_budget_bytes: u64,
     /// Solve over suit-isomorphic canonical runouts and remap private-hand
     /// reaches/values per orbit member. Disable only to use the physical-runout
-    /// correctness oracle. See `AGENTS.md` follow-up #1.
+    /// correctness oracle.
     compress_suits: bool = true,
 
     pub fn default(

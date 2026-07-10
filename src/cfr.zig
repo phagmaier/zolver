@@ -1538,7 +1538,7 @@ test "parallel solve is byte-identical to serial across worker counts" {
     }
 }
 
-// ── Suit-isomorphism compression parity (AGENTS.md follow-up #1) ─────────────
+// ── Suit-isomorphism compression parity ─────────────────────────────────────
 
 fn buildInitC(
     allocator: Allocator,

@@ -7,7 +7,7 @@
 //! Hand classes are the current made hand on the 5-card flop (2 hole + 3 board):
 //! `set+` (trips or better, or a made straight/flush), `two pair`, `pair`, and
 //! `high card`. This is objective and needs no draw heuristics; it does not
-//! distinguish top- from middle-pair (see AGENTS.md for the chosen taxonomy).
+//! distinguish top- from middle-pair.
 
 const std = @import("std");
 const card = @import("card.zig");

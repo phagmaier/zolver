@@ -4,7 +4,7 @@
 //! tables for the *canonical* runouts only, but must still account for every
 //! *physical* runout — a private hand may contain a non-canonical card of an
 //! orbit, so a representative board cannot simply be multiplied by its orbit
-//! size (see `AGENTS.md` and the note in `init.zig`).
+//! size (see the note in `init.zig`).
 //!
 //! This module precomputes, for each physical orbit member, (a) the canonical
 //! runout id it maps to and (b) the per-player hand-index permutation induced by
