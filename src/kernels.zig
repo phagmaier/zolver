@@ -1191,3 +1191,26 @@ test "maskedScale: scalar correctness" {
     try testing.expect(@abs(0.75 - dst[2]) < 1e-7);
     try testing.expect(@abs(2.0 - dst[3]) < 1e-7);
 }
+
+/// DCFR+ / PDCFR+ (Xu et al., IJCAI 2024, Table 1). The last observed
+/// instantaneous regret predicts the next one; cumulative regrets and predicted
+/// regrets are distinct arrays. A zero-reach pass supplies zero new regret.
+pub fn predictiveRegretUpdate(regrets: []f32, prediction: ?[]f32, children: []const f32, values: []const f32, discount: f32, next_discount: f32, n: u32, actions: u32) void {
+    for (0..actions) |a| for (0..n) |h| {
+        const i = a * n + h;
+        const instantaneous = children[i] - values[h];
+        regrets[i] = @max(0, discount * regrets[i] + instantaneous);
+        if (prediction) |p| p[i] = @max(0, next_discount * regrets[i] + instantaneous);
+    };
+}
+
+test "predictive regret update keeps separate clipped actual and predicted regrets" {
+    var regrets = [_]f32{ 4, 2 };
+    var predicted: [2]f32 = undefined;
+    predictiveRegretUpdate(&regrets, &predicted, &.{ 1, 5 }, &.{3}, 0.5, 0.75, 1, 2);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, &regrets);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 4.25 }, &predicted);
+    predictiveRegretUpdate(&regrets, &predicted, &.{ 0, 0 }, &.{0}, 0.75, 0.8, 1, 2);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 2.25 }, &regrets);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.8), predicted[1], 1e-6);
+}

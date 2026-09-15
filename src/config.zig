@@ -358,6 +358,9 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
     const flop = parse.parseFlop(allocator, flop_field.value) catch |err|
         return f.parseFail(flop_field.line, "flop", flop_field.value, err);
 
+    const turn: ?card.Card = if (kv.get("game.turn") != null) try parse.parseCard(try f.expectString("game.turn")) else null;
+    const river: ?card.Card = if (kv.get("game.river") != null) try parse.parseCard(try f.expectString("game.river")) else null;
+    if (river != null and turn == null) return error.RiverWithoutTurn;
     const initial_pot = try f.expectInt("game.initial_pot");
     const effective_stack = try f.expectInt("game.effective_stack");
     const min_bet = try f.expectOptionalIntDefault("game.min_bet", 1);
@@ -387,8 +390,8 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
         .dcfr
     else if (std.mem.eql(u8, algo_field.value, "cfr_plus"))
         .cfr_plus
-    else {
-        if (diag) |d| d.set(algo_field.line, "unknown algorithm '{s}' (expected 'dcfr' or 'cfr_plus')", .{algo_field.value});
+    else if (std.mem.eql(u8, algo_field.value, "dcfr_plus")) .dcfr_plus else if (std.mem.eql(u8, algo_field.value, "pdcfr_plus")) .pdcfr_plus else {
+        if (diag) |d| d.set(algo_field.line, "unknown algorithm '{s}' (expected dcfr, cfr_plus, dcfr_plus, or pdcfr_plus)", .{algo_field.value});
         return error.InvalidValue;
     };
 
@@ -411,6 +414,8 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
 
     const game = Config{
         .flop = flop,
+        .turn = turn,
+        .river = river,
         .initial_pot = initial_pot,
         .effective_stack = effective_stack,
         .min_bet = min_bet,
@@ -425,11 +430,13 @@ fn buildBundle(allocator: Allocator, kv: *std.StringHashMap(KeyValue), arena: st
     const solver = SolverConfig{
         .algorithm = algorithm,
         .dcfr = .{ .alpha = dcfr_alpha, .beta = dcfr_beta, .gamma = dcfr_gamma },
+        .pdcfr = .{ .alpha = try f.expectOptionalFloat("solver.pdcfr.alpha", 2.3), .gamma = try f.expectOptionalFloat("solver.pdcfr.gamma", 5) },
         .prune_zero_reach = prune_zero_reach,
         .use_simd = use_simd,
         .max_iterations = max_iterations,
         .target_exploitability_pct = target_exploitability_pct,
         .check_interval = check_interval,
+        .verify_final = try f.expectBool("solver.verify_final", false),
         .stall_patience = stall_patience,
         .stall_rel_improvement = stall_rel_improvement,
         .num_threads = num_threads,

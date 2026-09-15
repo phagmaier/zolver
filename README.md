@@ -276,7 +276,7 @@ flop (`set+`, `two pair`, `pair`, `high card`). Perfect for a quick read of
 ### `--output results.json` (machine-readable)
 
 The full per-hand strategy tree, ready to feed into a script, notebook, or your
-own viewer. The flop tree (runout-independent) is always included; turn/river
+own viewer. The configured root street is always included; later-street
 subtrees are added on demand with `--turn`/`--river`, or exhaustively with
 `--all-runouts`.
 
@@ -318,7 +318,9 @@ optional. Bad configs report the exact line and reason, e.g.
 | Key | Type | Description |
 |-----|------|-------------|
 | `flop` | string | Three flop cards, space-separated. Format: rank + suit (`As Kd 7h`). Ranks: 2-9, T, J, Q, K, A. Suits: s, h, d, c. |
-| `initial_pot` | integer | Pot size (in chips) at the start of flop betting. |
+| `turn` | string | Optional known turn card. Starts a turn solve unless `river` is also set. |
+| `river` | string | Optional known river card; requires `turn`. Starts a river solve. |
+| `initial_pot` | integer | Pot size (in chips) at the start of the configured street. |
 | `effective_stack` | integer | The smaller of the two remaining postflop stacks. |
 | `min_bet` | integer | Minimum bet/raise increment in chips. *Optional, default: 1.* |
 | `max_budget_bytes` | integer | Total retained solver-memory limit before a solve starts: tables, storage, and thread-dependent working arenas. *Optional, default: 8 GB.* Increase for large trees with many sizings/raises; lower to avoid excessive swap on low-memory machines. |
@@ -386,7 +388,7 @@ ip  = "JJ+, AKs, KQs, A5s-A2s:0.5"
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `algorithm` | string | — | `"dcfr"` (recommended) or `"cfr_plus"`. |
+| `algorithm` | string | — | `"dcfr"` (default recommendation), `"cfr_plus"`, `"dcfr_plus"`, or `"pdcfr_plus"`. Benchmark alternatives on your game. |
 | `max_iterations` | integer | `1000` | Hard cap on solve iterations. |
 | `target_exploitability_pct` | float | `0.5` | Stop when exploitability reaches this % of the initial pot. |
 | `num_threads` | integer | `0` | Worker threads. `0` = serial. `4` = 3 workers + main thread. |
@@ -395,18 +397,27 @@ ip  = "JJ+, AKs, KQs, A5s-A2s:0.5"
 | `check_interval` | integer | `64` | Exploitability re-check cadence after iterations 32, 64, 128. |
 | `stall_patience` | integer | `0` | Optional early stopping after this many checks without sufficient improvement. A plateau does not prove convergence. `0` disables. |
 | `stall_rel_improvement` | float | `0.01` | Minimum fractional drop in exploitability that counts as progress for `stall_patience`. |
-| `allin_cache_max_bytes` | integer | `16777216` | Budget for optional all-in equity matrices, including construction scratch. `0` disables. Ranges with more than 65,536 hand pairs use the river sweep to bound startup work. |
+| `allin_cache_max_bytes` | integer | `16777216` | Budget for optional all-in equity matrices, including construction scratch. `0` disables. Selection also considers the iteration cap, matchup count, and remaining solver memory. |
+| `verify_final` | boolean | `false` | CLI: independently verify the final profile with physical runouts and f64 arithmetic. Also enabled by `--verify`. Can be much slower than training. |
 | `debug_invariants` | boolean | `true` (Debug) | Run NaN/Inf scans of regret arrays after every pass. |
 
 ### `[solver.dcfr]`
 
-DCFR discounting parameters. Only used when `algorithm = "dcfr"`.
+Parameters for `dcfr` and `dcfr_plus` (`beta` is unused by the plus variant).
+For the paper’s DCFR+ settings, use `alpha = 1.5`, `gamma = 4`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `alpha` | float | `1.5` | Discount exponent for positive regrets. |
 | `beta` | float | `0.0` | Discount exponent for negative regrets. |
 | `gamma` | float | `2.0` | Strategy averaging weight exponent. |
+
+### `[solver.pdcfr]`
+
+Optional PDCFR+ parameters: `alpha = 2.3`, `gamma = 5` by default. Prediction
+uses the previous instantaneous regret. PDCFR+ retains one additional f32
+array the size of the regret storage; this is included in the memory budget.
+The algorithm is experimental here and is not consistently faster than DCFR.
 
 ### Complete example
 
@@ -480,6 +491,42 @@ rainbow flops have no board symmetry, so the two modes coincide there.
 Exploitability measures how far a strategy is from Nash equilibrium, in chips per
 hand and as a percentage of the initial pot. Lower is stronger. The solver stops
 automatically once it drops below `target_exploitability_pct`.
+
+### Direct turn/river solves and independent verification
+
+Set known cards in `[game]`, for example `turn = "2c"` and `river = "Ah"`.
+`initial_pot` is the pot at that street and `effective_stack` is the remaining
+stack. Each solve starts at a new betting round with OOP acting first. It does
+not reconstruct prior actions; supply the ranges conditional on reaching this
+board. Permanently blocked hands are removed before allocating storage.
+CLI `--turn`/`--river` select output runouts; they do not change the solve root.
+
+```bash
+zig-out/bin/zolver solve spot.toml --verify --all-runouts -o complete.json
+zig-out/bin/zolver verify spot.toml complete.json
+```
+
+`--verify` checks the in-memory average profile independently of the CFR walk,
+terminal sweep, all-in cache, and suit-orbit value reuse. It expands physical
+runouts with f64 reaches and pairwise terminal payoffs; it shares the card
+strength evaluator and game tree. This is a numerical cross-check, not a formal
+proof. It may cost substantially more than solving a wide flop range.
+Verification scratch is checked against the remaining solver memory budget;
+JSON parsing/output and native thread stacks are outside that budget.
+
+The `verify` subcommand reloads a complete export into fresh storage, checks
+node/action/hand/runout coverage and probabilities, and remeasures the rounded
+exported policy. Supply the original config (including range weights). Partial
+flop-only dumps are rejected. The command exits unsuccessfully when the
+exported profile misses the config's accuracy target. `meta.root_board`,
+`meta.root_street`, and `meta.independently_verified` describe new exports.
+In the library, call `verify.exploitability`, `verify.verifyExport`, or
+`best_response.solveVerified`; `best_response.solve` remains the fast API.
+
+All reported exploitability is relative to the **configured betting tree**.
+A small gap does not bound losses to bet sizes omitted from that tree. Use
+`bench/run_study.py` to compare algorithms and add candidate sizes individually;
+see [the study instructions](bench/README.md#algorithm-and-betting-tree-studies).
 
 ## Performance
 

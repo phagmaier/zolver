@@ -102,8 +102,10 @@ pub fn printSummary(
     const grid = try allocator.alloc(f32, 8 * n_max);
     defer allocator.free(grid);
 
-    try w.writeAll("\nStrategy summary — flop ");
+    try w.print("\nStrategy summary — {s} ", .{@tagName(solver.init_state.root_street)});
     try writeBoard(w, flop);
+    if (solver.init_state.root_turn) |c| try w.print(" {s}", .{card.cardStr(c)});
+    if (solver.init_state.root_river) |c| try w.print(" {s}", .{card.cardStr(c)});
     try w.writeAll("\n");
 
     var printer = Printer{ .w = w, .solver = solver, .flop = flop, .grid = grid };
@@ -119,7 +121,7 @@ const Printer = struct {
     pub fn visitActionNode(self: *Printer, v: ActionNodeVisit) !void {
         // Key decision points: OOP's opening node (root) and IP's immediate
         // responses — i.e. flop-street nodes reached in at most one action.
-        if (v.street != .flop) return;
+        if (v.street != self.solver.init_state.root_street) return;
         if (v.path.len > 1) return;
         try self.printNode(v);
     }
@@ -131,7 +133,7 @@ const Printer = struct {
         const n = self.solver.N[player];
         const is = self.solver.init_state;
 
-        self.solver.averageStrategy(.flop, 0, v.ref, self.grid[0 .. a * n]);
+        self.solver.averageStrategy(v.street, 0, v.ref, self.grid[0 .. a * n]);
 
         // Node title.
         try w.writeAll("\n");
@@ -151,7 +153,7 @@ const Printer = struct {
         const weights = is.ranges[player].weights;
         for (hands, weights, 0..) |hand, weight, h| {
             if ((hand.cardMask() & flop_mask) != 0) continue; // blocked by the flop
-            const cls = @intFromEnum(classifyFlop(hand, self.flop));
+            const cls = @intFromEnum(if (is.root_street == .flop) classifyFlop(hand, self.flop) else classifyRoot(hand, is));
             stats.count[cls] += 1;
             stats.total[cls] += weight;
             for (0..a) |ai| stats.sum[cls][ai] += weight * self.grid[ai * n + h];
@@ -301,4 +303,15 @@ test "printSummary renders the root and IP responses" {
     const oop_pos = std.mem.indexOf(u8, out, "OOP to act").?;
     const ip_pos = std.mem.indexOf(u8, out, "IP vs ").?;
     try testing.expect(oop_pos < ip_pos);
+}
+
+fn classifyRoot(hand: Combo, is: *const @import("init.zig").SolverInit) HandClass {
+    const h = [7]u32{ is.flop[0], is.flop[1], is.flop[2], is.root_turn orelse 0, is.root_river orelse 0, hand.first, hand.second };
+    const e = @import("evaluator.zig").Evaluator{};
+    return switch (e.handStrength(h) >> 26) {
+        1 => .high_card,
+        2 => .pair,
+        3 => .two_pair,
+        else => .set_plus,
+    };
 }

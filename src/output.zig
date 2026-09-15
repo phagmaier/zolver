@@ -46,6 +46,7 @@ pub const Meta = struct {
     ev_oop: f32,
     ev_ip: f32,
     converged: bool,
+    independently_verified: bool = false,
 };
 
 pub const OutputError = error{RiverRequiresTurn};
@@ -58,10 +59,14 @@ pub fn writeJson(
     solver: *Solver,
     build_config: game_tree.BuildConfig,
     meta: Meta,
-    options: Options,
+    requested: Options,
 ) !void {
+    var options = requested;
+    options.turn = options.turn orelse solver.init_state.root_turn;
+    options.river = options.river orelse solver.init_state.root_river;
     if (options.river != null and options.turn == null) return OutputError.RiverRequiresTurn;
 
+    _ = try extract.resolveRunout(solver.init_state, options.turn, options.river);
     const n_max = @max(solver.N[0], solver.N[1]);
     const grid = try allocator.alloc(f32, 8 * n_max); // A ≤ 8 children per node
     defer allocator.free(grid);
@@ -69,9 +74,12 @@ pub fn writeJson(
     defer allocator.free(evs);
     var runouts: [3]?u32 = .{ 0, null, null };
     if (!options.all_runouts) {
-        if (options.turn) |t| runouts[1] = (try extract.resolveRunout(solver.init_state, t, null)).runoutId();
+        if (options.turn) |t| if (solver.init_state.root_street != .river) {
+            runouts[1] = (try extract.resolveRunout(solver.init_state, t, null)).runoutId();
+        };
         if (options.river) |r| runouts[2] = (try extract.resolveRunout(solver.init_state, options.turn, r)).runoutId();
     }
+    runouts[solver.init_state.root_street.index()] = 0;
     solver.captureNodeEVBatch(runouts, evs);
 
     try w.writeAll("{\n");
@@ -81,18 +89,18 @@ pub fn writeJson(
     var first_street = true;
 
     // Flop — always; runout-independent.
-    try emitStreet(w, solver, build_config, meta.flop, null, null, true, grid, evs, &first_street);
+    if (solver.init_state.root_street == .flop) try emitStreet(w, solver, build_config, meta.flop, null, null, true, grid, evs, &first_street);
 
     if (options.all_runouts) {
         const rt = &solver.init_state.runout_tables;
         for (rt.canonical_turns, 0..) |ct, ti| {
-            try emitStreet(w, solver, build_config, meta.flop, ct.card, null, false, grid, evs, &first_street);
+            if (solver.init_state.root_street != .river) try emitStreet(w, solver, build_config, meta.flop, ct.card, null, solver.init_state.root_street == .turn, grid, evs, &first_street);
             for (rt.riversForTurn(ti)) |cr| {
-                try emitStreet(w, solver, build_config, meta.flop, ct.card, cr.card, false, grid, evs, &first_street);
+                try emitStreet(w, solver, build_config, meta.flop, ct.card, cr.card, solver.init_state.root_street == .river, grid, evs, &first_street);
             }
         }
     } else if (options.turn) |t| {
-        try emitStreet(w, solver, build_config, meta.flop, t, null, true, grid, evs, &first_street);
+        if (solver.init_state.root_street != .river) try emitStreet(w, solver, build_config, meta.flop, t, null, true, grid, evs, &first_street);
         if (options.river) |rv| {
             try emitStreet(w, solver, build_config, meta.flop, t, rv, true, grid, evs, &first_street);
         }
@@ -105,6 +113,10 @@ fn writeMeta(w: *Writer, solver: *Solver, meta: Meta) !void {
     try w.writeAll("  \"meta\": {\n    \"flop\": \"");
     try writeBoard(w, meta.flop, null, null);
     try w.writeAll("\",\n");
+    try w.print("    \"root_street\": \"{s}\",\n    \"root_board\": \"", .{@tagName(solver.init_state.root_street)});
+    try writeBoard(w, meta.flop, solver.init_state.root_turn, solver.init_state.root_river);
+    try w.writeAll("\",\n");
+    try w.print("    \"independently_verified\": {},\n", .{meta.independently_verified});
     try w.print("    \"initial_pot\": {d},\n", .{solver.init_state.tree.initial_pot});
     try w.print("    \"effective_stack\": {d},\n", .{meta.effective_stack});
     try w.print("    \"iterations\": {d},\n", .{meta.iterations});

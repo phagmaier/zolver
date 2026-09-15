@@ -72,6 +72,7 @@ pub const TerminalKind = enum(u8) {
 };
 
 pub const ActionNode = struct {
+    street: Street = .flop,
     player: u8,
     first_child_edge: u32,
     num_children: u8,
@@ -136,6 +137,7 @@ pub const default_sizings: [3][]const Sizing = .{
 pub const default_raise_cap: [3]?u8 = .{ 1, 1, 1 };
 
 pub const BuildConfig = struct {
+    start_street: Street = .flop,
     initial_pot: u32,
     effective_stack: u32,
     min_bet: u32,
@@ -180,9 +182,9 @@ const BuildState = struct {
     last_increment: u32,
     raises_this_street: u8,
 
-    fn opening() BuildState {
+    fn openingAt(street: Street) BuildState {
         return .{
-            .street = .flop,
+            .street = street,
             .to_act = .oop,
             .committed = .{ 0, 0 },
             .last_increment = 0,
@@ -357,7 +359,7 @@ pub const Tree = struct {
             .slot_sums = .{ 0, 0, 0 },
         };
 
-        try ctx.visitAction(self.root, BuildState.opening());
+        try ctx.visitAction(self.root, BuildState.openingAt(config.start_street));
 
         for (visited_actions) |visited| {
             if (!visited) return error.UnreachableActionNode;
@@ -406,7 +408,7 @@ const path_max = 64;
 /// the nodes. `ctx` must expose `pub fn visitActionNode(self, ActionNodeVisit) !void`.
 pub fn walkActionNodes(tree: *const Tree, config: BuildConfig, ctx: anytype) !void {
     var path: [path_max]Action = undefined;
-    try walkAction(tree, config, tree.root, BuildState.opening(), &path, 0, ctx);
+    try walkAction(tree, config, tree.root, BuildState.openingAt(config.start_street), &path, 0, ctx);
 }
 
 fn walkAction(
@@ -519,7 +521,7 @@ pub fn buildGameTree(allocator: Allocator, config: BuildConfig) !Tree {
     };
     errdefer builder.tree.deinit();
 
-    builder.tree.root = try builder.build(BuildState.opening());
+    builder.tree.root = try builder.build(BuildState.openingAt(config.start_street));
     builder.tree.slots_per_runout = builder.next_slot;
     try builder.tree.validate(allocator, config);
     return builder.tree;
@@ -547,6 +549,7 @@ const Builder = struct {
         const base: u32 = std.math.cast(u32, self.next_slot[street_idx]) orelse return error.BaseOverflow;
 
         try self.tree.action_nodes.append(self.allocator, .{
+            .street = state.street,
             .player = @intFromEnum(state.to_act),
             .first_child_edge = first_child_edge,
             .num_children = actions.len,
@@ -814,7 +817,7 @@ test "node reference encoding uses top two bits" {
 
 test "default opening actions are check, quarter pot, half pot, all-in" {
     const config = BuildConfig.default(100, 1000, 1, .{ 10, 10 });
-    const actions = try enumerateLegalActions(config, BuildState.opening());
+    const actions = try enumerateLegalActions(config, BuildState.openingAt(config.start_street));
 
     try std.testing.expectEqual(@as(u8, 4), actions.len);
     try std.testing.expectEqual(ActionKind.check, actions.items[0].kind);
@@ -839,7 +842,7 @@ test "rounded duplicate sizings are kept once" {
         .range_sizes = .{ 10, 10 },
     };
 
-    const actions = try enumerateLegalActions(config, BuildState.opening());
+    const actions = try enumerateLegalActions(config, BuildState.openingAt(config.start_street));
     try std.testing.expectEqual(@as(u8, 3), actions.len);
     try std.testing.expectEqual(ActionKind.bet, actions.items[1].kind);
     try std.testing.expectEqual(@as(u32, 1), actions.items[1].amount);

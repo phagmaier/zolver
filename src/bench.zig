@@ -167,10 +167,10 @@ fn benchSolve(allocator: std.mem.Allocator) !void {
         const r = try allocator.alloc(f32, n_max);
         defer allocator.free(r);
         @memset(r, 1.0);
-        var lo = [_]f32{0} ** 52;
-        var eq = [_]f32{0} ** 52;
-        var cs = [_]f32{0} ** 52;
-        const comp = try allocator.alloc(f32, n_max);
+        var lo = [_]f64{0} ** 52;
+        var eq = [_]f64{0} ** 52;
+        var cs = [_]f64{0} ** 52;
+        const comp = try allocator.alloc(f64, n_max);
         defer allocator.free(comp);
         const sr = try allocator.alloc(f32, n_max);
         defer allocator.free(sr);
@@ -180,17 +180,33 @@ fn benchSolve(allocator: std.mem.Allocator) !void {
         const opp_ci = is.card_idx[1];
 
         const Ctx = struct {
-            is: *init_mod.SolverInit, v: []f32, r: []f32,
-            lo: []f32, eq: []f32, cs: []f32, comp: []f32, sr: []f32,
-            n0: u32, n1: u32,
-            u_ci: []const u8, opp_ci: []const u8,
+            is: *init_mod.SolverInit,
+            v: []f32,
+            r: []f32,
+            lo: []f64,
+            eq: []f64,
+            cs: []f64,
+            comp: []f64,
+            sr: []f32,
+            n0: u32,
+            n1: u32,
+            u_ci: []const u8,
+            opp_ci: []const u8,
             sd: *const @TypeOf(is.showdown),
         };
         const ctx = Ctx{
-            .is = &is, .v = v, .r = r,
-            .lo = &lo, .eq = &eq, .cs = &cs, .comp = comp, .sr = sr,
-            .n0 = n0, .n1 = n1,
-            .u_ci = u_ci, .opp_ci = opp_ci,
+            .is = &is,
+            .v = v,
+            .r = r,
+            .lo = &lo,
+            .eq = &eq,
+            .cs = &cs,
+            .comp = comp,
+            .sr = sr,
+            .n0 = n0,
+            .n1 = n1,
+            .u_ci = u_ci,
+            .opp_ci = opp_ci,
             .sd = sd,
         };
         const reps: u64 = 50_000;
@@ -205,13 +221,23 @@ fn benchSolve(allocator: std.mem.Allocator) !void {
                     c.sr[h] = if (s != std.math.maxInt(u32)) c.r[s] else 0.0;
                 }
                 terminal_eval.showdownEval(
-                    c.v[0..c.n0], c.r[0..c.n1],
-                    c.u_ci, c.opp_ci,
-                    c.sd.order[0][0..c.n0], c.sd.strengths[0][0..c.n0],
-                    c.sd.order[1][0..c.n1], c.sd.strengths[1][0..c.n1],
-                    20, 5, 10,
-                    c.cs, total, c.sr,
-                    c.lo, c.eq, c.comp,
+                    c.v[0..c.n0],
+                    c.r[0..c.n1],
+                    c.u_ci,
+                    c.opp_ci,
+                    c.sd.order[0][0..c.n0],
+                    c.sd.strengths[0][0..c.n0],
+                    c.sd.order[1][0..c.n1],
+                    c.sd.strengths[1][0..c.n1],
+                    20,
+                    5,
+                    10,
+                    c.cs,
+                    total,
+                    c.sr,
+                    c.lo,
+                    c.eq,
+                    c.comp,
                 );
                 sink += c.v[0];
             }

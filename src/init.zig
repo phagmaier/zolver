@@ -33,6 +33,10 @@ pub const SolverInit = struct {
     max_budget_bytes: u64,
 
     tree: Tree,
+    flop: [3]Card,
+    root_turn: ?Card,
+    root_river: ?Card,
+    root_street: game_tree.Street,
     runout_tables: RunoutTables,
     ranges: [2]Range,
     storage: Storage,
@@ -76,15 +80,30 @@ pub const SolverInit = struct {
     /// 8. Precompute chance normalization weights
     /// 9. Precompute hand strengths + sorted order per river runout
     pub fn init(allocator: Allocator, config: Config) !SolverInit {
+        if (config.river != null and config.turn == null) return error.RiverWithoutTurn;
+        var board_mask: u64 = 0;
+        for (config.flop) |c| {
+            if (board_mask & card.mask(c) != 0) return error.DuplicateBoardCard;
+            board_mask |= card.mask(c);
+        }
+        for ([_]?Card{ config.turn, config.river }) |maybe| if (maybe) |c| {
+            if (board_mask & card.mask(c) != 0) return error.DuplicateBoardCard;
+            board_mask |= card.mask(c);
+        };
+        const oop = try liveInput(allocator, config.oop_range, board_mask);
+        defer allocator.free(oop);
+        const ip = try liveInput(allocator, config.ip_range, board_mask);
+        defer allocator.free(ip);
         var ranges: [2]Range = undefined;
-        ranges[0] = try range.buildRange(allocator, config.oop_range);
+        ranges[0] = try range.buildRange(allocator, oop);
         errdefer ranges[0].deinit();
-        ranges[1] = try range.buildRange(allocator, config.ip_range);
+        ranges[1] = try range.buildRange(allocator, ip);
         errdefer ranges[1].deinit();
 
         const range_sizes = [2]u32{ ranges[0].N(), ranges[1].N() };
 
         const tree_config = game_tree.BuildConfig{
+            .start_street = config.startStreet(),
             .initial_pot = config.initial_pot,
             .effective_stack = config.effective_stack,
             .min_bet = config.min_bet,
@@ -100,10 +119,7 @@ pub const SolverInit = struct {
         // disabled we solve the full physical runout space — the correctness
         // oracle. `buildRunoutTables` keeps only permutations that preserve both
         // ranges, so its identity element always survives (no error in practice).
-        var runout_tables = if (config.compress_suits)
-            try isomorphism.buildRunoutTables(allocator, config.flop, .{ config.oop_range, config.ip_range })
-        else
-            try isomorphism.buildUncompressedRunoutTables(allocator, config.flop);
+        var runout_tables = try isomorphism.buildRootRunoutTables(allocator, config.flop, config.turn, config.river, .{ oop, ip }, config.compress_suits);
         errdefer runout_tables.deinit();
 
         const runout_counts = runout_tables.runoutCounts();
@@ -182,6 +198,10 @@ pub const SolverInit = struct {
             .allocator = allocator,
             .max_budget_bytes = config.max_budget_bytes,
             .tree = tree,
+            .flop = config.flop,
+            .root_turn = config.turn,
+            .root_river = config.river,
+            .root_street = config.startStreet(),
             .runout_tables = runout_tables,
             .ranges = ranges,
             .storage = store,
@@ -283,6 +303,9 @@ fn overheadEstimate(tree: *const Tree, rt: *const RunoutTables, n: [2]u32, remap
 
 /// All user-provided configuration needed to initialize the solver.
 pub const Config = struct {
+    turn: ?Card = null,
+    river: ?Card = null,
+
     flop: [3]Card,
     initial_pot: u32,
     effective_stack: u32,
@@ -298,6 +321,10 @@ pub const Config = struct {
     /// reaches/values per orbit member. Disable only to use the physical-runout
     /// correctness oracle.
     compress_suits: bool = true,
+
+    pub fn startStreet(self: Config) game_tree.Street {
+        return if (self.river != null) .river else if (self.turn != null) .turn else .flop;
+    }
 
     pub fn default(
         flop: [3]Card,
@@ -331,7 +358,8 @@ fn allocConvertBoolSlice(allocator: Allocator, blocked: []const bool) ![]f32 {
 /// opponent's range-local index of the identical two-card combo, or
 /// maxInt(u32) if the opponent does not hold that combo.
 fn buildSameComboIdx(allocator: Allocator, ranges: [2]Range) ![2][]u32 {
-    var result: [2][]u32 = undefined;
+    var result: [2][]u32 = .{ &.{}, &.{} };
+    errdefer for (result) |slice| allocator.free(slice);
 
     for (0..2) |p| {
         const opp = 1 - p;
@@ -339,7 +367,6 @@ fn buildSameComboIdx(allocator: Allocator, ranges: [2]Range) ![2][]u32 {
         const N_opp = ranges[opp].N();
 
         const idx = try allocator.alloc(u32, N_p);
-        errdefer allocator.free(idx);
 
         // Build lookup: combo canonical key → opponent range index
         var lookup = [_]?u32{null} ** 2652;
@@ -363,11 +390,12 @@ fn buildSameComboIdx(allocator: Allocator, ranges: [2]Range) ![2][]u32 {
 /// card_idx[p][2*h]   = card.index(hands[p][h].first)
 /// card_idx[p][2*h+1] = card.index(hands[p][h].second)
 fn buildCardIdx(allocator: Allocator, ranges: [2]Range) ![2][]u8 {
-    var result: [2][]u8 = undefined;
+    var result: [2][]u8 = .{ &.{}, &.{} };
+    errdefer for (result) |slice| allocator.free(slice);
     for (0..2) |p| {
         const N_p = ranges[p].N();
         const idx = try allocator.alloc(u8, @as(usize, N_p) * 2);
-        errdefer allocator.free(idx);
+
         for (0..N_p) |i| {
             idx[2 * i] = card.index(ranges[p].hands[i].first);
             idx[2 * i + 1] = card.index(ranges[p].hands[i].second);
@@ -544,7 +572,7 @@ test "cleanup on early failure does not leak" {
         card.makeCard(10, 0),
     };
 
-    const hand = try Combo.init(card.makeCard(12, 0), card.makeCard(11, 1)); // blocked by flop
+    const hand = try Combo.init(card.makeCard(9, 0), card.makeCard(8, 1)); // live on flop
     const input = [_]WeightedCombo{.{ .combo = hand, .weight = 1.0 }};
 
     // Tiny budget so init fails after range + tree + runout tables are built
@@ -933,13 +961,13 @@ test "f32 masks mirror bool blocking arrays" {
     var init_state = try SolverInit.init(std.testing.allocator, config);
     defer init_state.deinit();
 
-    // f32 mask: 1.0 = live, 0.0 = blocked
-    try std.testing.expectEqual(@as(f32, 0.0), init_state.mask_flop[0][0]);
-    try std.testing.expectEqual(@as(f32, 1.0), init_state.mask_flop[0][1]);
-
-    // Same for IP (same range)
-    try std.testing.expectEqual(@as(f32, 0.0), init_state.mask_flop[1][0]);
-    try std.testing.expectEqual(@as(f32, 1.0), init_state.mask_flop[1][1]);
+    // Root-blocked hands are removed before allocating any per-hand tables.
+    for (0..2) |p| {
+        try std.testing.expectEqual(@as(u32, 1), init_state.ranges[p].N());
+        try std.testing.expect(init_state.ranges[p].hands[0].eql(clear));
+        try std.testing.expectEqual(@as(f32, 1), init_state.mask_flop[p][0]);
+        try std.testing.expect(!init_state.blocking.blocked_flop[p][0]);
+    }
 }
 
 test "f32 mask dimensions match blocking and runout counts" {
@@ -1088,4 +1116,14 @@ test "chance weights use the private-card-conditioned denominators" {
         }
         try std.testing.expect(@abs(1.0 - river_sum) < 1e-5);
     }
+}
+
+fn liveInput(allocator: Allocator, input: []const WeightedCombo, mask: u64) ![]WeightedCombo {
+    var out: std.ArrayList(WeightedCombo) = .empty;
+    errdefer out.deinit(allocator);
+    for (input) |entry| {
+        if (!std.math.isFinite(entry.weight) or entry.weight < 0 or entry.weight > 1) return error.InvalidWeight;
+        if (entry.weight > 0 and !entry.combo.conflictsWithMask(mask)) try out.append(allocator, entry);
+    }
+    return out.toOwnedSlice(allocator);
 }

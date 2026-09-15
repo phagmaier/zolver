@@ -55,8 +55,20 @@ pub const FlopRunout = struct {
     perm_index: u32,
 };
 
+/// Nontrivial hand orbits of the board's suit stabilizer. Each orbit is stored
+/// once, without repeated group elements or singleton work in the hot path.
+pub const Projection = struct {
+    offsets: []u32,
+    hands: []u32,
+    fn deinit(self: Projection, allocator: Allocator) void {
+        allocator.free(self.offsets);
+        allocator.free(self.hands);
+    }
+};
+
 pub const RemapTables = struct {
     allocator: Allocator,
+    projections: []Projection,
 
     /// Distinct valid suit permutations (borrowed alias of the runout tables'
     /// `valid_permutations`; not owned).
@@ -88,7 +100,8 @@ pub const RemapTables = struct {
     /// Bytes of all owned tables (for total-memory reporting). The borrowed
     /// `perms` alias is not counted; it belongs to the runout tables.
     pub fn memoryBytes(self: *const RemapTables) u64 {
-        var total: u64 = 0;
+        var total: u64 = self.projections.len * @sizeOf(Projection);
+        for (self.projections) |p| total += (p.offsets.len + p.hands.len) * @sizeOf(u32);
         for (self.hand_perms) |hp| {
             inline for (0..2) |p| {
                 total += @as(u64, hp.to_canon[p].len) * @sizeOf(u32);
@@ -106,6 +119,8 @@ pub const RemapTables = struct {
     }
 
     pub fn deinit(self: *RemapTables) void {
+        for (self.projections) |p| p.deinit(self.allocator);
+        self.allocator.free(self.projections);
         for (self.flop_runouts) |g| self.allocator.free(g);
         self.allocator.free(self.flop_runouts);
         for (self.hand_perms) |*hp| {
@@ -234,8 +249,32 @@ pub fn build(
         groups_built += 1;
     }
 
+    const projections = try allocator.alloc(Projection, 2 * (1 + rt.canonical_turns.len + rt.canonical_rivers.len));
+    var projected: usize = 0;
+    errdefer {
+        for (projections[0..projected]) |p| p.deinit(allocator);
+        allocator.free(projections);
+    }
+    for (0..1 + rt.canonical_turns.len + rt.canonical_rivers.len) |b| {
+        var turn_card: ?Card = null;
+        var river_card: ?Card = null;
+        if (b > 0 and b <= rt.canonical_turns.len) turn_card = rt.canonical_turns[b - 1].card;
+        if (b > rt.canonical_turns.len) {
+            const r = b - 1 - rt.canonical_turns.len;
+            river_card = rt.canonical_rivers[r].card;
+            for (rt.canonical_turns) |t| if (r >= t.first_river and r < t.first_river + t.num_rivers) {
+                turn_card = t.card;
+                break;
+            };
+        }
+        for (0..2) |p| {
+            projections[projected] = try buildProjection(allocator, perms, hand_perms, hands[p].len, p, turn_card, river_card);
+            projected += 1;
+        }
+    }
     return .{
         .allocator = allocator,
+        .projections = projections,
         .perms = perms,
         .identity_index = identity_index,
         .hand_perms = hand_perms,
@@ -468,4 +507,36 @@ test "hand perm composes to identity round-trip" {
             try testing.expectEqual(@as(u32, @intCast(h)), hp.from_canon[0][j]);
         }
     }
+}
+
+fn buildProjection(allocator: Allocator, perms: []const SuitPermutation, hp: []const HandPerm, n: usize, player: usize, turn: ?Card, river: ?Card) !Projection {
+    var offsets: std.ArrayList(u32) = .empty;
+    defer offsets.deinit(allocator);
+    var members: std.ArrayList(u32) = .empty;
+    defer members.deinit(allocator);
+    for (0..n) |h| {
+        var orbit: [24]u32 = undefined;
+        var count: usize = 0;
+        var representative = true;
+        for (perms, hp) |perm, map| {
+            if (turn) |c| if (perm.applyCard(c) != c) continue;
+            if (river) |c| if (perm.applyCard(c) != c) continue;
+            const g = map.to_canon[player][h];
+            if (g < h) {
+                representative = false;
+                break;
+            }
+            if (std.mem.indexOfScalar(u32, orbit[0..count], g) == null) {
+                orbit[count] = g;
+                count += 1;
+            }
+        }
+        if (!representative or count <= 1) continue;
+        try offsets.append(allocator, @intCast(members.items.len));
+        try members.appendSlice(allocator, orbit[0..count]);
+    }
+    try offsets.append(allocator, @intCast(members.items.len));
+    const owned = try offsets.toOwnedSlice(allocator);
+    errdefer allocator.free(owned);
+    return .{ .offsets = owned, .hands = try members.toOwnedSlice(allocator) };
 }

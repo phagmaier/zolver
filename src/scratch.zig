@@ -56,7 +56,7 @@ pub fn maxChildren(tree: *const Tree) u32 {
 // ── Per-thread scratch arena ──────────────────────────────────────────────
 
 /// Depth-indexed, pre-allocated scratch for one solver thread. All buffers live
-/// in a single f32 slab; accessors hand out fixed sub-slices, so the hot path
+/// in f32 and f64 slabs; accessors hand out fixed sub-slices, so the hot path
 /// performs zero allocations. One arena is owned per worker thread.
 ///
 /// Per depth level the arena holds: `reach_u`, `reach_opp`, and `values`
@@ -64,17 +64,19 @@ pub fn maxChildren(tree: *const Tree) u32 {
 /// `a_max × n_max` child-value buffer. Per thread (shared across depths, since
 /// only one terminal is evaluated at a time on a given path) it holds the
 /// all-in kernel's `reach_opp` / `child_values` staging buffers and the three
-/// 52-float card buffers used by every terminal kernel.
+/// 52-element f64 card buffers used by every terminal kernel.
 ///
-/// Total: `max_depth × (3 + 2·a_max) × n_max + 5·n_max + 3·52` floats.
+/// f32 count: `max_depth × (3 + 2·a_max) × n_max + 4·n_max`.
+/// f64 count: `n_max + 3·52` (compatibility plus card sums).
 pub const Scratch = struct {
     allocator: Allocator,
     max_depth: u32,
     n_max: u32,
     a_max: u32,
 
-    /// Backing storage; every other slice below is a view into this.
+    /// Backing storage; buffer slices below view one of these two slabs.
     slab: []f32,
+    sums: []f64,
 
     reach_u_blk: []f32,
     reach_opp_blk: []f32,
@@ -84,15 +86,15 @@ pub const Scratch = struct {
 
     term_reach_opp: []f32,
     term_child_values: []f32,
-    cardsum: []f32,
-    lo_card: []f32,
-    eq_card: []f32,
+    cardsum: []f64,
+    lo_card: []f64,
+    eq_card: []f64,
     /// Precomputed per-hand same_reach scratch for showdownEval (Section 4.2).
     /// same_reach[h] = reach_opp[same_combo_idx[h]] or 0.0. Sized to n_max.
     same_reach: []f32,
     /// Precomputed per-hand compat scratch for showdownEval (Section 4.2),
     /// populated once before the sorted sweep. Sized to n_max per thread.
-    compat: []f32,
+    compat: []f64,
     /// Per-canonical-turn partial-sum buffer for the compressed flop all-in
     /// reduction (`allInEvalFlopRemapped`), so it accumulates in the same
     /// two-level order as the physical path. Sized to n_max.
@@ -107,7 +109,7 @@ pub const Scratch = struct {
     /// Exact slab allocation required by `forTree`, without allocating it.
     pub fn memoryBytesForTree(tree: *const Tree, n_max: u32) !u64 {
         const floats = try slabLen(try maxDepth(tree), n_max, maxChildren(tree));
-        return std.math.mul(u64, @intCast(floats), @sizeOf(f32));
+        return try std.math.mul(u64, @intCast(floats), @sizeOf(f32)) + (@as(u64, n_max) + 3 * card_scratch_len) * @sizeOf(f64);
     }
 
     pub fn init(allocator: Allocator, max_depth: u32, n_max: u32, a_max: u32) !Scratch {
@@ -119,6 +121,8 @@ pub const Scratch = struct {
         const total = try slabLen(max_depth, n_max, a_max);
 
         const slab = try allocator.alloc(f32, total);
+        errdefer allocator.free(slab);
+        const sums = try allocator.alloc(f64, 3 * card_scratch_len + n);
 
         var off: usize = 0;
         const reach_u_blk = slab[off..][0..small];
@@ -135,16 +139,12 @@ pub const Scratch = struct {
         off += n;
         const term_child_values = slab[off..][0..n];
         off += n;
-        const cardsum = slab[off..][0..card_scratch_len];
-        off += card_scratch_len;
-        const lo_card = slab[off..][0..card_scratch_len];
-        off += card_scratch_len;
-        const eq_card = slab[off..][0..card_scratch_len];
-        off += card_scratch_len;
+        const cardsum = sums[0..card_scratch_len];
+        const lo_card = sums[card_scratch_len..][0..card_scratch_len];
+        const eq_card = sums[2 * card_scratch_len ..][0..card_scratch_len];
         const same_reach = slab[off..][0..n];
         off += n;
-        const compat = slab[off..][0..n];
-        off += n;
+        const compat = sums[3 * card_scratch_len ..];
         const term_partial = slab[off..][0..n];
         off += n;
         std.debug.assert(off == total);
@@ -155,6 +155,7 @@ pub const Scratch = struct {
             .n_max = n_max,
             .a_max = a_max,
             .slab = slab,
+            .sums = sums,
             .reach_u_blk = reach_u_blk,
             .reach_opp_blk = reach_opp_blk,
             .values_blk = values_blk,
@@ -173,12 +174,13 @@ pub const Scratch = struct {
 
     pub fn deinit(self: *Scratch) void {
         self.allocator.free(self.slab);
+        self.allocator.free(self.sums);
         self.* = undefined;
     }
 
     /// Bytes of backing storage (for budgeting / reporting).
     pub fn memoryBytes(self: *const Scratch) usize {
-        return self.slab.len * @sizeOf(f32);
+        return self.slab.len * @sizeOf(f32) + self.sums.len * @sizeOf(f64);
     }
 
     // ── Per-depth accessors (each returns the first `n` floats of the level) ──
@@ -247,8 +249,8 @@ fn slabLen(max_depth: u32, n_max: u32, a_max: u32) !usize {
     const wide = try std.math.mul(usize, small, a);
     var total = try std.math.mul(usize, small, 3);
     total = try std.math.add(usize, total, try std.math.mul(usize, wide, 2));
-    total = try std.math.add(usize, total, try std.math.mul(usize, n, 5));
-    return std.math.add(usize, total, card_scratch_len * 3);
+    total = try std.math.add(usize, total, try std.math.mul(usize, n, 4));
+    return total;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -317,9 +319,9 @@ test "Scratch: layout sizes and total memory" {
     defer s.deinit();
 
     const expected_floats: usize =
-        @as(usize, max_depth) * (3 + 2 * a_max) * n_max + 2 * n_max + 3 * card_scratch_len + n_max * 3;
+        @as(usize, max_depth) * (3 + 2 * a_max) * n_max + 4 * n_max;
     try testing.expectEqual(expected_floats, s.slab.len);
-    try testing.expectEqual(expected_floats * @sizeOf(f32), s.memoryBytes());
+    try testing.expectEqual(expected_floats * @sizeOf(f32) + (3 * card_scratch_len + n_max) * @sizeOf(f64), s.memoryBytes());
 }
 
 test "Scratch: per-depth buffers are independent (no aliasing)" {

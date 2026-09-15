@@ -81,6 +81,7 @@ pub const Pool = struct {
         }
 
         const shared = try allocator.create(Shared);
+        errdefer allocator.destroy(shared);
         shared.* = .{};
 
         const threads = try allocator.alloc(std.Thread, num_workers);
@@ -91,7 +92,6 @@ pub const Pool = struct {
             publishGeneration(shared);
             for (threads[0..spawned]) |t| t.join();
             allocator.free(threads);
-            allocator.destroy(shared);
         }
         while (spawned < num_workers) : (spawned += 1) {
             threads[spawned] = try std.Thread.spawn(.{}, workerLoop, .{ shared, spawned });

@@ -25,7 +25,7 @@ pub fn foldEval(
     opp_card_idx: []const u8,
     same_combo_idx: []const u32,
     amount: f32,
-    scratch_cardsum: []f32,
+    scratch_cardsum: []f64,
 ) void {
     // Build cardsum[52] and total reach
     const total = computeCardSum(scratch_cardsum, reach_opp, opp_card_idx);
@@ -34,23 +34,23 @@ pub fn foldEval(
     for (values, 0..) |*v, h| {
         const c1 = u_card_idx[2 * h];
         const c2 = u_card_idx[2 * h + 1];
-        var compat: f32 = total - scratch_cardsum[c1] - scratch_cardsum[c2];
+        var compat: f64 = total - scratch_cardsum[c1] - scratch_cardsum[c2];
         const same = same_combo_idx[h];
         if (same != sentinel) {
             compat += reach_opp[same];
         }
-        v.* = amount * compat;
+        v.* = @floatCast(@as(f64, amount) * compat);
     }
 }
 
 /// Compute the 52-float cardsum array from opponent reach and precomputed card indices.
 /// cardsum[c] = sum of reach_opp[i] where opponent hand i shares card c.
 pub fn computeCardSum(
-    cardsum: []f32,
+    cardsum: []f64,
     reach_opp: []const f32,
     opp_card_idx: []const u8,
-) f32 {
-    var total: f32 = 0;
+) f64 {
+    var total: f64 = 0;
     for (reach_opp, 0..) |r, i| {
         total += r;
         cardsum[opp_card_idx[2 * i]] += r;
@@ -89,12 +89,12 @@ pub fn showdownEval(
     win_amount: f32,
     loss_amount: f32,
     tie_amount: f32,
-    cardsum: []const f32,
-    total: f32,
+    cardsum: []const f64,
+    total: f64,
     same_reach: []const f32,
-    scratch_lo_card: []f32,
-    scratch_eq_card: []f32,
-    scratch_compat: []f32,
+    scratch_lo_card: []f64,
+    scratch_eq_card: []f64,
+    scratch_compat: []f64,
 ) void {
     const N_u: u32 = @intCast(values.len);
     const N_opp: u32 = @intCast(reach_opp.len);
@@ -110,8 +110,9 @@ pub fn showdownEval(
     // Walk orders from weakest (end) to strongest (start)
     var u_pos: i32 = @as(i32, @intCast(N_u)) - 1;
     var opp_pos: i32 = @as(i32, @intCast(N_opp)) - 1;
-    var lo_total: f32 = 0;
+    var lo_total: f64 = 0;
 
+    @memset(scratch_eq_card[0..52], 0);
     while (u_pos >= 0) {
         const u_hand: u32 = u_order[@intCast(u_pos)];
         const u_str: u32 = u_strengths[u_hand];
@@ -129,8 +130,8 @@ pub fn showdownEval(
         }
 
         // Collect opponent hands tied with this U strength into eq
-        var eq_total: f32 = 0;
-        @memset(scratch_eq_card[0..52], 0);
+        var eq_total: f64 = 0;
+        const tie_end = opp_pos;
         while (opp_pos >= 0) {
             const opp_hand: u32 = opp_order[@intCast(opp_pos)];
             const opp_str: u32 = opp_strengths[opp_hand];
@@ -151,23 +152,31 @@ pub fn showdownEval(
             const c2 = u_card_idx[2 * hand + 1];
 
             // weaker = lo mass compatible with this hand
-            const weaker: f32 = lo_total - scratch_lo_card[c1] - scratch_lo_card[c2];
+            const weaker: f64 = lo_total - scratch_lo_card[c1] - scratch_lo_card[c2];
 
             // tied = eq mass compatible with this hand
-            const tied: f32 = eq_total - scratch_eq_card[c1] - scratch_eq_card[c2] + same_reach[hand];
+            const tied: f64 = eq_total - scratch_eq_card[c1] - scratch_eq_card[c2] + same_reach[hand];
 
             // stronger = precomputed compat - weaker - tied
-            const stronger: f32 = scratch_compat[hand] - weaker - tied;
+            const stronger: f64 = scratch_compat[hand] - weaker - tied;
 
-            values[hand] = win_amount * weaker - loss_amount * stronger + tie_amount * tied;
+            values[hand] = @floatCast(@as(f64, win_amount) * weaker - @as(f64, loss_amount) * stronger + @as(f64, tie_amount) * tied);
 
             u_pos -= 1;
         }
 
         // Fold eq into lo
         lo_total += eq_total;
-        for (0..52) |c| {
-            scratch_lo_card[c] += scratch_eq_card[c];
+        var tied_pos = tie_end;
+        while (tied_pos > opp_pos) : (tied_pos -= 1) {
+            const h = opp_order[@intCast(tied_pos)];
+            const c1 = opp_card_idx[2 * h];
+            const c2 = opp_card_idx[2 * h + 1];
+            // Each card is transferred once, even if several tied hands share it.
+            scratch_lo_card[c1] += scratch_eq_card[c1];
+            scratch_lo_card[c2] += scratch_eq_card[c2];
+            scratch_eq_card[c1] = 0;
+            scratch_eq_card[c2] = 0;
         }
     }
 }
@@ -219,6 +228,9 @@ pub const AllInContext = struct {
     /// which case the `*Remapped` all-in kernels enumerate physical members over
     /// the canonical river tables. When null the physical kernels are used.
     rm: ?*const remap_mod.RemapTables = null,
+    /// Only the solver may assert symmetry. Arbitrary query reaches and basis
+    /// vectors must continue to enumerate physical orbit members.
+    symmetric_reach: bool = false,
 };
 
 /// Per-thread scratch for the all-in kernel. Sized once; never allocated in the
@@ -228,10 +240,10 @@ pub const AllInScratch = struct {
     reach_opp: []f32,
     child_values: []f32,
     same_reach: []f32,
-    compat: []f32,
-    lo_card: []f32,
-    eq_card: []f32,
-    cardsum: []f32,
+    compat: []f64,
+    lo_card: []f64,
+    eq_card: []f64,
+    cardsum: []f64,
     /// Per-canonical-turn partial-sum buffer for the compressed flop all-in
     /// reduction. Length N_u. Unused by the physical kernels.
     term_partial: []f32 = &.{},
@@ -298,7 +310,7 @@ pub fn accumulateTurnRivers(
         // now eliminated from the all-in hot path.
         const m_opp = ctx.mask_river[opp][full * N_opp ..][0..N_opp];
         @memset(scratch.cardsum[0..52], 0);
-        var total: f32 = 0;
+        var total: f64 = 0;
         for (0..N_opp) |i| {
             const mr = reach_opp[i] * m_opp[i] * w;
             total += mr;
@@ -369,6 +381,7 @@ pub fn allInEvalTurnRemapped(
     ctx: AllInContext,
     scratch: AllInScratch,
 ) void {
+    if (ctx.symmetric_reach) return allInEvalTurnSymmetric(values, reach_opp, turn_id, ctx, scratch);
     @memset(values, 0);
     const rm = ctx.rm.?;
     const turn = ctx.rt.canonical_turns[turn_id];
@@ -416,9 +429,36 @@ pub fn allInEvalFlopRemappedTurn(
 ) void {
     @memset(values, 0);
     const rm = ctx.rm.?;
+    if (ctx.symmetric_reach) {
+        var canonical: [1326]f32 = undefined;
+        const partial = canonical[0..values.len];
+        allInEvalTurnSymmetric(partial, reach_opp, turn_id, ctx, scratch);
+        for (rm.turn_members[turn_id]) |member| {
+            const map = rm.hand_perms[member.perm_index].to_canon[ctx.u];
+            for (values, 0..) |*v, h| v.* += partial[map[h]] * rm.weight_turn;
+        }
+        return;
+    }
     const w = rm.weight_turn * rm.weight_river;
     for (rm.flop_runouts[turn_id]) |run| {
         accumulateRiverMemberRemapped(values, reach_opp, run.canonical_river, rm.hand_perms[run.perm_index], w, ctx, scratch);
+    }
+}
+
+fn allInEvalTurnSymmetric(values: []f32, reach: []const f32, turn_id: usize, ctx: AllInContext, scratch: AllInScratch) void {
+    @memset(values, 0);
+    const rm = ctx.rm.?;
+    const turn = ctx.rt.canonical_turns[turn_id];
+    var canonical: [1326]f32 = undefined;
+    const partial = canonical[0..values.len];
+    for (0..turn.num_rivers) |r| {
+        const full = turn.first_river + r;
+        @memset(partial, 0);
+        accumulateRiverMemberRemapped(partial, reach, full, rm.hand_perms[rm.identity_index], rm.weight_river, ctx, scratch);
+        for (rm.river_members[full]) |member| {
+            const map = rm.hand_perms[member.perm_index].to_canon[ctx.u];
+            for (values, 0..) |*v, h| v.* += partial[map[h]];
+        }
     }
 }
 
@@ -447,7 +487,7 @@ fn accumulateRiverMemberRemapped(
     const m_opp = ctx.mask_river[opp][full * N_opp ..][0..N_opp];
     const fo = hp.from_canon[opp];
     @memset(scratch.cardsum[0..52], 0);
-    var total: f32 = 0;
+    var total: f64 = 0;
     for (0..N_opp) |j| {
         const mr = reach_opp[fo[j]] * m_opp[j] * w;
         total += mr;
@@ -508,14 +548,14 @@ pub fn foldEvalNaive(
     for (values, 0..) |*v, h| {
         const u_hand = u_hands[h];
         const u_mask = card.mask(u_hand.first) | card.mask(u_hand.second);
-        var compat: f32 = 0;
+        var compat: f64 = 0;
         for (opp_hands, 0..) |opp_hand, i| {
             const opp_mask = card.mask(opp_hand.first) | card.mask(opp_hand.second);
             if ((u_mask & opp_mask) == 0) {
                 compat += reach_opp[i];
             }
         }
-        v.* = amount * compat;
+        v.* = @floatCast(@as(f64, amount) * compat);
     }
 }
 
@@ -535,9 +575,9 @@ pub fn showdownEvalNaive(
         const u_hand = u_hands[h];
         const u_mask = card.mask(u_hand.first) | card.mask(u_hand.second);
         const u_str = u_strengths[h];
-        var weaker: f32 = 0;
-        var tied: f32 = 0;
-        var stronger: f32 = 0;
+        var weaker: f64 = 0;
+        var tied: f64 = 0;
+        var stronger: f64 = 0;
         for (opp_hands, 0..) |opp_hand, i| {
             const opp_mask = card.mask(opp_hand.first) | card.mask(opp_hand.second);
             if ((u_mask & opp_mask) != 0) continue;
@@ -551,7 +591,7 @@ pub fn showdownEvalNaive(
                 stronger += r;
             }
         }
-        v.* = win_amount * weaker - loss_amount * stronger + tie_amount * tied;
+        v.* = @floatCast(@as(f64, win_amount) * weaker - @as(f64, loss_amount) * stronger + @as(f64, tie_amount) * tied);
     }
 }
 
@@ -597,7 +637,7 @@ test "foldEval: O(N) matches O(N^2) oracle with random reaches" {
 
     var values_fast: [3]f32 = undefined;
     var values_naive: [3]f32 = undefined;
-    var scratch_cardsum = [_]f32{0} ** 52;
+    var scratch_cardsum = [_]f64{0} ** 52;
 
     foldEval(&values_fast, &reach_opp, &u_ci, &opp_ci, &same_idx, 1.0, &scratch_cardsum);
     foldEvalNaive(&values_naive, &reach_opp, &u_hands, &opp_hands, 1.0);
@@ -615,7 +655,7 @@ test "foldEval: negative amount flips sign" {
     const u_ci = [_]u8{ card.index(h0.first), card.index(h0.second) };
     const opp_ci = [_]u8{ card.index(h1.first), card.index(h1.second) };
     var values: [1]f32 = undefined;
-    var scratch = [_]f32{0} ** 52;
+    var scratch = [_]f64{0} ** 52;
 
     foldEval(&values, &reach_opp, &u_ci, &opp_ci, &same_idx, -10.0, &scratch);
     try testing.expect(@abs(-10.0 - values[0]) < 1e-6); // 100% compat × -10
@@ -630,7 +670,7 @@ test "foldEval: blocked hand reduces compat mass" {
     const u_ci = [_]u8{ card.index(u_hand.first), card.index(u_hand.second) };
     const opp_ci = [_]u8{ card.index(opp_hand.first), card.index(opp_hand.second) };
     var values: [1]f32 = undefined;
-    var scratch = [_]f32{0} ** 52;
+    var scratch = [_]f64{0} ** 52;
 
     foldEval(&values, &reach_opp, &u_ci, &opp_ci, &same_idx, 1.0, &scratch);
     try testing.expect(@abs(0.0 - values[0]) < 1e-6);
@@ -644,7 +684,7 @@ test "foldEval: same combo inclusion-exclusion" {
     const u_ci = [_]u8{ card.index(h.first), card.index(h.second) };
     const opp_ci = [_]u8{ card.index(h.first), card.index(h.second) };
     var values: [1]f32 = undefined;
-    var scratch = [_]f32{0} ** 52;
+    var scratch = [_]f64{0} ** 52;
 
     foldEval(&values, &reach_opp, &u_ci, &opp_ci, &same_idx, 1.0, &scratch);
     try testing.expect(@abs(0.0 - values[0]) < 1e-6);
@@ -689,10 +729,10 @@ test "showdownEval: O(N) matches O(N^2) oracle" {
 
     var values_fast: [3]f32 = undefined;
     var values_naive: [3]f32 = undefined;
-    var lo_card = [_]f32{0} ** 52;
-    var eq_card = [_]f32{0} ** 52;
-    var cardsum = [_]f32{0} ** 52;
-    var compat = [_]f32{0} ** 3;
+    var lo_card = [_]f64{0} ** 52;
+    var eq_card = [_]f64{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
+    var compat = [_]f64{0} ** 3;
     var same_reach = [_]f32{0} ** 3;
 
     // Precompute cardsum, total, same_reach (mimicking cfr.zig's evalTerminal)
@@ -753,10 +793,10 @@ test "showdownEval: win/loss/tie coefficients applied correctly" {
     const opp_ci = [_]u8{ card.index(opp_hand.first), card.index(opp_hand.second) };
 
     var values: [1]f32 = undefined;
-    var lo_card = [_]f32{0} ** 52;
-    var eq_card = [_]f32{0} ** 52;
-    var cardsum = [_]f32{0} ** 52;
-    var compat_buf = [_]f32{0} ** 1;
+    var lo_card = [_]f64{0} ** 52;
+    var eq_card = [_]f64{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
+    var compat_buf = [_]f64{0} ** 1;
     var same_reach = [_]f32{0} ** 1;
 
     // W=10, C=5, T=2
@@ -796,10 +836,10 @@ test "showdownEval: empty U range produces no output" {
     const opp_ci = [_]u8{ card.index(opp_hand.first), card.index(opp_hand.second) };
 
     var values: [0]f32 = undefined;
-    var lo_card = [_]f32{0} ** 52;
-    var eq_card = [_]f32{0} ** 52;
-    var cardsum = [_]f32{0} ** 52;
-    var compat_buf: [0]f32 = undefined;
+    var lo_card = [_]f64{0} ** 52;
+    var eq_card = [_]f64{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
+    var compat_buf: [0]f64 = undefined;
     var same_reach: [0]f32 = undefined;
 
     const total = computeCardSum(&cardsum, &reach_opp, &opp_ci);
@@ -854,10 +894,10 @@ test "showdownEval: order reversed from strongest→weakest verified" {
 
     var values_fast: [3]f32 = undefined;
     var values_naive: [3]f32 = undefined;
-    var lo_card = [_]f32{0} ** 52;
-    var eq_card = [_]f32{0} ** 52;
-    var cardsum = [_]f32{0} ** 52;
-    var compat_buf = [_]f32{0} ** 3;
+    var lo_card = [_]f64{0} ** 52;
+    var eq_card = [_]f64{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
+    var compat_buf = [_]f64{0} ** 3;
     var same_reach = [_]f32{0} ** 3;
 
     const total = computeCardSum(&cardsum, &reach_opp, &opp_ci);
@@ -934,10 +974,10 @@ test "showdownEval: constant-sum property on random data" {
 
     var values_fast: [3]f32 = undefined;
     var values_naive: [3]f32 = undefined;
-    var lo_card = [_]f32{0} ** 52;
-    var eq_card = [_]f32{0} ** 52;
-    var cardsum = [_]f32{0} ** 52;
-    var compat_buf = [_]f32{0} ** 3;
+    var lo_card = [_]f64{0} ** 52;
+    var eq_card = [_]f64{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
+    var compat_buf = [_]f64{0} ** 3;
     var same_reach = [_]f32{0} ** 3;
 
     const total = computeCardSum(&cardsum, &reach_opp, &opp_ci);
@@ -992,7 +1032,7 @@ test "computeCardSum: correct total and per-card sums" {
         card.index(h1.first), card.index(h1.second),
     };
 
-    var cardsum = [_]f32{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
     const total = computeCardSum(&cardsum, &reach, &opp_ci);
 
     try testing.expect(@abs(1.0 - total) < 1e-7);
@@ -1166,10 +1206,10 @@ fn makeScratch(allocator: std.mem.Allocator, n_u: usize, n_opp: usize) !AllInScr
         .reach_opp = try allocator.alloc(f32, n_opp),
         .child_values = try allocator.alloc(f32, n_u),
         .same_reach = try allocator.alloc(f32, n_u),
-        .compat = try allocator.alloc(f32, n_u),
-        .lo_card = try allocator.alloc(f32, 52),
-        .eq_card = try allocator.alloc(f32, 52),
-        .cardsum = try allocator.alloc(f32, 52),
+        .compat = try allocator.alloc(f64, n_u),
+        .lo_card = try allocator.alloc(f64, 52),
+        .eq_card = try allocator.alloc(f64, 52),
+        .cardsum = try allocator.alloc(f64, 52),
     };
 }
 
@@ -1275,11 +1315,11 @@ test "allInEvalFlop: preserves constant sum across complete physical runouts" {
     ctx1.same_combo_idx = &same1;
     allInEvalFlop(&v1, &r0, ctx1, s);
 
-    var total: f32 = 0;
+    var total: f64 = 0;
     for (r0, v0) |r, v| total += r * v;
     for (r1, v1) |r, v| total += r * v;
 
-    var compatible_mass: f32 = 0;
+    var compatible_mass: f64 = 0;
     for (u_hands, r0) |uh, ru| {
         for (opp_hands, r1) |oh, ro| {
             if ((uh.cardMask() & oh.cardMask()) == 0) compatible_mass += ru * ro;
@@ -1333,4 +1373,11 @@ test "allInEvalTurn: zero opponent reach yields zero values" {
     allInEvalTurn(&v, &reach_opp, 3, ctx, s);
 
     for (0..3) |i| try testing.expectEqual(@as(f32, 0.0), v[i]);
+}
+
+test "tiny compatible reach survives blocker subtraction" {
+    var cardsum = [_]f64{0} ** 52;
+    var values: [1]f32 = undefined;
+    foldEval(&values, &.{ 1, 0.00000001 }, &.{ 0, 1 }, &.{ 0, 2, 3, 4 }, &.{sentinel}, 100, &cardsum);
+    try testing.expectApproxEqAbs(@as(f32, 0.000001), values[0], 1e-12);
 }

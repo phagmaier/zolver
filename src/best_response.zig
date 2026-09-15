@@ -408,3 +408,24 @@ test "known game value: a flopped royal flush wins the initial pot" {
     const fast = exploitabilityGap(&solver);
     try testing.expectApproxEqAbs(e.pct, fast.pct, 1e-3);
 }
+
+/// Solve with an independent final certificate. If the fast check crosses the
+/// target prematurely due to numerical error, continue to the iteration cap.
+pub fn solveVerified(solver: *Solver) !struct { solve: SolveResult, verification: @import("verify.zig").Result } {
+    var result = solve(solver);
+    var verification = try @import("verify.zig").exploitability(solver.allocator, solver);
+    while (verification.pct > solver.config.target_exploitability_pct and solver.t < solver.config.max_iterations and !result.stalled) {
+        solver.iterate(@min(@max(1, solver.config.check_interval), solver.config.max_iterations - solver.t));
+        verification = try @import("verify.zig").exploitability(solver.allocator, solver);
+    }
+    result.iterations = solver.t;
+    result.converged = verification.pct <= solver.config.target_exploitability_pct;
+    result.exploitability = .{
+        .chips = @floatCast(verification.chips),
+        .pct = @floatCast(verification.pct),
+        .br = .{ @floatCast(verification.br[0] * verification.compatible_mass), @floatCast(verification.br[1] * verification.compatible_mass) },
+        .avg_ev = .{ @floatCast(verification.ev[0] * verification.compatible_mass), @floatCast(verification.ev[1] * verification.compatible_mass) },
+        .z = @floatCast(verification.compatible_mass),
+    };
+    return .{ .solve = result, .verification = verification };
+}

@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
         var output_path: ?[]const u8 = null;
         var options = output_mod.Options{};
         var print_summary = false;
+        var verify_final = false;
 
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -65,6 +66,8 @@ pub fn main(init: std.process.Init) !void {
                 };
             } else if (std.mem.eql(u8, a, "--all-runouts")) {
                 options.all_runouts = true;
+            } else if (std.mem.eql(u8, a, "--verify")) {
+                verify_final = true;
             } else if (std.mem.eql(u8, a, "--summary")) {
                 print_summary = true;
             } else {
@@ -73,12 +76,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        if (options.river != null and options.turn == null) {
-            try printToStderr(io, "error: --river requires --turn\n");
-            return;
-        }
-
-        try runSolve(arena, io, config_path, output_path, options, print_summary);
+        try runSolve(arena, io, config_path, output_path, options, print_summary, verify_final);
+    } else if (std.mem.eql(u8, cmd, "verify")) {
+        if (args.len != 4) return error.ExpectedConfigAndCompleteExport;
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, args[2], arena, .limited(std.math.maxInt(u32)));
+        var bundle = try config_mod.parseConfig(arena, content);
+        defer bundle.deinit();
+        const json = try std.Io.Dir.cwd().readFileAlloc(io, args[3], arena, .limited(std.math.maxInt(u32)));
+        const result = try Zolver.verify.verifyExport(arena, bundle.game, json);
+        try printFormatted(io, "verified exported strategy: {d:.9}% exploitability ({d:.9} chips), constant-sum residual {d:.12} chips\n", .{ result.pct, result.chips, result.constant_sum_error });
+        if (result.pct > bundle.solver.target_exploitability_pct) return error.AccuracyTargetNotMet;
     } else if (std.mem.eql(u8, cmd, "example")) {
         var output_path: ?[]const u8 = null;
         if (args.len >= 3) {
@@ -114,17 +121,19 @@ fn printUsage(io: std.Io) !void {
         \\Usage:
         \\  zolver               opens the visual config builder
         \\  zolver solve  <config.toml> [flags]
+        \\  zolver verify <config.toml> <complete-results.json>
         \\  zolver view   <results.json>
         \\  zolver config
         \\  zolver example [--output <path>]
         \\  zolver help
         \\
-        \\  --summary        print a human-readable flop strategy overview to the terminal
+        \\  --verify         independently verify final exploitability (slower)
+        \\  --summary        print a human-readable root strategy overview to the terminal
         \\
         \\Output (JSON via --output / -o):
-        \\  default          per-hand flop strategy tree + EVs (runout-independent)
+        \\  default          per-hand root strategy tree + EVs
         \\  --turn <card>    also dump the turn subtree for that runout, e.g. --turn 2c
-        \\  --river <card>   also dump the river subtree (requires --turn), e.g. --river Ah
+        \\  --river <card>   also dump the river subtree (requires a known turn), e.g. --river Ah
         \\  --all-runouts    dump every canonical turn/river runout (large; EVs omitted)
         \\
     );
@@ -147,6 +156,7 @@ fn runSolve(
     output_path: ?[]const u8,
     options: output_mod.Options,
     print_summary: bool,
+    verify_requested: bool,
 ) !void {
     const start_ts = std.Io.Clock.now(.awake, io);
 
@@ -175,6 +185,8 @@ fn runSolve(
     };
     defer is.deinit();
 
+    _ = try Zolver.extract.resolveRunout(&is, options.turn, options.river);
+
     const solver_config = bundle.solver;
 
     // Capture everything the JSON output walk needs before the config arena is
@@ -184,6 +196,7 @@ fn runSolve(
     var owned_sizings: [3][]const game_tree.Sizing = undefined;
     for (0..3) |s| owned_sizings[s] = try arena.dupe(game_tree.Sizing, bundle.game.sizings[s]);
     const build_config = game_tree.BuildConfig{
+        .start_street = bundle.game.startStreet(),
         .initial_pot = bundle.game.initial_pot,
         .effective_stack = effective_stack,
         .min_bet = bundle.game.min_bet,
@@ -225,6 +238,9 @@ fn runSolve(
     try printFormatted(io, "  start  exploitability: {d:.3}% ({d:.3} chips)\n", .{ last_exp.pct, last_exp.chips });
 
     const cfg = solver.config;
+    const verify_final = verify_requested or cfg.verify_final;
+    var verified: ?Zolver.verify.Result = null;
+    var verified_at: u32 = 0;
     const solve_start = std.Io.Clock.now(.awake, io);
     var stall = best_response.StallDetector.init(cfg.stall_patience, cfg.stall_rel_improvement);
 
@@ -246,7 +262,13 @@ fn runSolve(
                 try printToStderr(io, "  error: exploitability became non-finite (NaN/Inf) — solver diverged; stopping\n");
                 break;
             }
-            if (last_exp.pct <= cfg.target_exploitability_pct) break;
+            if (last_exp.pct <= cfg.target_exploitability_pct) {
+                if (!verify_final) break;
+                verified = try Zolver.verify.exploitability(arena, &solver);
+                verified_at = solver.t;
+                if (verified.?.pct <= cfg.target_exploitability_pct) break;
+                continue;
+            }
             // Optional progress heuristic; a plateau does not prove convergence.
             if (stall.update(last_exp.pct)) {
                 try printFormatted(io, "  plateaued at {d:.3}% (no improvement for {d} checks); stopping short of the {d:.3}% target\n", .{
@@ -260,6 +282,14 @@ fn runSolve(
     // The iteration cap can fall between scheduled checks; report the actual
     // final strategy, not the last checkpoint's exploitability.
     if (checked_at != solver.t) last_exp = best_response.exploitabilityGap(&solver);
+    if (verify_final) {
+        try printToStderr(io, "verifying the final strategy with physical runouts and f64 arithmetic...\n");
+        if (verified == null or verified_at != solver.t) verified = try Zolver.verify.exploitability(arena, &solver);
+        last_exp.pct = @floatCast(verified.?.pct);
+        last_exp.chips = @floatCast(verified.?.chips);
+        try printFormatted(io, "  verified exploitability: {d:.9}%  constant-sum residual: {d:.12} chips\n", .{ verified.?.pct, verified.?.constant_sum_error });
+    }
+    const converged = if (verified) |v| v.pct <= cfg.target_exploitability_pct else last_exp.pct <= cfg.target_exploitability_pct;
     const end_ts = std.Io.Clock.now(.awake, io);
     const total_secs = @as(f32, @floatFromInt(end_ts.nanoseconds - start_ts.nanoseconds)) / @as(f32, @floatFromInt(std.time.ns_per_s));
 
@@ -268,8 +298,8 @@ fn runSolve(
     });
 
     const z = if (last_exp.z > 0) last_exp.z else 1.0;
-    const ev0 = solver.averageEV(0) / z;
-    const ev1 = solver.averageEV(1) / z;
+    const ev0: f32 = if (verified) |v| @floatCast(v.ev[0]) else solver.averageEV(0) / z;
+    const ev1: f32 = if (verified) |v| @floatCast(v.ev[1]) else solver.averageEV(1) / z;
 
     {
         var buf: [1024]u8 = undefined;
@@ -281,7 +311,7 @@ fn runSolve(
         try stdout_writer.interface.print("avg_ev_ip: {d:.4}\n", .{ev1});
         try stdout_writer.interface.print("initial_pot: {d}\n", .{is.tree.initial_pot});
         try stdout_writer.interface.print("elapsed_s: {d:.2}\n", .{total_secs});
-        try stdout_writer.interface.print("converged: {}\n", .{last_exp.pct <= cfg.target_exploitability_pct});
+        try stdout_writer.interface.print("converged: {}\n", .{converged});
         try stdout_writer.interface.flush();
     }
 
@@ -316,7 +346,8 @@ fn runSolve(
             .exploitability_chips = last_exp.chips,
             .ev_oop = ev0,
             .ev_ip = ev1,
-            .converged = last_exp.pct <= cfg.target_exploitability_pct,
+            .converged = converged,
+            .independently_verified = verify_final,
         };
 
         const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch |err| {

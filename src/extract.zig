@@ -30,6 +30,9 @@ const Range = range.Range;
 
 pub const ExtractError = error{
     RiverWithoutTurn,
+    InvalidNode,
+    StreetMismatch,
+    HandBlocked,
     TurnNotFound,
     RiverNotFound,
     NoTurnPermutation,
@@ -63,7 +66,11 @@ pub const RunoutResolution = struct {
 /// suit permutation. Pass `turn == null` for a flop-street query (identity), and
 /// `river == null` for a turn-street query. The permutation is composed so that
 /// it carries the entire real board onto the canonical board.
-pub fn resolveRunout(is: *const SolverInit, turn: ?Card, river: ?Card) ExtractError!RunoutResolution {
+pub fn resolveRunout(is: *const SolverInit, requested_turn: ?Card, requested_river: ?Card) ExtractError!RunoutResolution {
+    const turn = requested_turn orelse is.root_turn;
+    const river = requested_river orelse is.root_river;
+    if (is.root_turn) |c| if (turn.? != c) return ExtractError.TurnNotFound;
+    if (is.root_river) |c| if (river.? != c) return ExtractError.RiverNotFound;
     const rt = &is.runout_tables;
 
     if (turn == null) {
@@ -119,14 +126,21 @@ pub fn strategyForHand(
     out: []f32,
 ) ExtractError!void {
     const is = solver.init_state;
-    if ((game_tree.refTag(node_ref) catch unreachable) != .action) return ExtractError.NotAnActionNode;
+    try validateNode(is, node_ref);
     const node = is.tree.action_nodes.items[game_tree.refIndex(node_ref)];
     if (out.len < node.num_children) return ExtractError.OutTooSmall;
 
     const res = try resolveRunout(is, turn, river);
+    if (is.tree.action_nodes.items[game_tree.refIndex(node_ref)].street != res.street) return ExtractError.StreetMismatch;
     const canon_hand = res.permutation.applyCombo(real_hand) catch return ExtractError.HandNotInRange;
     const h = handIndex(is.ranges[node.player], canon_hand) orelse return ExtractError.HandNotInRange;
 
+    const live = switch (res.street) {
+        .flop => is.mask_flop[node.player][h],
+        .turn => is.mask_turn[node.player][res.runoutId() * solver.N[node.player] + h],
+        .river => is.mask_river[node.player][res.runoutId() * solver.N[node.player] + h],
+    };
+    if (live == 0) return ExtractError.HandBlocked;
     solver.averageStrategyHand(res.street, res.runoutId(), node_ref, h, out[0..node.num_children]);
 }
 
@@ -143,21 +157,24 @@ pub fn nodeEVs(
     out: []f32,
 ) ExtractError!bool {
     const is = solver.init_state;
-    if ((game_tree.refTag(node_ref) catch unreachable) != .action) return ExtractError.NotAnActionNode;
+    try validateNode(is, node_ref);
     const node = is.tree.action_nodes.items[game_tree.refIndex(node_ref)];
     if (out.len < solver.N[node.player]) return ExtractError.OutTooSmall;
 
     const res = try resolveRunout(is, turn, river);
+    if (is.tree.action_nodes.items[game_tree.refIndex(node_ref)].street != res.street) return ExtractError.StreetMismatch;
     return solver.captureNodeEVs(node.player, node_ref, res.runoutId(), out[0..solver.N[node.player]]);
 }
 
 /// Raw counterfactual values, including opponent reach and chance factors.
 /// Use nodeEVs for conditional chip EVs. Undefined conditional EVs are NaN.
 pub fn nodeCFVs(solver: *Solver, node_ref: NodeRef, turn: ?Card, river: ?Card, out: []f32) ExtractError!bool {
-    if ((game_tree.refTag(node_ref) catch unreachable) != .action) return ExtractError.NotAnActionNode;
+    const is = solver.init_state;
+    try validateNode(is, node_ref);
     const player = solver.init_state.tree.action_nodes.items[game_tree.refIndex(node_ref)].player;
     if (out.len < solver.N[player]) return ExtractError.OutTooSmall;
     const res = try resolveRunout(solver.init_state, turn, river);
+    if (is.tree.action_nodes.items[game_tree.refIndex(node_ref)].street != res.street) return ExtractError.StreetMismatch;
     return solver.captureNodeValues(player, node_ref, res.runoutId(), out[0..solver.N[player]]);
 }
 
@@ -174,6 +191,11 @@ pub fn canonicalHandIndex(
 ) ?u32 {
     const canon = res.permutation.applyCombo(real_hand) catch return null;
     return handIndex(is.ranges[player], canon);
+}
+
+fn validateNode(is: *const SolverInit, ref: NodeRef) ExtractError!void {
+    if ((game_tree.refTag(ref) catch return ExtractError.InvalidNode) != .action) return ExtractError.NotAnActionNode;
+    if (game_tree.refIndex(ref) >= is.tree.action_nodes.items.len) return ExtractError.InvalidNode;
 }
 
 // ── Internals ──────────────────────────────────────────────────────────────
@@ -537,4 +559,26 @@ test "handIndex finds present combos and rejects absent ones" {
     // A combo using a board card is never in range.
     const absent = try Combo.init(card.makeCard(12, 0), card.makeCard(2, 2));
     try testing.expectEqual(@as(?u32, null), handIndex(is.ranges[0], absent));
+}
+
+test "queries reject mismatched streets invalid nodes and blocked runout hands" {
+    const alloc = testing.allocator;
+    const r = try symmetricRange();
+    var is = try buildInit(alloc, two_tone, &r, &r);
+    defer is.deinit();
+    var solver = try Solver.init(alloc, &is, .{});
+    defer solver.deinit();
+    const h = is.ranges[0].hands[0];
+    var out: [8]f32 = undefined;
+    const t = is.runout_tables.canonical_turns[0].card;
+    try testing.expectError(error.StreetMismatch, strategyForHand(&solver, is.tree.root, h, t, null, &out));
+    try testing.expectError(error.InvalidNode, strategyForHand(&solver, 0x3fffffff, h, null, null, &out));
+    for (is.tree.action_nodes.items, 0..) |node, i| {
+        if (node.street != .turn) continue;
+        const hand = is.ranges[node.player].hands[0];
+        const ref = try game_tree.makeRef(.action, @intCast(i));
+        try testing.expectError(error.StreetMismatch, strategyForHand(&solver, ref, hand, null, null, &out));
+        try testing.expectError(error.HandBlocked, strategyForHand(&solver, ref, hand, hand.first, null, &out));
+        break;
+    }
 }

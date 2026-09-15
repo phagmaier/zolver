@@ -18,6 +18,7 @@ pub const terminal_eval = @import("terminal_eval.zig");
 pub const allin_cache = @import("allin_cache.zig");
 pub const scratch = @import("scratch.zig");
 pub const cfr = @import("cfr.zig");
+pub const verify = @import("verify.zig");
 pub const best_response = @import("best_response.zig");
 pub const threading = @import("threading.zig");
 pub const extract = @import("extract.zig");
@@ -43,6 +44,7 @@ test {
     std.testing.refAllDecls(scratch);
     std.testing.refAllDecls(cfr);
     std.testing.refAllDecls(best_response);
+    std.testing.refAllDecls(verify);
     std.testing.refAllDecls(threading);
     std.testing.refAllDecls(extract);
     std.testing.refAllDecls(invariants);

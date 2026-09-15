@@ -195,16 +195,49 @@ and saves a JSON comparison summary alongside raw solver outputs. This keeps the
 external check on the same physical-runout convention as Zolver; strategy
 differences are interpreted in aggregate because equilibria may be non-unique.
 
-`compare.py` aligns flop nodes by an action *path* whose bet steps are ranked
-within the node's sibling set (bet#0, bet#1=all-in, …). This is what lets
-Zolver's `all-in` label match TexasSolver's `BET <stack>`: previously the two
-encodings diverged and **only 4 of 8 flop nodes matched, silently dropping every
-all-in line** — exactly the physical-runout all-in code with the least other
-coverage. All 8/8 now match. Notably the all-in branches agree tightly with
-TexasSolver (on `v2`, the all-in raise node: mean abs diff 0.004), independent
-evidence the runout enumeration is correct; residual disagreement concentrates
-at the near-indifferent root check/bet decision and shrinks as the Zolver side
-is solved to lower exploitability.
+`compare.py` matches actions by actual total commitments, including raise
+increments and all-ins, and checks acting players plus complete node, action,
+and hand coverage. Missing structure fails even if overlapping frequencies
+agree. `--metric mean|max|p95` selects the statistic gated by `--tol`; all three
+are reported. Defaults retain the 0.05 mean absolute frequency gate.
+TexasSolver seat numbers are normalized from its OOP root. Its JSON lacks the
+full game metadata, so the original fixture configs must still match board,
+pot, stack, range weights, and betting rules.
+
+```bash
+python3 bench/compare.py zolver.json texas.json --metric max --tol 0.05
+python3 -m unittest discover -s bench -p 'test_*.py'
+```
+
+## Algorithm and betting-tree studies
+
+```bash
+python3 bench/run_study.py spot.toml --algorithm dcfr_plus --algorithm pdcfr_plus --algorithm cfr_plus --verify
+python3 bench/run_study.py spot.toml --add-size flop:50 --add-size turn:125 --verify --out bench/out/sizes
+```
+
+Each variant starts a fresh process, uses the same game/target and iteration
+cap, and retains configs, raw logs, exports, and sample timings. Defaults are
+one warm-up plus three measured runs. `--verify` includes independent final
+verification in elapsed time; use narrow ranges or later-street starts first.
+A variant that misses the target has a null `time_to_target_s`, rather than a
+misleading winning time. DCFR+ uses the paper's alpha=1.5/gamma=4, PDCFR+ uses
+alpha=2.3/gamma=5. Original DCFR settings are preserved for the baseline.
+
+Each size addition is a separate wider-tree solve. The summary gives root OOP
+EV changes and mean per-hand root policy total variation (equally weighted,
+not a reach-weighted aggregate). Use converged runs and gaps smaller than the
+EV differences of interest. Candidate sizes with large effects deserve a
+combined-tree follow-up; individual effects need not add up. This guides manual
+expansion but is **not an off-tree best response**: evaluating a new action
+against an old strategy would require defining how that strategy responds to
+previously absent actions. We do not invent that continuation or claim a full
+no-limit exploitability bound.
+
+Thread benchmarks now clear regrets and averages before each thread count and
+measure the routine two-pass gap. Zero repetitions skip a phase and report zero
+milliseconds. The older tables above are historical (including their four-pass
+gap timings); do not compare them directly to a changed workload.
 
 ## How this harness paid off
 

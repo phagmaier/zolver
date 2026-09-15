@@ -1,0 +1,40 @@
+{
+  "baseline_commit": "b37da9f",
+  "zig": "0.16.0",
+  "optimization": "ReleaseFast",
+  "fixture": "bench/spots/1_srp_dry.toml",
+  "description": "Fresh state for each worker count; two warm-up and four timed iterations. Three samples per version, alternating order. Training and routine two-pass gap only; excludes startup.",
+  "probe_source": "const std = @import(\"std\");\nconst z = @import(\"zolver\");\nfn now() u64 { var ts:std.os.linux.timespec=undefined; _=std.os.linux.clock_gettime(.MONOTONIC,&ts); return @as(u64,@intCast(ts.sec))*1_000_000_000+@as(u64,@intCast(ts.nsec)); }\npub fn main(init:std.process.Init) !void {\n    const alloc=std.heap.page_allocator;\n    const content=try std.Io.Dir.cwd().readFileAlloc(init.io,\"bench/spots/1_srp_dry.toml\",alloc,.limited(100000)); defer alloc.free(content);\n    var bundle=try z.config.parseConfig(alloc,content); defer bundle.deinit();\n    for ([_]u32{1,8}) |nt| {\n        var is=try z.init.SolverInit.init(alloc,bundle.game); defer is.deinit();\n        var cfg=bundle.solver; cfg.num_threads=nt;\n        var solver=try z.cfr.Solver.init(alloc,&is,cfg); defer solver.deinit();\n        solver.iterate(2);\n        const started=now(); solver.iterate(4); const elapsed=now()-started;\n        const gap_started=now(); const gap=z.best_response.exploitabilityGap(&solver); const gap_ns=now()-gap_started;\n        std.debug.print(\"fresh {d}t: {d:.3} ms/iter, two-pass gap {d:.3} ms, exploit={d:.8}%\\n\",.{nt,@as(f64,@floatFromInt(elapsed))/4e6,@as(f64,@floatFromInt(gap_ns))/1e6,gap.pct});\n    }\n}\n",
+  "samples": [
+    {
+      "version": "before",
+      "sample": 0,
+      "output": "fresh 1t: 1668.216 ms/iter, two-pass gap 1522.229 ms, exploit=57.46449700%\nfresh 8t: 190.619 ms/iter, two-pass gap 213.213 ms, exploit=57.46449700%\n"
+    },
+    {
+      "version": "after",
+      "sample": 0,
+      "output": "fresh 1t: 1102.018 ms/iter, two-pass gap 1283.893 ms, exploit=58.71394300%\nfresh 8t: 166.018 ms/iter, two-pass gap 182.593 ms, exploit=58.71394300%\n"
+    },
+    {
+      "version": "after",
+      "sample": 1,
+      "output": "fresh 1t: 1108.895 ms/iter, two-pass gap 1287.026 ms, exploit=58.71394300%\nfresh 8t: 166.613 ms/iter, two-pass gap 182.124 ms, exploit=58.71394300%\n"
+    },
+    {
+      "version": "before",
+      "sample": 1,
+      "output": "fresh 1t: 1273.548 ms/iter, two-pass gap 1504.464 ms, exploit=57.46449700%\nfresh 8t: 190.852 ms/iter, two-pass gap 213.338 ms, exploit=57.46449700%\n"
+    },
+    {
+      "version": "before",
+      "sample": 2,
+      "output": "fresh 1t: 1271.149 ms/iter, two-pass gap 1511.635 ms, exploit=57.46449700%\nfresh 8t: 191.627 ms/iter, two-pass gap 214.761 ms, exploit=57.46449700%\n"
+    },
+    {
+      "version": "after",
+      "sample": 2,
+      "output": "fresh 1t: 1105.321 ms/iter, two-pass gap 1291.287 ms, exploit=58.71394300%\nfresh 8t: 165.660 ms/iter, two-pass gap 184.654 ms, exploit=58.71394300%\n"
+    }
+  ]
+}

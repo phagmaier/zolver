@@ -155,7 +155,7 @@ test "fold kernel satisfies the constant-sum identity on random reaches" {
     defer alloc.free(v0);
     const v1 = try alloc.alloc(f32, n1);
     defer alloc.free(v1);
-    var cardsum = [_]f32{0} ** 52;
+    var cardsum = [_]f64{0} ** 52;
 
     var prng = std.Random.DefaultPrng.init(0xC0FFEE);
     const rng = prng.random();
@@ -209,12 +209,12 @@ test "showdown kernel satisfies the constant-sum identity on random reaches" {
     defer alloc.free(v0);
     const v1 = try alloc.alloc(f32, n1);
     defer alloc.free(v1);
-    var lo = [_]f32{0} ** 52;
-    var eq = [_]f32{0} ** 52;
-    var cs = [_]f32{0} ** 52;
+    var lo = [_]f64{0} ** 52;
+    var eq = [_]f64{0} ** 52;
+    var cs = [_]f64{0} ** 52;
     const sr = try alloc.alloc(f32, @max(n0, n1));
     defer alloc.free(sr);
-    const comp = try alloc.alloc(f32, @max(n0, n1));
+    const comp = try alloc.alloc(f64, @max(n0, n1));
     defer alloc.free(comp);
 
     // Section-2 coefficients for an arbitrary pot; the identity is pot-independent.
@@ -251,11 +251,23 @@ test "showdown kernel satisfies the constant-sum identity on random reaches" {
             sr[h] = if (s != std.math.maxInt(u32)) r1[s] else 0.0;
         }
         terminal_eval.showdownEval(
-            v0, r1, is.card_idx[0], is.card_idx[1],
-            sd.order[0][runout * n0 ..][0..n0], sd.strengths[0][runout * n0 ..][0..n0],
-            sd.order[1][runout * n1 ..][0..n1], sd.strengths[1][runout * n1 ..][0..n1],
-            win, loss, tie,
-            &cs, total0, sr[0..n0], &lo, &eq, comp[0..n0],
+            v0,
+            r1,
+            is.card_idx[0],
+            is.card_idx[1],
+            sd.order[0][runout * n0 ..][0..n0],
+            sd.strengths[0][runout * n0 ..][0..n0],
+            sd.order[1][runout * n1 ..][0..n1],
+            sd.strengths[1][runout * n1 ..][0..n1],
+            win,
+            loss,
+            tie,
+            &cs,
+            total0,
+            sr[0..n0],
+            &lo,
+            &eq,
+            comp[0..n0],
         );
         @memset(&lo, 0);
         @memset(&eq, 0);
@@ -266,11 +278,23 @@ test "showdown kernel satisfies the constant-sum identity on random reaches" {
             sr[h] = if (s != std.math.maxInt(u32)) r0[s] else 0.0;
         }
         terminal_eval.showdownEval(
-            v1, r0, is.card_idx[1], is.card_idx[0],
-            sd.order[1][runout * n1 ..][0..n1], sd.strengths[1][runout * n1 ..][0..n1],
-            sd.order[0][runout * n0 ..][0..n0], sd.strengths[0][runout * n0 ..][0..n0],
-            win, loss, tie,
-            &cs, total1, sr[0..n1], &lo, &eq, comp[0..n1],
+            v1,
+            r0,
+            is.card_idx[1],
+            is.card_idx[0],
+            sd.order[1][runout * n1 ..][0..n1],
+            sd.strengths[1][runout * n1 ..][0..n1],
+            sd.order[0][runout * n0 ..][0..n0],
+            sd.strengths[0][runout * n0 ..][0..n0],
+            win,
+            loss,
+            tie,
+            &cs,
+            total1,
+            sr[0..n1],
+            &lo,
+            &eq,
+            comp[0..n1],
         );
 
         const mass = naiveCompatMass(r0, r1, is.ranges[0].hands, is.ranges[1].hands);

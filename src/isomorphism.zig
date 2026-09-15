@@ -395,3 +395,36 @@ test "duplicate flop cards are rejected" {
 
     try std.testing.expectError(error.DuplicateBoardCard, buildRunoutTables(std.testing.allocator, flop, ranges));
 }
+
+/// Enumerate only cards still to come from the solve root. Known turn/river
+/// cards are fixed individually: their order is part of the public history.
+pub fn buildRootRunoutTables(allocator: Allocator, flop: [3]Card, turn: ?Card, river: ?Card, ranges: [2][]const WeightedCombo, compress: bool) !RunoutTables {
+    if (turn == null) {
+        if (river != null) return error.RiverWithoutTurn;
+        return if (compress) buildRunoutTables(allocator, flop, ranges) else buildUncompressedRunoutTables(allocator, flop);
+    }
+    var perms: std.ArrayList(SuitPermutation) = .empty;
+    defer perms.deinit(allocator);
+    const all = allSuitPermutations();
+    for (all.items[0..all.len]) |perm| {
+        if (!compress and !std.mem.eql(u8, &perm.map, &SuitPermutation.identity().map)) continue;
+        if (!try mapsBoardToItself(&flop, perm) or perm.applyCard(turn.?) != turn.?) continue;
+        if (river) |r| if (perm.applyCard(r) != r) continue;
+        if (!try preservesRange(ranges[0], perm) or !try preservesRange(ranges[1], perm)) continue;
+        try perms.append(allocator, perm);
+    }
+    const owned_perms = try perms.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_perms);
+    var rivers: std.ArrayList(CanonicalRiver) = .empty;
+    defer rivers.deinit(allocator);
+    if (river) |r| {
+        try rivers.append(allocator, .{ .card = r, .multiplicity = 1, .orbit_mask = card.mask(r) });
+    } else {
+        try appendCanonicalRivers(allocator, &rivers, (try boardMask(&flop)) | card.mask(turn.?), owned_perms);
+    }
+    const owned_rivers = try rivers.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_rivers);
+    const turns = try allocator.alloc(CanonicalTurn, 1);
+    turns[0] = .{ .card = turn.?, .multiplicity = 1, .orbit_mask = card.mask(turn.?), .first_river = 0, .num_rivers = @intCast(owned_rivers.len) };
+    return .{ .allocator = allocator, .valid_permutations = owned_perms, .canonical_turns = turns, .canonical_rivers = owned_rivers };
+}

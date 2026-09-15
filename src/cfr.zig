@@ -17,7 +17,7 @@ const NodeRef = game_tree.NodeRef;
 const TerminalNode = game_tree.TerminalNode;
 const DcfrParams = kernels.DcfrParams;
 
-pub const Algorithm = enum { dcfr, cfr_plus };
+pub const Algorithm = enum { dcfr, cfr_plus, dcfr_plus, pdcfr_plus };
 
 pub const WalkMode = enum {
     solve,
@@ -44,11 +44,14 @@ pub const WalkMode = enum {
 pub const SolverConfig = struct {
     algorithm: Algorithm = .dcfr,
     dcfr: DcfrParams = .{},
+    pdcfr: DcfrParams = .{ .alpha = 2.3, .gamma = 5 },
     prune_zero_reach: bool = false,
     use_simd: bool = true,
     max_iterations: u32 = 1000,
     target_exploitability_pct: f32 = 0.5,
     check_interval: u32 = 64,
+    /// Independent physical f64 verification; potentially expensive on flop trees.
+    verify_final: bool = false,
     /// Optional heuristic: stop after this many checks without sufficient
     /// improvement. A plateau is not a precision bound or a convergence proof.
     /// Disabled by default; normally run to the target or iteration limit.
@@ -69,6 +72,7 @@ pub const SolverConfig = struct {
         if (!std.math.isFinite(self.dcfr.alpha) or self.dcfr.alpha < 0) return error.InvalidSolverConfig;
         if (!std.math.isFinite(self.dcfr.beta) or self.dcfr.beta < 0) return error.InvalidSolverConfig;
         if (!std.math.isFinite(self.dcfr.gamma) or self.dcfr.gamma < 0) return error.InvalidSolverConfig;
+        if (!std.math.isFinite(self.pdcfr.alpha) or self.pdcfr.alpha < 0 or !std.math.isFinite(self.pdcfr.gamma) or self.pdcfr.gamma < 0) return error.InvalidSolverConfig;
         if (self.max_iterations == 0) return error.InvalidSolverConfig;
         if (!std.math.isFinite(self.target_exploitability_pct) or self.target_exploitability_pct < 0) return error.InvalidSolverConfig;
         // A relative-improvement threshold outside [0, 1) makes the stall test
@@ -118,6 +122,9 @@ pub const WalkCtx = struct {
     capture: ?Capture = null,
     batch: ?CaptureBatch = null,
     allin_cache: ?*const AllInCache = null,
+    symmetric_reach: bool = false,
+    predicted: [3][]f32 = .{ &.{}, &.{}, &.{} },
+    next_discount: f32 = 0,
 
     pub const CaptureBatch = struct {
         runouts: [3]?u32,
@@ -275,9 +282,9 @@ pub const WalkCtx = struct {
         if (mode.usesAverage()) {
             self.averageStrategy(street, runout_id, node_ref, strat);
         } else if (self.use_simd) {
-            kernels.regretMatchingSimd(self.streetRegrets(street)[block .. block + len], strat, n_act, a);
+            kernels.regretMatchingSimd((if (self.algorithm == .pdcfr_plus) self.predicted[street.index()] else self.streetRegrets(street))[block .. block + len], strat, n_act, a);
         } else {
-            kernels.regretMatching(self.streetRegrets(street)[block .. block + len], strat, n_act, a);
+            kernels.regretMatching((if (self.algorithm == .pdcfr_plus) self.predicted[street.index()] else self.streetRegrets(street))[block .. block + len], strat, n_act, a);
         }
 
         if (player == self.u) {
@@ -316,6 +323,16 @@ pub const WalkCtx = struct {
                             kernels.accumulateNormalizedStrategy(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
                         }
                     },
+                    .dcfr_plus, .pdcfr_plus => {
+                        const prediction = if (self.algorithm == .pdcfr_plus) self.predicted[street.index()][block .. block + len] else null;
+                        kernels.predictiveRegretUpdate(regret_block, prediction, child_values, node_v, self.pos_discount, self.next_discount, n_act, a);
+                        if (self.use_simd) {
+                            kernels.accumulateNormalizedStrategySimd(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
+                        } else {
+                            kernels.accumulateNormalizedStrategy(strat_store, reach_u, strat, self.avg_history_scale, self.avg_current_scale, n_act, a);
+                        }
+                        if (self.is.compress_suits) if (prediction) |p| self.symmetrizeRegrets(p, n_act, a, street, runout_id);
+                    },
                     .cfr_plus => {
                         if (self.use_simd) {
                             kernels.cfrRegretUpdateSimd(regret_block, child_values, node_v, n_act, a);
@@ -326,7 +343,7 @@ pub const WalkCtx = struct {
                         }
                     },
                 }
-                if (self.is.compress_suits) self.symmetrizeRegrets(regret_block, n_act, a);
+                if (self.is.compress_suits) self.symmetrizeRegrets(regret_block, n_act, a, street, runout_id);
             }
             return node_v;
         } else {
@@ -543,32 +560,20 @@ pub const WalkCtx = struct {
     /// Mathematically equivalent hands receive identical regrets; projecting
     /// roundoff back onto that invariant prevents canonical reuse from amplifying
     /// arbitrary suit-dependent differences over many iterations.
-    fn symmetrizeRegrets(self: *WalkCtx, regrets: []f32, n: u32, actions: u32) void {
-        const rm = &self.is.remap.?;
-        var maps: [24][]const u32 = undefined;
-        var count: usize = 0;
-        for (rm.perms, rm.hand_perms) |perm, hp| {
-            if (self.fixed_turn) |c| if (perm.applyCard(c) != c) continue;
-            if (self.fixed_river) |c| if (perm.applyCard(c) != c) continue;
-            maps[count] = hp.to_canon[self.u];
-            count += 1;
-        }
-        if (count <= 1) return;
-        for (0..n) |h| {
-            var representative = true;
-            for (maps[0..count]) |map| {
-                if (map[h] < h) {
-                    representative = false;
-                    break;
-                }
-            }
-            if (!representative) continue;
+    fn symmetrizeRegrets(self: *WalkCtx, regrets: []f32, n: u32, actions: u32, street: Street, runout: u32) void {
+        const board: usize = switch (street) {
+            .flop => 0,
+            .turn => 1 + @as(usize, runout),
+            .river => 1 + self.is.runout_tables.canonical_turns.len + runout,
+        };
+        const projection = self.is.remap.?.projections[board * 2 + self.u];
+        for (0..projection.offsets.len - 1) |i| {
+            const orbit = projection.hands[projection.offsets[i]..projection.offsets[i + 1]];
             for (0..actions) |a| {
-                const base = a * n;
                 var total: f64 = 0;
-                for (maps[0..count]) |map| total += regrets[base + map[h]];
-                const mean: f32 = @floatCast(total / @as(f64, @floatFromInt(count)));
-                for (maps[0..count]) |map| regrets[base + map[h]] = mean;
+                for (orbit) |h| total += regrets[a * n + h];
+                const mean: f32 = @floatCast(total / @as(f64, @floatFromInt(orbit.len)));
+                for (orbit) |h| regrets[a * n + h] = mean;
             }
         }
     }
@@ -940,6 +945,7 @@ pub const WalkCtx = struct {
                         .loss_amount = c.loss,
                         .tie_amount = c.tie,
                         .rm = if (is.compress_suits) &is.remap.? else null,
+                        .symmetric_reach = self.symmetric_reach,
                     };
                     const ais = self.scratch.allInScratch(n_u, n_opp);
                     if (street == .turn) {
@@ -1055,13 +1061,16 @@ pub const Solver = struct {
     turn_results: []f32,
 
     allin_cache: ?AllInCache,
+    prediction_data: []f32,
+    predicted: [3][]f32,
+    next_discount: f32,
 
     /// Primary dynamically allocated working memory, excluding native thread
     /// stacks and small thread-pool bookkeeping.
     pub fn workingMemoryEstimate(init_state: *const SolverInit, config: SolverConfig) !u64 {
         const base = try workingMemoryWithoutCache(init_state, config);
         const available = init_state.max_budget_bytes -| (try init_state.memoryBytes()) -| base;
-        return base + AllInCache.plan(init_state, @min(config.allin_cache_max_bytes, available)).retained;
+        return base + AllInCache.planForIterations(init_state, @min(config.allin_cache_max_bytes, available), config.max_iterations).retained;
     }
 
     fn workingMemoryWithoutCache(init_state: *const SolverInit, config: SolverConfig) !u64 {
@@ -1075,7 +1084,12 @@ pub const Solver = struct {
         const result_floats = try std.math.mul(u64, @intCast(init_state.runout_tables.canonical_turns.len), n_max);
         total = try std.math.add(u64, total, try std.math.mul(u64, result_floats, @sizeOf(f32)));
         total = try std.math.add(u64, total, try std.math.mul(u64, @as(u64, config.num_threads), @sizeOf(Scratch)));
+        if (config.algorithm == .pdcfr_plus) total += predictionBytes(init_state);
         return total;
+    }
+
+    fn predictionBytes(is: *const SolverInit) u64 {
+        return (is.storage.regrets_flop.len + is.storage.regrets_turn.len + is.storage.regrets_river.len) * @sizeOf(f32);
     }
 
     pub fn init(allocator: Allocator, init_state: *SolverInit, config: SolverConfig) !Solver {
@@ -1131,8 +1145,17 @@ pub const Solver = struct {
         const turn_results = try allocator.alloc(f32, @as(usize, init_state.runout_tables.canonical_turns.len) * n_max);
         errdefer allocator.free(turn_results);
         const available = init_state.max_budget_bytes -| init_bytes -| (try workingMemoryWithoutCache(init_state, config));
+        const prediction_data = try allocator.alloc(f32, if (config.algorithm == .pdcfr_plus) @intCast(predictionBytes(init_state) / 4) else 0);
+        errdefer allocator.free(prediction_data);
+        @memset(prediction_data, 0);
+        var predicted: [3][]f32 = .{ &.{}, &.{}, &.{} };
+        if (prediction_data.len > 0) {
+            const a = init_state.storage.regrets_flop.len;
+            const b = a + init_state.storage.regrets_turn.len;
+            predicted = .{ prediction_data[0..a], prediction_data[a..b], prediction_data[b..] };
+        }
         var cache_scratch = scratch;
-        const allin_cache = try AllInCache.init(allocator, init_state, @min(config.allin_cache_max_bytes, available), &cache_scratch);
+        const allin_cache = try AllInCache.initForIterations(allocator, init_state, @min(config.allin_cache_max_bytes, available), &cache_scratch, config.max_iterations);
 
         return .{
             .init_state = init_state,
@@ -1153,10 +1176,14 @@ pub const Solver = struct {
             .worker_scratches = worker_scratches,
             .turn_results = turn_results,
             .allin_cache = allin_cache,
+            .prediction_data = prediction_data,
+            .predicted = predicted,
+            .next_discount = 0,
         };
     }
 
     pub fn deinit(self: *Solver) void {
+        self.allocator.free(self.prediction_data);
         if (self.pool) |*p| p.deinit();
         if (self.allin_cache) |*cache| cache.deinit();
         for (self.worker_scratches.items) |*ws| ws.deinit();
@@ -1166,7 +1193,7 @@ pub const Solver = struct {
     }
 
     pub fn workingMemoryBytes(self: *const Solver) u64 {
-        var total: u64 = self.scratch.memoryBytes();
+        var total: u64 = self.scratch.memoryBytes() + self.prediction_data.len * @sizeOf(f32);
         if (self.allin_cache) |cache| total += cache.memoryBytes();
         for (self.worker_scratches.items) |scratch| total += scratch.memoryBytes();
         total += @as(u64, @intCast(self.turn_results.len)) * @sizeOf(f32);
@@ -1190,7 +1217,7 @@ pub const Solver = struct {
         var ctx = self.makeCtx(&self.scratch);
         const root = self.init_state.tree.root;
         const ru, const ro = self.initRootReaches(u);
-        _ = ctx.walk(root, .flop, 0, ru, ro, 0, .solve);
+        _ = ctx.walk(root, self.init_state.root_street, 0, ru, ro, 0, .solve);
         if (self.config.debug_invariants) self.assertRegretsFinite();
     }
 
@@ -1201,6 +1228,7 @@ pub const Solver = struct {
         for (s.regrets_flop) |r| std.debug.assert(std.math.isFinite(r));
         for (s.regrets_turn) |r| std.debug.assert(std.math.isFinite(r));
         for (s.regrets_river) |r| std.debug.assert(std.math.isFinite(r));
+        for (self.prediction_data) |r| std.debug.assert(std.math.isFinite(r));
     }
 
     fn rootValue(self: *Solver, u: u8, comptime mode: WalkMode) f64 {
@@ -1208,7 +1236,7 @@ pub const Solver = struct {
         var ctx = self.makeCtx(&self.scratch);
         const root = self.init_state.tree.root;
         const ru, const ro = self.initRootReaches(u);
-        const v = ctx.walk(root, .flop, 0, ru, ro, 0, mode);
+        const v = ctx.walk(root, self.init_state.root_street, 0, ru, ro, 0, mode);
         var ev: f64 = 0;
         for (ru, v) |r, val| ev += @as(f64, r) * @as(f64, val);
         return ev;
@@ -1267,7 +1295,7 @@ pub const Solver = struct {
         ctx.capture = .{ .node_ref = node_ref, .runout_id = runout_id, .out = out, .found = &found, .conditional = conditional };
         const root = self.init_state.tree.root;
         const ru, const ro = self.initRootReaches(u);
-        _ = ctx.walk(root, .flop, 0, ru, ro, 0, .average);
+        _ = ctx.walk(root, self.init_state.root_street, 0, ru, ro, 0, .average);
         return found;
     }
 
@@ -1283,7 +1311,7 @@ pub const Solver = struct {
             var ctx = self.makeCtx(&self.scratch);
             ctx.batch = .{ .runouts = runouts, .values = out, .stride = stride };
             const ru, const ro = self.initRootReaches(@intCast(player));
-            _ = ctx.walk(self.init_state.tree.root, .flop, 0, ru, ro, 0, .average);
+            _ = ctx.walk(self.init_state.tree.root, self.init_state.root_street, 0, ru, ro, 0, .average);
         }
     }
 
@@ -1303,6 +1331,8 @@ pub const Solver = struct {
             .avg_current_scale = self.avg_current_scale,
             .t = self.t,
             .probe = self.probe,
+            .fixed_turn = self.init_state.root_turn,
+            .fixed_river = self.init_state.root_river,
             .use_simd = self.config.use_simd,
             .prune_zero_reach = self.config.prune_zero_reach,
             .algorithm = self.config.algorithm,
@@ -1310,27 +1340,32 @@ pub const Solver = struct {
             .worker_scratches = self.worker_scratches.items,
             .turn_results = self.turn_results,
             .allin_cache = if (self.allin_cache) |*cache| cache else null,
+            .predicted = self.predicted,
+            .next_discount = self.next_discount,
+            .symmetric_reach = true,
         };
     }
 
     fn setPassFactors(self: *Solver, u: u8) void {
         self.u = u;
         self.opp = 1 - u;
+        const params = if (self.config.algorithm == .pdcfr_plus) self.config.pdcfr else self.config.dcfr;
         const tf: f64 = @floatFromInt(self.t);
+        const previous: f64 = @floatFromInt(self.t -| 1);
         // Reciprocal powers avoid inf/inf for valid large exponents.
-        self.pos_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, tf, -@as(f64, self.config.dcfr.alpha))));
-        self.neg_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, tf, -@as(f64, self.config.dcfr.beta))));
-        self.strat_scale = @floatCast(std.math.pow(f64, tf / (tf + 1.0), self.config.dcfr.gamma));
+        self.pos_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, previous, -@as(f64, params.alpha))));
+        self.neg_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, previous, -@as(f64, params.beta))));
+        self.next_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, tf, -@as(f64, params.alpha))));
+        self.strat_scale = if (self.t == 0) 0 else @floatCast(std.math.pow(f64, previous / tf, params.gamma));
         if (self.t == 0) {
             self.avg_history_scale = 0;
             self.avg_current_scale = 0;
             return;
         }
-        const previous: f64 = @floatFromInt(self.t - 1);
         self.avg_current_scale = @floatCast(1.0 / tf);
         self.avg_history_scale = @floatCast(switch (self.config.algorithm) {
             // DCFR: S_t = d_t S_(t-1) + x_t, stored as S_t / t.
-            .dcfr => self.strat_scale * previous / tf,
+            .dcfr, .dcfr_plus, .pdcfr_plus => self.strat_scale * previous / tf,
             // CFR+: S_t = S_(t-1) + t x_t, stored as S_t / t².
             .cfr_plus => (previous / tf) * (previous / tf),
         });
@@ -1576,11 +1611,11 @@ test "zero-reach pruning produces the same root EV as the full walk" {
     try testing.expect(@abs(ev_full - ev_pruned) < 1e-3);
 }
 
-test "zero-reach pruning preserves trained regrets and averages for both algorithms" {
+test "zero-reach pruning preserves trained regrets and averages for every algorithm" {
     const alloc = testing.allocator;
     const r = try monoSymRanges();
     for ([_]bool{ false, true }) |compressed| {
-        for ([_]Algorithm{ .dcfr, .cfr_plus }) |algorithm| {
+        for ([_]Algorithm{ .dcfr, .cfr_plus, .dcfr_plus, .pdcfr_plus }) |algorithm| {
             var is_full = try buildInitC(alloc, mono_flop, &r[0], &r[1], compressed);
             defer is_full.deinit();
             var full = try Solver.init(alloc, &is_full, .{ .algorithm = algorithm });
@@ -1592,6 +1627,7 @@ test "zero-reach pruning preserves trained regrets and averages for both algorit
             full.iterate(12);
             pruned.iterate(12);
             try expectIdenticalStorage(&is_full, &is_pruned);
+            try testing.expectEqualSlices(f32, full.prediction_data, pruned.prediction_data);
         }
     }
 }
@@ -1664,19 +1700,22 @@ test "parallel solve is byte-identical to serial across worker counts" {
         try wc(spade(11), spade(3)),
     };
 
-    var is_ref = try buildInit(alloc, mono_flop, &oop, &ip);
-    defer is_ref.deinit();
-    var ref = try Solver.init(alloc, &is_ref, .{});
-    defer ref.deinit();
-    ref.iterate(4);
+    for ([_]Algorithm{ .dcfr, .cfr_plus, .dcfr_plus, .pdcfr_plus }) |algorithm| {
+        var is_ref = try buildInit(alloc, mono_flop, &oop, &ip);
+        defer is_ref.deinit();
+        var ref = try Solver.init(alloc, &is_ref, .{ .algorithm = algorithm });
+        defer ref.deinit();
+        ref.iterate(4);
 
-    for ([_]u32{ 1, 2, 4, 8 }) |nt| {
-        var is_p = try buildInit(alloc, mono_flop, &oop, &ip);
-        defer is_p.deinit();
-        var p = try Solver.init(alloc, &is_p, .{ .num_threads = nt });
-        defer p.deinit();
-        p.iterate(4);
-        try expectIdenticalStorage(&is_ref, &is_p);
+        for ([_]u32{ 1, 2, 4, 8 }) |nt| {
+            var is_p = try buildInit(alloc, mono_flop, &oop, &ip);
+            defer is_p.deinit();
+            var p = try Solver.init(alloc, &is_p, .{ .num_threads = nt, .algorithm = algorithm });
+            defer p.deinit();
+            p.iterate(4);
+            try expectIdenticalStorage(&is_ref, &is_p);
+            try testing.expectEqualSlices(f32, ref.prediction_data, p.prediction_data);
+        }
     }
 }
 
@@ -1927,16 +1966,18 @@ test "all-in equity cache matches river sweeps and supports a flop-only budget" 
             defer is.deinit();
             var reference = try Solver.init(alloc, &is, .{ .allin_cache_max_bytes = 0 });
             defer reference.deinit();
-            for ([_]u64{ 16 * 9, 1024 * 1024 }) |budget| {
+            for ([_]u64{ 18 * 9, 1024 * 1024 }) |budget| {
                 var cached = try Solver.init(alloc, &is, .{ .allin_cache_max_bytes = budget });
                 defer cached.deinit();
                 try testing.expect(cached.allin_cache != null);
-                try testing.expectEqual(budget == 16 * 9, cached.allin_cache.?.boards == 1);
+                try testing.expectEqual(budget == 18 * 9, cached.allin_cache.?.boards == 1);
                 for (0..2) |player| {
                     cached.setPassFactors(@intCast(player));
                     reference.setPassFactors(@intCast(player));
                     var cc = cached.makeCtx(&cached.scratch);
+                    cc.symmetric_reach = false;
                     var rc = reference.makeCtx(&reference.scratch);
+                    rc.symmetric_reach = false;
                     for ([_]Street{ .flop, .turn }) |street| {
                         for ([_]u32{ 0, 5 }) |runout| {
                             var reach = [_]f32{ 0.2, 0.7, 0.13 };
@@ -1954,5 +1995,30 @@ test "all-in equity cache matches river sweeps and supports a flop-only budget" 
                 }
             }
         }
+    }
+}
+
+test "DCFR recurrence uses preceding iteration and quadratic sample weights" {
+    // setPassFactors only touches the fields initialized here.
+    var s: Solver = undefined;
+    s.config = .{};
+    var r = [_]f32{0};
+    var average = [_]f32{0};
+    var explicit_r: f64 = 0;
+    var weighted: f64 = 0;
+    for (1..5) |t| {
+        s.t = @intCast(t);
+        s.setPassFactors(0);
+        const x: f32 = @floatFromInt(t);
+        kernels.dcfrRegretUpdate(&r, &.{x}, &.{0}, s.pos_discount, s.neg_discount, 1, 1);
+        const prior: f64 = @floatFromInt(t - 1);
+        const power = std.math.pow(f64, prior, 1.5);
+        explicit_r = explicit_r * power / (power + 1) + x;
+        kernels.accumulateNormalizedStrategy(&average, &.{1}, &.{x}, s.avg_history_scale, s.avg_current_scale, 1, 1);
+        const tf: f64 = @floatFromInt(t);
+        weighted += tf * tf * x;
+        try testing.expectApproxEqAbs(@as(f32, @floatCast(explicit_r)), r[0], 1e-5);
+        // Conceptual S_t = sum(s²*x_s)/t², storage S_t/t.
+        try testing.expectApproxEqAbs(@as(f32, @floatCast(weighted / (tf * tf * tf))), average[0], 1e-6);
     }
 }

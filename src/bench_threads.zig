@@ -4,14 +4,9 @@
 //! exploitability pass, and the JSON output pass — at 1/2/4/8 threads on a real
 //! benchmark spot, reporting BOTH wall time and total process CPU time for each.
 //!
-//! Why CPU time matters here: the persistent pool busy-spins its background
-//! workers while idle (see `threading.zig` `workerLoop`). Wall time alone hides
-//! that cost. During a *serial* phase (exploitability and output are single-
-//! threaded useful work) the N-1 idle workers still burn 100% CPU each, so the
-//! CPU-time/wall-time ratio climbs toward the thread count for zero speedup —
-//! that ratio is the quantity item 2 needs to decide whether a spin-then-park
-//! pool is worth building. For the solve phase the same ratio measures how much
-//! of the fanned-out CPU is actually productive.
+//! CPU/wall time measures active cores, including idle-worker overhead. The
+//! pool uses spin-then-park; thread counts start from fresh regret and average
+//! storage. Exploitability timings use the routine two-pass gap.
 //!
 //! This binary times work; it asserts nothing. Correctness of the parallel path
 //! is guarded by the determinism tests in `cfr.zig`. It emits a machine-readable
@@ -64,15 +59,17 @@ const Phase = struct {
     reps: u64 = 1,
 
     fn wallMs(self: Phase) f64 {
+        if (self.reps == 0) return 0;
         return @as(f64, @floatFromInt(self.wall_ns)) / @as(f64, @floatFromInt(self.reps)) / 1.0e6;
     }
     fn cpuMs(self: Phase) f64 {
+        if (self.reps == 0) return 0;
         return @as(f64, @floatFromInt(self.cpu_ns)) / @as(f64, @floatFromInt(self.reps)) / 1.0e6;
     }
     /// Average cores busy = CPU time / wall time. ~1.0 means single-core-bound;
     /// approaching the thread count means every worker was busy (or spinning).
     fn util(self: Phase) f64 {
-        if (self.wall_ns == 0) return 0;
+        if (self.reps == 0 or self.wall_ns == 0) return 0;
         return @as(f64, @floatFromInt(self.cpu_ns)) / @as(f64, @floatFromInt(self.wall_ns));
     }
 };
@@ -119,11 +116,7 @@ pub fn main(init: std.process.Init) !void {
     while (i < args.len) : (i += 1) {
         const a = args[i];
         const field: ?*u32 =
-            if (std.mem.eql(u8, a, "--iters")) &params.iters
-            else if (std.mem.eql(u8, a, "--warmup")) &params.warmup
-            else if (std.mem.eql(u8, a, "--exploit-reps")) &params.exploit_reps
-            else if (std.mem.eql(u8, a, "--output-reps")) &params.output_reps
-            else null;
+            if (std.mem.eql(u8, a, "--iters")) &params.iters else if (std.mem.eql(u8, a, "--warmup")) &params.warmup else if (std.mem.eql(u8, a, "--exploit-reps")) &params.exploit_reps else if (std.mem.eql(u8, a, "--output-reps")) &params.output_reps else null;
         if (field) |f| {
             i += 1;
             if (i >= args.len) {
@@ -139,6 +132,8 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
     }
+
+    if (params.iters == 0) return error.NonzeroIterationsRequired;
 
     const content = std.Io.Dir.cwd().readFileAlloc(io, params.config_path, arena, .limited(std.math.maxInt(u32))) catch |err| {
         printErr(io, "error: failed to read config '{s}': {}\n", .{ params.config_path, err });
@@ -170,6 +165,7 @@ pub fn main(init: std.process.Init) !void {
     const cpu_count = std.Thread.getCpuCount() catch 0;
 
     const build_config = game_tree.BuildConfig{
+        .start_street = bundle.game.startStreet(),
         .initial_pot = bundle.game.initial_pot,
         .effective_stack = bundle.game.effective_stack,
         .min_bet = bundle.game.min_bet,
@@ -178,16 +174,19 @@ pub fn main(init: std.process.Init) !void {
         .range_sizes = .{ n0, n1 },
     };
 
-    printErr(io,
+    printErr(
+        io,
         "bench-threads: {s}\n  ranges {d}/{d}  runouts {d} turns / {d} rivers  compress_suits={}  cpu_count={d}\n" ++
-        "  iters/sample={d} warmup={d} exploit-reps={d} output-reps={d}\n\n",
+            "  iters/sample={d} warmup={d} exploit-reps={d} output-reps={d}\n\n",
         .{ params.config_path, n0, n1, turns, rivers, bundle.game.compress_suits, cpu_count, params.iters, params.warmup, params.exploit_reps, params.output_reps },
     );
     printErr(io, "{s:>8} {s:>10} | {s:>11} {s:>11} {s:>7} {s:>8} | {s:>10} {s:>10} {s:>7} | {s:>10} {s:>10} {s:>7}\n", .{
         "threads", "mem(MB)",
-        "solve", "cpu", "cores", "speedup",
-        "exploit", "cpu", "cores",
-        "output", "cpu", "cores",
+        "solve",   "cpu",
+        "cores",   "speedup",
+        "exploit", "cpu",
+        "cores",   "output",
+        "cpu",     "cores",
     });
     printErr(io, "{s:>8} {s:>10} | {s:>11} {s:>11} {s:>7} {s:>8} | {s:>10} {s:>10} {s:>7} | {s:>10} {s:>10} {s:>7}\n", .{
         "", "", "ms/iter", "ms/iter", "", "vs 1t", "ms", "ms", "", "ms", "ms", "",
@@ -196,6 +195,8 @@ pub fn main(init: std.process.Init) !void {
     var results: [thread_counts.len]Result = undefined;
 
     for (thread_counts, 0..) |nt, ri| {
+        // Identical initial strategy and regret state for every worker count.
+        inline for (.{ "regrets_flop", "regrets_turn", "regrets_river", "strategies_flop", "strategies_turn", "strategies_river" }) |field| @memset(@field(is.storage, field), 0);
         var solver_config = bundle.solver;
         solver_config.num_threads = nt;
 
@@ -227,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
             const c0 = cpuNs();
             var k: u32 = 0;
             while (k < params.exploit_reps) : (k += 1) {
-                const e = best_response.exploitability(&solver);
+                const e = best_response.exploitabilityGap(&solver);
                 std.mem.doNotOptimizeAway(e);
             }
             exploit.wall_ns = wallNs() - w0;
@@ -274,10 +275,12 @@ pub fn main(init: std.process.Init) !void {
 
         const speedup = results[0].solve.wallMs() / solve.wallMs();
         printErr(io, "{d:>8} {d:>10.1} | {d:>11.3} {d:>11.3} {d:>7.2} {d:>7.2}x | {d:>10.4} {d:>10.4} {d:>7.2} | {d:>10.4} {d:>10.4} {d:>7.2}\n", .{
-            nt, results[ri].memory_mb,
-            solve.wallMs(),   solve.cpuMs(),   solve.util(),   speedup,
-            exploit.wallMs(), exploit.cpuMs(), exploit.util(),
-            output.wallMs(),  output.cpuMs(),  output.util(),
+            nt,               results[ri].memory_mb,
+            solve.wallMs(),   solve.cpuMs(),
+            solve.util(),     speedup,
+            exploit.wallMs(), exploit.cpuMs(),
+            exploit.util(),   output.wallMs(),
+            output.cpuMs(),   output.util(),
         });
     }
 
@@ -299,14 +302,14 @@ pub fn main(init: std.process.Init) !void {
         const speedup = results[0].solve.wallMs() / r.solve.wallMs();
         try w.print(
             "    {{\"threads\": {d}, \"memory_mb\": {d:.2}, \"solve_speedup_vs_1t\": {d:.4},\n" ++
-            "     \"solve\":   {{\"wall_ms_per_iter\": {d:.4}, \"cpu_ms_per_iter\": {d:.4}, \"cores_busy\": {d:.4}}},\n" ++
-            "     \"exploit\": {{\"wall_ms\": {d:.5}, \"cpu_ms\": {d:.5}, \"cores_busy\": {d:.4}}},\n" ++
-            "     \"output\":  {{\"wall_ms\": {d:.5}, \"cpu_ms\": {d:.5}, \"cores_busy\": {d:.4}}}}}{s}\n",
+                "     \"solve\":   {{\"wall_ms_per_iter\": {d:.4}, \"cpu_ms_per_iter\": {d:.4}, \"cores_busy\": {d:.4}}},\n" ++
+                "     \"exploit\": {{\"wall_ms\": {d:.5}, \"cpu_ms\": {d:.5}, \"cores_busy\": {d:.4}}},\n" ++
+                "     \"output\":  {{\"wall_ms\": {d:.5}, \"cpu_ms\": {d:.5}, \"cores_busy\": {d:.4}}}}}{s}\n",
             .{
-                r.threads, r.memory_mb, speedup,
-                r.solve.wallMs(),   r.solve.cpuMs(),   r.solve.util(),
-                r.exploit.wallMs(), r.exploit.cpuMs(), r.exploit.util(),
-                r.output.wallMs(),  r.output.cpuMs(),  r.output.util(),
+                r.threads,                              r.memory_mb,       speedup,
+                r.solve.wallMs(),                       r.solve.cpuMs(),   r.solve.util(),
+                r.exploit.wallMs(),                     r.exploit.cpuMs(), r.exploit.util(),
+                r.output.wallMs(),                      r.output.cpuMs(),  r.output.util(),
                 if (idx + 1 < results.len) "," else "",
             },
         );
