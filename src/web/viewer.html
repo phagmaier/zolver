@@ -5,182 +5,347 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Zolver — Strategy Viewer</title>
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  background: #0d1117; color: #c9d1d9;
-  min-height: 100vh; padding: 20px;
-  display: flex; flex-direction: column; align-items: center;
-}
-.header {
-  text-align: center; margin-bottom: 20px;
-}
-.header h1 { font-size: 20px; color: #58a6ff; margin-bottom: 4px; }
-.header .sub { font-size: 12px; color: #8b949e; }
-.meta-grid {
-  display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;
-  margin-bottom: 16px; font-size: 12px;
-}
-.meta-item { text-align: center; }
-.meta-item .label { color: #8b949e; }
-.meta-item .value { color: #c9d1d9; font-weight: bold; font-size: 14px; }
-.meta-item .value.good { color: #3fb950; }
-.meta-item .value.warn { color: #d29922; }
+  :root {
+    --bg: #0a0e14;
+    --bg-soft: #0f1520;
+    --card: #141b29;
+    --card-2: #1a2334;
+    --card-3: #202b40;
+    --border: #26314a;
+    --border-soft: #1d2639;
+    --text: #e8edf5;
+    --muted: #8b98b0;
+    --faint: #5b6a85;
+    --accent: #5ea2ff;
+    --accent-dim: rgba(94,162,255,.14);
+    --green: #34d399;
+    --blue: #60a5fa;
+    --amber: #fbbf24;
+    --purple: #c084fc;
+    --pink: #f472b6;
+    --red: #f87171;
+    --radius: 14px;
+    --radius-sm: 9px;
+    --shadow: 0 12px 40px rgba(0,0,0,.45);
+    --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    background:
+      radial-gradient(1100px 380px at 50% -80px, rgba(94,162,255,.10), transparent 70%),
+      radial-gradient(900px 500px at 85% 10%, rgba(192,132,252,.06), transparent 70%),
+      var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
 
-.board-cards {
-  display: flex; gap: 6px; justify-content: center; margin-bottom: 16px;
-}
-.board-card {
-  width: 48px; height: 64px; border-radius: 6px;
-  background: #fff; color: #000; font-size: 18px; font-weight: bold;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-}
-.board-card.red { color: #d32f2f; }
-.board-card.black { color: #212121; }
+  /* ── App shell ── */
+  .app-header {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px);
+    background: rgba(10,14,20,.82);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .app-header-inner {
+    max-width: 1240px; margin: 0 auto; padding: 12px 22px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; margin-right: auto; }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 10px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 19px; color: #fff;
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    box-shadow: 0 4px 16px rgba(59,130,246,.4);
+  }
+  .brand h1 { font-size: 15px; font-weight: 700; letter-spacing: .1px; }
+  .brand h1 span { color: var(--muted); font-weight: 500; }
+  .brand .tag {
+    display: block; font-size: 10.5px; color: var(--faint); font-weight: 500;
+    letter-spacing: .6px; text-transform: uppercase; margin-top: 1px;
+  }
+  .header-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .select-wrap { position: relative; }
+  .select-wrap select {
+    appearance: none; -webkit-appearance: none;
+    background: var(--card-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 8px 30px 8px 12px; font-size: 12.5px; font-family: var(--font);
+    font-weight: 500; cursor: pointer; max-width: 250px;
+  }
+  .select-wrap::after {
+    content: '▾'; position: absolute; right: 10px; top: 50%;
+    transform: translateY(-50%); color: var(--muted); font-size: 11px; pointer-events: none;
+  }
+  .select-wrap select:focus { outline: none; border-color: var(--accent); }
+  .segmented {
+    display: flex; background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 3px; gap: 2px;
+  }
+  .segmented button {
+    background: transparent; border: none; color: var(--muted);
+    font-family: var(--font); font-size: 12px; font-weight: 600;
+    padding: 6px 13px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+    transition: all .15s;
+  }
+  .segmented button:hover { color: var(--text); }
+  .segmented button.active { background: var(--card-3); color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+  .segmented button.active.accent { background: #2563eb; }
+  .btn {
+    background: var(--card-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 8px 14px; font-size: 12.5px;
+    font-weight: 600; font-family: var(--font); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px; transition: all .15s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--card-3); border-color: #35435f; transform: translateY(-1px); }
+  .btn.ghost { background: transparent; }
+  .btn kbd {
+    font-family: var(--mono); font-size: 10px; color: var(--muted);
+    background: rgba(255,255,255,.07); border-radius: 4px; padding: 1px 5px;
+  }
 
-.controls {
-  display: flex; gap: 12px; align-items: center; justify-content: center;
-  margin-bottom: 12px; flex-wrap: wrap;
-}
-.controls select, .controls button {
-  background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
-  border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
-  font-family: inherit;
-}
-.controls button:hover { background: #30363d; }
-.controls button.active { background: #1f6feb; border-color: #1f6feb; }
+  .page { max-width: 1240px; margin: 0 auto; padding: 22px 22px 60px; }
 
-.breadcrumb {
-  display: flex; gap: 4px; align-items: center; justify-content: center;
-  margin-bottom: 12px; font-size: 11px; flex-wrap: wrap;
-}
-.breadcrumb span { color: #484f58; }
-.breadcrumb .step {
-  background: #21262d; padding: 3px 8px; border-radius: 4px;
-  color: #8b949e;
-}
+  /* ── Board strip ── */
+  .board-strip {
+    background: linear-gradient(180deg, var(--card), var(--bg-soft));
+    border: 1px solid var(--border-soft); border-radius: var(--radius);
+    padding: 18px 22px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+    box-shadow: var(--shadow);
+  }
+  .board-cards { display: flex; gap: 9px; }
+  .pcard {
+    width: 58px; height: 78px; border-radius: 10px; background: linear-gradient(180deg,#ffffff,#eef1f6);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(0,0,0,.5), inset 0 1px 0 #fff;
+    border: 1px solid rgba(255,255,255,.4); line-height: 1;
+  }
+  .pcard .r { font-family: var(--mono); font-size: 20px; font-weight: 800; }
+  .pcard .s { font-size: 20px; margin-top: 3px; }
+  .pcard.red { color: #dc2626; } .pcard.black { color: #111827; }
+  .board-meta { min-width: 0; flex: 1; }
+  .board-meta .crumbs {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .crumb-street {
+    font-size: 10.5px; font-weight: 800; letter-spacing: 1.1px; text-transform: uppercase;
+    color: var(--accent); background: var(--accent-dim);
+    border: 1px solid rgba(94,162,255,.3); border-radius: 20px; padding: 3px 11px;
+  }
+  .crumb-sep { color: var(--faint); font-size: 11px; }
+  .crumb-step {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    background: var(--card-3); border: 1px solid var(--border);
+    border-radius: 7px; padding: 3px 10px;
+  }
+  .crumb-step.root { color: var(--muted); font-family: var(--font); font-style: italic; }
+  .acting-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .acting-line h2 { font-size: 17px; font-weight: 700; }
+  .pill {
+    font-size: 11px; font-weight: 700; border-radius: 20px; padding: 3px 11px;
+    letter-spacing: .4px;
+  }
+  .pill.oop { color: #93c5fd; background: rgba(59,130,246,.14); border: 1px solid rgba(59,130,246,.35); }
+  .pill.ip { color: #f0abfc; background: rgba(192,132,252,.12); border: 1px solid rgba(192,132,252,.35); }
+  .pill.count { color: var(--muted); background: rgba(255,255,255,.05); border: 1px solid var(--border); font-weight: 600; }
+  .line-sub { font-size: 12px; color: var(--muted); width: 100%; }
 
-.street-label {
-  text-align: center; font-size: 11px; color: #8b949e; margin-bottom: 8px;
-}
+  /* ── Stat cards ── */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(6, 1fr);
+    gap: 10px; margin-bottom: 16px;
+  }
+  .stat {
+    background: var(--card); border: 1px solid var(--border-soft);
+    border-radius: 12px; padding: 12px 14px; min-width: 0;
+  }
+  .stat .k { font-size: 10px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--faint); margin-bottom: 5px; }
+  .stat .v { font-family: var(--mono); font-size: 17px; font-weight: 700; }
+  .stat .s { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .stat .v.good { color: var(--green); } .stat .v.warn { color: var(--amber); }
+  .stat .v.accent { color: var(--accent); }
+  .stat.highlight { border-color: rgba(94,162,255,.4); background: linear-gradient(180deg, rgba(94,162,255,.08), var(--card)); }
 
-.grid-wrapper {
-  display: flex; gap: 20px; justify-content: center; align-items: flex-start;
-}
-.grid-container { position: relative; }
-.grid-table { border-collapse: collapse; }
-.grid-table th {
-  width: 40px; height: 20px; font-size: 10px; color: #8b949e;
-  text-align: center; font-weight: normal;
-}
-.grid-table td {
-  width: 40px; height: 40px; text-align: center; font-size: 10px;
-  cursor: pointer; border: 1px solid #21262d; position: relative;
-  transition: transform 0.1s;
-}
-.grid-table td:hover { transform: scale(1.15); z-index: 2; border-color: #58a6ff; }
-.grid-table td.selected { border: 2px solid #58a6ff; z-index: 1; }
-.grid-table td.blocked {
-  background: #161b22 !important; cursor: default;
-}
-.grid-table td.blocked::after {
-  content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-  background: repeating-linear-gradient(
-    135deg, transparent, transparent 2px, rgba(255,0,0,0.1) 2px, rgba(255,0,0,0.1) 4px
-  );
-}
-.grid-table td .combo-label { position: relative; z-index: 1; line-height: 1.1; }
-.grid-table td .freq { font-size: 8px; color: rgba(255,255,255,0.6); }
+  /* ── Legend ── */
+  .legend-bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 14px; font-size: 12px; color: var(--muted);
+  }
+  .legend-bar .lbl { font-size: 10.5px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--faint); margin-right: 2px; }
+  .lg { display: inline-flex; align-items: center; gap: 6px; background: var(--card); border: 1px solid var(--border-soft); border-radius: 20px; padding: 4px 11px 4px 7px; font-weight: 600; font-size: 11.5px; color: var(--text); }
+  .lg i { width: 11px; height: 11px; border-radius: 4px; display: inline-block; }
 
-.detail-panel {
-  width: 260px; background: #161b22; border: 1px solid #30363d;
-  border-radius: 8px; padding: 14px; font-size: 12px;
-}
-.detail-panel h3 { font-size: 14px; color: #58a6ff; margin-bottom: 8px; }
-.detail-panel .combo-name { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
-.detail-panel .ev-line { margin-bottom: 10px; color: #8b949e; }
-.detail-panel .ev-line .ev-val { color: #d2a8ff; font-weight: bold; }
-.detail-panel .avg-badge { font-size: 10px; color: #8b949e; margin: -4px 0 8px; }
-.detail-panel .combo-list {
-  margin-top: 12px; border-top: 1px solid #21262d; padding-top: 8px;
-  max-height: 200px; overflow-y: auto;
-}
-.detail-panel .combo-list h4 {
-  font-size: 11px; color: #8b949e; font-weight: normal; margin-bottom: 6px;
-}
-.detail-panel .combo-row {
-  display: flex; justify-content: space-between; align-items: center;
-  gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer;
-  font-size: 11px; border: 1px solid transparent;
-}
-.detail-panel .combo-row:hover { background: #21262d; }
-.detail-panel .combo-row.active {
-  background: #1a3a5c; border-color: #58a6ff;
-}
-.detail-panel .combo-row .combo-ev { color: #d2a8ff; white-space: nowrap; }
-.detail-panel .combo-row .combo-txt { color: #c9d1d9; }
-.action-bar { margin-bottom: 6px; }
-.action-bar .action-label {
-  display: inline-block; width: 70px; font-size: 11px; color: #8b949e;
-}
-.action-bar .action-bar-fill {
-  display: inline-block; height: 14px; border-radius: 3px; vertical-align: middle;
-  min-width: 2px;
-}
-.action-bar .action-pct {
-  display: inline-block; width: 40px; text-align: right; font-size: 11px;
-  margin-left: 6px; color: #c9d1d9;
-}
+  /* ── Content grid ── */
+  .content-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr) 330px;
+    gap: 16px; align-items: start;
+  }
+  .panel {
+    background: var(--card); border: 1px solid var(--border-soft);
+    border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .panel-head {
+    padding: 13px 18px; border-bottom: 1px solid var(--border-soft);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .panel-head h3 { font-size: 12px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--muted); }
+  .panel-head .spacer { flex: 1; }
+  .panel-head .mini { font-size: 11px; color: var(--faint); }
+  .panel-body { padding: 18px; }
 
-.action-buttons {
-  display: flex; gap: 6px; justify-content: center; margin-top: 12px;
-  flex-wrap: wrap;
-}
-.action-buttons button {
-  background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
-  border-radius: 6px; padding: 8px 16px; font-size: 12px; cursor: pointer;
-  font-family: inherit; white-space: nowrap;
-}
-.action-buttons button:hover { background: #30363d; }
-.action-buttons button.primary { background: #238636; border-color: #238636; }
-.action-buttons button.danger { background: #da3633; border-color: #da3633; }
-.action-buttons button.dead {
-  opacity: 0.45; cursor: default; text-decoration: line-through;
-}
-.action-buttons button.dead:hover { background: #21262d; }
-.action-buttons button:disabled { pointer-events: none; }
+  /* Grid table */
+  .grid-scroll { overflow-x: auto; display: flex; justify-content: center; }
+  .grid-table { border-collapse: separate; border-spacing: 3px; }
+  .grid-table th { font-size: 10px; font-weight: 700; color: #8b98b0; text-align: center; font-family: var(--mono); padding: 2px 0; }
+  .grid-table th.row-h { padding: 0 6px 0 0; }
+  .grid-table td {
+    width: 43px; height: 43px; text-align: center; font-size: 10.5px; font-weight: 700;
+    font-family: var(--mono); cursor: pointer; border-radius: 7px;
+    border: 1px solid rgba(255,255,255,.06); position: relative; color: #fff;
+    text-shadow: 0 1px 3px rgba(0,0,0,.7); transition: transform .1s, box-shadow .1s;
+    line-height: 1.15; padding: 2px;
+  }
+  .grid-table td:hover { transform: scale(1.14); z-index: 3; box-shadow: 0 0 0 2px var(--accent), 0 6px 18px rgba(0,0,0,.5); }
+  .grid-table td.selected { box-shadow: 0 0 0 2.5px var(--accent), 0 0 18px rgba(94,162,255,.55); z-index: 2; }
+  .grid-table td.blocked {
+    background: rgba(255,255,255,.03) !important; cursor: default; border-style: dashed;
+    border-color: var(--border);
+  }
+  .grid-table td.blocked::after {
+    content: ''; position: absolute; inset: 0; border-radius: 7px;
+    background: repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(248,113,113,.10) 4px, rgba(248,113,113,.10) 6px);
+  }
+  .grid-table td.empty { background: rgba(255,255,255,.045) !important; cursor: default; border-color: rgba(255,255,255,.06); }
+  .grid-table td .fr { display: block; font-size: 8.5px; font-weight: 600; opacity: .75; margin-top: 1px; }
 
-.legend {
-  display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
-  margin: 0 0 14px; font-size: 11px; color: #8b949e;
-}
-.legend .item { display: flex; align-items: center; gap: 5px; }
-.legend .swatch {
-  width: 12px; height: 12px; border-radius: 3px; display: inline-block;
-  border: 1px solid rgba(255,255,255,0.08);
-}
+  /* Action nav */
+  .action-nav { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
+  .action-nav .an-lbl { width: 100%; font-size: 10.5px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--faint); margin-bottom: 2px; }
+  .act-btn {
+    flex: 1 1 120px; display: flex; align-items: center; gap: 9px;
+    background: var(--card-2); border: 1px solid var(--border); border-radius: 11px;
+    padding: 10px 14px; cursor: pointer; font-family: var(--font);
+    color: var(--text); font-size: 13px; font-weight: 700; transition: all .15s;
+  }
+  .act-btn:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 8px 22px rgba(0,0,0,.4); }
+  .act-btn i { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .act-btn small { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
+  .act-btn:disabled { opacity: .42; cursor: not-allowed; }
+  .act-btn:disabled small { text-decoration: none; }
+  .act-btn .kbd-hint { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--faint); }
 
-.no-data { text-align: center; color: #8b949e; padding: 40px; }
-.drop-zone {
-  border: 2px dashed #30363d; border-radius: 12px; padding: 60px;
-  text-align: center; color: #8b949e; margin: 40px auto; max-width: 500px;
-  cursor: pointer;
-}
-.drop-zone:hover { border-color: #58a6ff; color: #58a6ff; }
-.drop-zone input { display: none; }
+  /* Detail panel */
+  .detail-body { padding: 18px; }
+  .detail-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+  .detail-title { font-family: var(--mono); font-size: 26px; font-weight: 800; letter-spacing: -.3px; }
+  .detail-sub { font-size: 12px; color: var(--muted); margin: 4px 0 12px; line-height: 1.5; }
+  .ev-hero {
+    display: flex; align-items: baseline; justify-content: space-between;
+    background: var(--bg-soft); border: 1px solid var(--border-soft);
+    border-radius: 11px; padding: 11px 14px; margin-bottom: 14px;
+  }
+  .ev-hero .k { font-size: 10.5px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--faint); }
+  .ev-hero .v { font-family: var(--mono); font-size: 21px; font-weight: 800; }
+  .ev-hero .v.pos { color: var(--green); } .ev-hero .v.neg { color: var(--red); }
+  .mixbar { display: flex; height: 12px; border-radius: 8px; overflow: hidden; margin-bottom: 14px; border: 1px solid rgba(255,255,255,.08); }
+  .mixbar div { height: 100%; }
+  .strat-row { margin-bottom: 10px; }
+  .strat-row .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .strat-row .name { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .strat-row .name i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+  .strat-row .pct { font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
+  .track { height: 8px; background: rgba(255,255,255,.07); border-radius: 6px; overflow: hidden; }
+  .track > div { height: 100%; border-radius: 6px; transition: width .3s ease; }
+  .combo-search {
+    width: 100%; background: var(--bg-soft); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 8px 11px; margin: 4px 0 8px;
+  }
+  .combo-search:focus { outline: none; border-color: var(--accent); }
+  .combo-list { margin-top: 12px; border-top: 1px solid var(--border-soft); padding-top: 12px; max-height: 264px; overflow-y: auto; }
+  .combo-list h4 { font-size: 10.5px; color: var(--faint); font-weight: 700; letter-spacing: .7px; text-transform: uppercase; margin-bottom: 8px; }
+  .combo-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 7px 10px; border-radius: 8px; cursor: pointer; font-size: 12px;
+    border: 1px solid transparent; font-family: var(--mono); transition: all .12s;
+  }
+  .combo-row:hover { background: var(--card-2); }
+  .combo-row.active { background: rgba(94,162,255,.12); border-color: rgba(94,162,255,.45); }
+  .combo-row .ce { color: var(--purple); font-weight: 700; white-space: nowrap; }
+  .empty-detail { text-align: center; padding: 26px 10px; color: var(--muted); font-size: 13px; line-height: 1.65; }
+  .empty-detail .big { font-size: 30px; margin-bottom: 10px; }
+
+  .foot-hints {
+    display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
+    margin-top: 18px; font-size: 11.5px; color: var(--faint);
+  }
+  .foot-hints kbd { font-family: var(--mono); font-size: 10px; background: var(--card-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; color: var(--muted); }
+
+  /* Drop zone */
+  .drop-wrap { max-width: 560px; margin: 8vh auto; }
+  .drop-hero { text-align: center; margin-bottom: 20px; }
+  .drop-hero .mark { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 28px; background: linear-gradient(135deg,#2563eb,#7c3aed); box-shadow: 0 8px 30px rgba(59,130,246,.4); }
+  .drop-hero h1 { font-size: 22px; font-weight: 800; } .drop-hero h1 span { color: var(--accent); }
+  .drop-hero p { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
+  .drop-zone {
+    border: 1.5px dashed var(--border); border-radius: 18px; padding: 52px 30px;
+    text-align: center; color: var(--muted); cursor: pointer; background: var(--card);
+    transition: all .18s;
+  }
+  .drop-zone:hover, .drop-zone.over { border-color: var(--accent); color: var(--accent); background: rgba(94,162,255,.05); transform: translateY(-2px); }
+  .drop-zone input { display: none; }
+  .drop-zone .dz-t { font-size: 15px; font-weight: 700; color: var(--text); margin: 12px 0 4px; }
+  .drop-zone .dz-s { font-size: 12.5px; }
+
+  @media (max-width: 1020px) {
+    .stats-row { grid-template-columns: repeat(3, 1fr); }
+    .content-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .grid-table td { width: 34px; height: 34px; font-size: 9px; }
+    .board-strip { padding: 14px; } .pcard { width: 48px; height: 66px; }
+    .app-header-inner { padding: 10px 14px; } .page { padding: 14px 14px 50px; }
+  }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
 </style>
 </head>
 <body>
 
-<div id="app">
-  <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
-    <div style="font-size:40px;margin-bottom:12px">&#9824; &#9829; &#9830; &#9827;</div>
-    <div style="font-size:16px;margin-bottom:4px">Drop results.json here</div>
-    <div style="font-size:12px">or click to browse</div>
-    <input type="file" id="fileInput" accept=".json" onchange="handleFile(event)">
+<header class="app-header" id="topbar" style="display:none">
+  <div class="app-header-inner">
+    <div class="brand">
+      <div class="brand-mark">♠</div>
+      <div><h1>Zolver <span>Strategy Viewer</span></h1><span class="tag" id="hdrSub">GTO Solution Explorer</span></div>
+    </div>
+    <div class="header-controls" id="hdrControls"></div>
   </div>
-  <div id="viewer" style="display:none"></div>
+</header>
+
+<div class="page">
+  <div id="app">
+    <input type="file" id="fileInput" accept=".json" style="display:none" onchange="handleFile(event)">
+    <div class="drop-wrap" id="dropZone" onclick="document.getElementById('fileInput').click()">
+      <div class="drop-hero">
+        <div class="mark">♠</div>
+        <h1>Zolver <span>Strategy Viewer</span></h1>
+        <p>Visualize solved GTO strategies — range grids, EVs &amp; full game-tree navigation.</p>
+      </div>
+      <div class="drop-zone" id="dzInner">
+        <div style="font-size:34px;letter-spacing:6px">♠ ♥ ♦ ♣</div>
+        <div class="dz-t">Drop results.json here</div>
+        <div class="dz-s">or click to browse · works offline, nothing is uploaded</div>
+      </div>
+      <div class="foot-hints"><span><kbd>Tip</kbd> run <span style="font-family:var(--mono)">zolver view results.json</span> to auto-load</span></div>
+    </div>
+    <div id="viewer" style="display:none"></div>
+  </div>
 </div>
 
 <script>
@@ -191,9 +356,13 @@ const SUIT_COLORS = { s:'black', h:'red', d:'red', c:'black' };
 const SUIT_SYMBOLS = { s:'\u2660', h:'\u2665', d:'\u2666', c:'\u2663' };
 
 const ACTION_COLORS = {
-  check:  [0x23,0x86,0x36], fold:   [0xda,0x36,0x33],
-  call:   [0x1f,0x6f,0xeb], bet:    [0xd2,0x99,0x22],
-  raise:  [0xa3,0x71,0xf7], allin:  [0xdb,0x61,0xa2],
+  check:  [0x22,0xc5,0x5e], fold:   [0xef,0x44,0x44],
+  call:   [0x3b,0x82,0xf6], bet:    [0xf5,0x9e,0x0b],
+  raise:  [0xa8,0x55,0xf7], allin:  [0xec,0x48,0x99],
+};
+const ACTION_CSS = {
+  check: '#22c55e', fold: '#ef4444', call: '#3b82f6',
+  bet: '#f59e0b', raise: '#a855f7', allin: '#ec4899',
 };
 
 function classifyAction(label) {
@@ -206,27 +375,39 @@ function classifyAction(label) {
   if (l.startsWith('bet')) return 'bet';
   return 'bet';
 }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ── State ───────────────────────────────────────────────────────────────────
 let DATA = null;
 let streetIdx = 0;
-let nodeIdx = 0;   // index into current street's nodes[]
-let selectedCombo = null;      // hand-class label: "AKs", "AA", "AKo"
-let selectedSpecific = null;   // concrete combo "AhKh", or null = class average
-let playerPerspective = null; // 'oop' or 'ip' — null means "show acting player"
-let nodeIndex = {}; // "line|streetIdx" → node array index
+let nodeIdx = 0;
+let selectedCombo = null;
+let selectedSpecific = null;
+let playerPerspective = null;
+let nodeIndex = {};
 let pathHistory = [];
+let comboFilter = '';
 
 // ── File handling ───────────────────────────────────────────────────────────
 const dropZone = document.getElementById('dropZone');
 const viewer = document.getElementById('viewer');
 const fileInput = document.getElementById('fileInput');
+const topbar = document.getElementById('topbar');
+const dzInner = document.getElementById('dzInner');
 
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor = '#58a6ff'; });
-dropZone.addEventListener('dragleave', e => { e.preventDefault(); dropZone.style.borderColor = '#30363d'; });
-dropZone.addEventListener('drop', e => {
+document.addEventListener('dragover', e => { e.preventDefault(); });
+document.addEventListener('drop', e => {
+  if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+  // Only hijack drops carrying files (don't break text drags).
+  if (e.target && e.target.closest && e.target.closest('input,textarea')) return;
   e.preventDefault();
-  dropZone.style.borderColor = '#30363d';
+  loadFile(e.dataTransfer.files[0]);
+});
+dropZone.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); dzInner.classList.add('over'); });
+dropZone.addEventListener('dragleave', e => { e.preventDefault(); dzInner.classList.remove('over'); });
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); e.stopPropagation();
+  dzInner.classList.remove('over');
   const file = e.dataTransfer.files[0];
   if (file) loadFile(file);
 });
@@ -235,6 +416,7 @@ function handleFile(e) {
   const file = e.target.files[0];
   if (file) loadFile(file);
 }
+function loadAnother() { fileInput.value = ''; fileInput.click(); }
 
 function loadFile(file) {
   const reader = new FileReader();
@@ -254,12 +436,14 @@ function initViewer() {
   if (!DATA || !DATA.streets || !DATA.meta) return;
   dropZone.style.display = 'none';
   viewer.style.display = 'block';
+  topbar.style.display = 'block';
   streetIdx = 0;
   nodeIdx = 0;
   selectedCombo = null;
   selectedSpecific = null;
   playerPerspective = null;
   pathHistory = [];
+  comboFilter = '';
   buildNodeIndex();
   render();
 }
@@ -279,139 +463,116 @@ function buildNodeIndex() {
 function render() {
   const street = DATA.streets[streetIdx];
   const node = street.nodes[nodeIdx];
-  const isFlop = street.street === 'flop';
 
   let player = playerPerspective || node.player;
-  // If showing opposite perspective, find the corresponding node
   let displayNode = node;
   if (playerPerspective && playerPerspective !== node.player) {
-    // Look for sibling action node at same line but different player
-    // On flop, the root is always OOP. After one action, it's IP's turn, etc.
-    // Just find any node at current street with matching line
     displayNode = findNodeByLineAndPlayer(street.nodes, node.line, playerPerspective) || node;
   }
 
-  let html = '';
-
-  // Header
-  html += '<div class="header">';
-  html += '<h1>\u2660 Zolver Strategy Viewer</h1>';
-  html += '<div class="sub">' + DATA.meta.flop + ' &mdash; ' +
-    DATA.meta.iterations + ' iters, ' +
-    DATA.meta.exploitability_pct.toFixed(2) + '% exploit</div>';
-  html += '</div>';
-
-  // Meta
-  html += '<div class="meta-grid">';
-  html += metaItem('Initial Pot', DATA.meta.initial_pot);
-  html += metaItem('Eff Stack', DATA.meta.effective_stack);
-  html += metaItem('EV OOP', (DATA.meta.ev_oop || 0).toFixed(1), (DATA.meta.ev_oop || 0) > 0 ? 'good' : '');
-  html += metaItem('EV IP', (DATA.meta.ev_ip || 0).toFixed(1), (DATA.meta.ev_ip || 0) > 0 ? 'good' : '');
-  html += metaItem('Exploit', (DATA.meta.exploitability_pct || 0).toFixed(2) + '%',
-    (DATA.meta.exploitability_pct || 100) < 0.5 ? 'good' : 'warn');
-  html += metaItem('Converged', DATA.meta.converged ? 'yes' : 'no', DATA.meta.converged ? 'good' : 'warn');
-  html += '</div>';
-
-  // Action color legend (matches cellColor / detail bars)
-  html += '<div class="legend">';
-  const legend = [
-    ['check', ACTION_COLORS.check],
-    ['call', ACTION_COLORS.call],
-    ['bet', ACTION_COLORS.bet],
-    ['raise', ACTION_COLORS.raise],
-    ['all-in', ACTION_COLORS.allin],
-    ['fold', ACTION_COLORS.fold],
-  ];
-  for (const [name, col] of legend) {
-    html += '<span class="item"><span class="swatch" style="background:rgb(' +
-      col.join(',') + ')"></span>' + name + '</span>';
-  }
-  html += '</div>';
-
-  // Board cards
-  html += '<div class="board-cards">';
-  const boardCards = (street.board || '').split(' ').filter(function(c) { return c.length >= 2; });
-  for (const card of boardCards) {
-    const rank = card[0], suit = card[1].toLowerCase();
-      html += '<div class="board-card ' + (SUIT_COLORS[suit]||'') + '">';
-      html += rank + SUIT_SYMBOLS[suit];
-      html += '</div>';
-  }
-  html += '</div>';
-
-  // Controls
-  html += '<div class="controls">';
-  html += '<span style="font-size:12px;color:#8b949e">Street:</span>';
-  html += '<select onchange="changeStreet(this.value)">';
+  // Header controls (street + perspective + back + load)
+  let hc = '';
+  hc += '<div class="select-wrap"><select onchange="changeStreet(this.value)" title="Switch street / runout">';
   for (let s = 0; s < DATA.streets.length; s++) {
     const st = DATA.streets[s];
     const sel = s === streetIdx ? ' selected' : '';
-    html += '<option value="' + s + '"' + sel + '>' + st.street + ' &mdash; ' + st.board + '</option>';
+    hc += '<option value="' + s + '"' + sel + '>' + esc(st.street) + ' · ' + esc(st.board) + '</option>';
   }
-  html += '</select>';
+  hc += '</select></div>';
+  const actingOn = (!playerPerspective || playerPerspective === node.player);
+  hc += '<div class="segmented" role="tablist">';
+  hc += '<button class="' + (actingOn ? 'active accent' : '') + '" onclick="setPerspective(null)">Acting · ' + node.player.toUpperCase() + '</button>';
+  hc += '<button class="' + (playerPerspective === 'oop' ? 'active' : '') + '" onclick="setPerspective(\'oop\')">OOP</button>';
+  hc += '<button class="' + (playerPerspective === 'ip' ? 'active' : '') + '" onclick="setPerspective(\'ip\')">IP</button>';
+  hc += '</div>';
+  if (pathHistory.length > 0) hc += '<button class="btn ghost" onclick="goBack()">← Back <kbd>⌫</kbd></button>';
+  hc += '<button class="btn" onclick="loadAnother()" title="Load a different results file">Open…</button>';
+  document.getElementById('hdrControls').innerHTML = hc;
+  document.getElementById('hdrSub').textContent =
+    DATA.meta.flop + '  ·  ' + DATA.meta.iterations + ' iters  ·  ' +
+    (DATA.meta.exploitability_pct || 0).toFixed(2) + '% exploit';
 
-  html += '<span style="font-size:12px;color:#8b949e;margin-left:8px">View:</span>';
-  const actingClass = (!playerPerspective || playerPerspective === node.player) ? ' active' : '';
-  const oopClass = (playerPerspective === 'oop') ? ' active' : '';
-  const ipClass = (playerPerspective === 'ip') ? ' active' : '';
-  html += '<button class="' + actingClass + '" onclick="setPerspective(null)">Acting (' + node.player.toUpperCase() + ')</button>';
-  html += '<button class="' + oopClass + '" onclick="setPerspective(\'oop\')">OOP</button>';
-  html += '<button class="' + ipClass + '" onclick="setPerspective(\'ip\')">IP</button>';
+  let html = '';
 
-  if (pathHistory.length > 0) {
-    html += '<button onclick="goBack()" style="margin-left:8px">\u2190 Back</button>';
+  // Board strip
+  html += '<div class="board-strip">';
+  html += '<div class="board-cards">';
+  const boardCards = (street.board || '').split(' ').filter(function(c) { return c.length >= 2; });
+  for (const card of boardCards) {
+    const rank = esc(card[0].toUpperCase()), suit = card[1].toLowerCase();
+    html += '<div class="pcard ' + (SUIT_COLORS[suit]||'') + '"><span class="r">' + rank + '</span><span class="s">' + (SUIT_SYMBOLS[suit]||'') + '</span></div>';
   }
   html += '</div>';
+  html += '<div class="board-meta">';
+  html += '<div class="crumbs"><span class="crumb-street">' + esc(street.street) + '</span>';
+  if (node.line.length === 0) html += '<span class="crumb-sep">▸</span><span class="crumb-step root">root · opening action</span>';
+  for (const step of node.line) html += '<span class="crumb-sep">▸</span><span class="crumb-step">' + esc(step) + '</span>';
+  html += '</div>';
+  html += '<div class="acting-line"><h2>' + displayNode.player.toUpperCase() + ' to act</h2>';
+  html += '<span class="pill ' + displayNode.player + '">' + (displayNode.player === 'oop' ? 'Out of position' : 'In position') + '</span>';
+  html += '<span class="pill count">' + displayNode.hands.length + ' combos</span></div>';
+  html += '<div class="line-sub">' + esc(street.board) + ' &nbsp;·&nbsp; click a hand in the grid for its mixed strategy &amp; EV</div>';
+  html += '</div></div>';
 
-  // Breadcrumb
-  html += '<div class="breadcrumb">';
-  html += '<span>' + street.street.toUpperCase() + '</span>';
-  for (const step of node.line) {
-    html += '<span>\u25B8</span><span class="step">' + step + '</span>';
-  }
+  // Stat cards
+  const m = DATA.meta;
+  html += '<div class="stats-row">';
+  html += statCard('Initial pot', m.initial_pot, '');
+  html += statCard('Eff. stack', m.effective_stack, '');
+  html += statCard('EV · OOP', num1(m.ev_oop), (m.ev_oop||0) > 0 ? 'good' : '');
+  html += statCard('EV · IP', num1(m.ev_ip), (m.ev_ip||0) > 0 ? 'good' : '');
+  html += statCard('Exploitability', (m.exploitability_pct||0).toFixed(2) + '%', (m.exploitability_pct||100) < 0.5 ? 'good' : 'warn');
+  html += statCard('Iterations', m.iterations, 'accent', m.converged ? 'converged ✓' : 'not converged');
   html += '</div>';
 
-  // Street label
-  html += '<div class="street-label">' +
-    displayNode.player.toUpperCase() + ' to act &mdash; ' +
-    displayNode.hands.length + ' combos</div>';
-
-  // Grid + detail
-  html += '<div class="grid-wrapper">';
-  html += renderGrid(displayNode, street.board);
-  html += renderDetail(displayNode);
+  // Legend
+  html += '<div class="legend-bar"><span class="lbl">Strategy key</span>';
+  const legend = [
+    ['check', ACTION_CSS.check], ['call', ACTION_CSS.call], ['bet', ACTION_CSS.bet],
+    ['raise', ACTION_CSS.raise], ['all-in', ACTION_CSS.allin], ['fold', ACTION_CSS.fold],
+  ];
+  for (const [name, col] of legend)
+    html += '<span class="lg"><i style="background:' + col + '"></i>' + name + '</span>';
   html += '</div>';
 
-  // Action buttons (for navigation — only for acting player's actual node).
-  // Terminal actions (fold / lines with no child node) are shown disabled so
-  // they don't look clickable and silently fail.
-  html += '<div class="action-buttons">';
+  // Content
+  html += '<div class="content-grid">';
+  html += '<div class="panel"><div class="panel-head"><h3>Range · ' + displayNode.player.toUpperCase() + '</h3><div class="spacer"></div><span class="mini">color = dominant action · brightness = conviction</span></div>';
+  html += '<div class="panel-body">' + renderGrid(displayNode, street.board);
+  // Action nav
+  html += '<div class="action-nav"><div class="an-lbl">Continue down the tree — ' + esc(node.player.toUpperCase()) + ' chooses</div>';
   for (let a = 0; a < node.actions.length; a++) {
     const cls = classifyAction(node.actions[a]);
+    const col = ACTION_CSS[cls] || '#888';
     const navigable = canNavigateAction(a);
-    let btnClass = (cls === 'fold') ? 'danger' : (cls === 'check') ? 'primary' : '';
-    if (!navigable) btnClass = (btnClass ? btnClass + ' ' : '') + 'dead';
+    const sub = navigable ? 'drill in →' : 'terminal';
     if (navigable) {
-      html += '<button class="' + btnClass + '" onclick="navigateAction(' + a + ')">' +
-        node.actions[a] + '</button>';
+      html += '<button class="act-btn" onclick="navigateAction(' + a + ')"><i style="background:' + col + '"></i><span>' + esc(node.actions[a]) + '<small>' + sub + '</small></span></button>';
     } else {
-      html += '<button class="' + btnClass + '" disabled title="Terminal action — no deeper node">' +
-        node.actions[a] + '</button>';
+      html += '<button class="act-btn" disabled title="Terminal action — no deeper node"><i style="background:' + col + '"></i><span>' + esc(node.actions[a]) + '<small>' + sub + '</small></span></button>';
     }
   }
+  html += '</div></div></div>';
+  html += '<div class="panel"><div class="panel-head"><h3>Hand detail</h3><div class="spacer"></div>' +
+    (selectedCombo ? '<span class="mini" style="cursor:pointer" onclick="clearSelection()">clear ✕</span>' : '<span class="mini">no selection</span>') + '</div>';
+  html += '<div class="detail-body">' + renderDetailInner(displayNode) + '</div></div>';
   html += '</div>';
+
+  html += '<div class="foot-hints"><span><kbd>←</kbd><kbd>→</kbd> streets</span><span><kbd>⌫</kbd> back up the tree</span><span><kbd>esc</kbd> clear selection</span><span>terminal actions are disabled, not clickable</span></div>';
 
   viewer.innerHTML = html;
 }
 
-function metaItem(label, value, extraClass) {
-  return '<div class="meta-item"><div class="label">' + label + '</div>' +
-    '<div class="value' + (extraClass ? ' ' + extraClass : '') + '">' + value + '</div></div>';
+function num1(x) { return (x === null || x === undefined) ? '—' : Number(x).toFixed(1); }
+
+function statCard(label, value, extraClass, sub) {
+  return '<div class="stat' + (extraClass === 'accent' ? ' highlight' : '') + '"><div class="k">' + label + '</div>' +
+    '<div class="v' + (extraClass ? ' ' + extraClass : '') + '">' + value + '</div>' +
+    (sub ? '<div class="s">' + sub + '</div>' : '') + '</div>';
 }
 
 // ── Grid rendering ──────────────────────────────────────────────────────────
 function renderGrid(node, board) {
-  // Parse board cards to find blocked ranks/suits
   const boardCards = board.split(' ').filter(c => c.length >= 2);
   const blockedSet = new Set();
   for (const c of boardCards) {
@@ -419,126 +580,83 @@ function renderGrid(node, board) {
     const s = c[1].toLowerCase();
     if (r !== undefined) blockedSet.add(r * 4 + ['s','h','d','c'].indexOf(s));
   }
-
-  // Build combo → hand data map
   const handMap = {};
-  for (const h of node.hands) {
-    handMap[h.combo] = h;
-  }
+  for (const h of node.hands) handMap[h.combo] = h;
 
-  // Precompute strategy for each hand in the grid
   const gridData = {};
-  for (let r1 = 0; r1 < 13; r1++) {
-    for (let r2 = 0; r2 < 13; r2++) {
-      const key = r1 * 13 + r2;
-      gridData[key] = computeGridCell(r1, r2, handMap, blockedSet);
-    }
-  }
+  for (let r1 = 0; r1 < 13; r1++)
+    for (let r2 = 0; r2 < 13; r2++)
+      gridData[r1 * 13 + r2] = computeGridCell(r1, r2, handMap, blockedSet);
 
-  let html = '<div class="grid-container"><table class="grid-table">';
-
-  // Column headers
+  let html = '<div class="grid-scroll"><table class="grid-table">';
   html += '<tr><th></th>';
   for (let c = 0; c < 13; c++) html += '<th>' + RANKS[c] + '</th>';
   html += '</tr>';
-
-  // Rows
   for (let r = 0; r < 13; r++) {
-    html += '<tr><th>' + RANKS[r] + '</th>';
+    html += '<tr><th class="row-h">' + RANKS[r] + '</th>';
     for (let c = 0; c < 13; c++) {
       const cell = gridData[r * 13 + c];
       const comboKey = cell.comboKey;
       const selClass = (selectedCombo === comboKey) ? ' selected' : '';
-
       if (cell.blocked) {
         html += '<td class="blocked' + selClass + '"></td>';
       } else if (!cell.hands || cell.hands.length === 0) {
-        // Empty cell (e.g., suited cell for offsuit combo not in range)
-        html += '<td style="background:#161b22;cursor:default"></td>';
+        html += '<td class="empty"></td>';
       } else {
         const bg = cellColor(cell.strategy, node.actions);
         const title = cell.hands.length > 1
           ? (comboKey + ' · ' + cell.hands.length + ' combos (avg)')
           : (comboKey + ' · ' + cell.hands[0].combo);
-        html += '<td class="' + selClass + '" style="background:' + bg +
-          '" onclick="selectCombo(\'' + comboKey + '\')" title="' + title + '">';
-        html += '<div class="combo-label">' + cell.label + '</div>';
-        if (cell.maxFreq > 0 && cell.maxFreq < 0.99) {
-          html += '<div class="freq">' + Math.round(cell.maxFreq * 100) + '%</div>';
+        html += '<td class="' + selClass.trim() + '" style="background:' + bg +
+          '" onclick="selectCombo(\'' + comboKey + '\')" title="' + esc(title) + '">';
+        html += esc(cell.label);
+        if (cell.maxFreq > 0.005 && cell.maxFreq < 0.999) {
+          html += '<span class="fr">' + Math.round(cell.maxFreq * 100) + '%</span>';
         }
         html += '</td>';
       }
     }
     html += '</tr>';
   }
-
   html += '</table></div>';
   return html;
 }
 
-/// Uniform average of strategies / EVs across the concrete combos in a class cell.
 function averageHands(hands) {
-  if (!hands || hands.length === 0) {
-    return { strategy: null, ev: null, maxFreq: 0 };
-  }
+  if (!hands || hands.length === 0) return { strategy: null, ev: null, maxFreq: 0 };
   const nA = hands[0].strategy ? hands[0].strategy.length : 0;
   const strategy = new Array(nA).fill(0);
   let evSum = 0, evCount = 0;
   for (const h of hands) {
     for (let i = 0; i < nA; i++) strategy[i] += (h.strategy && h.strategy[i]) || 0;
-    if (h.ev !== null && h.ev !== undefined && Number.isFinite(h.ev)) {
-      evSum += h.ev;
-      evCount += 1;
-    }
+    if (h.ev !== null && h.ev !== undefined && Number.isFinite(h.ev)) { evSum += h.ev; evCount += 1; }
   }
   for (let i = 0; i < nA; i++) strategy[i] /= hands.length;
-  return {
-    strategy: strategy,
-    ev: evCount > 0 ? evSum / evCount : null,
-    maxFreq: nA > 0 ? Math.max.apply(null, strategy) : 0,
-  };
+  return { strategy: strategy, ev: evCount > 0 ? evSum / evCount : null, maxFreq: nA > 0 ? Math.max.apply(null, strategy) : 0 };
 }
 
 function handsMatchingLabel(handMap, label) {
   const out = [];
-  for (const combo in handMap) {
-    if (comboToLabel(combo) === label) out.push(handMap[combo]);
-  }
-  // Stable suit order for the drill-down list.
+  for (const combo in handMap) if (comboToLabel(combo) === label) out.push(handMap[combo]);
   out.sort(function(a, b) { return a.combo < b.combo ? -1 : a.combo > b.combo ? 1 : 0; });
   return out;
 }
 
 function computeGridCell(r1, r2, handMap, blockedSet) {
-  // Determine if this cell represents suited, offsuit, or pair
   const isPair = (r1 === r2);
-  const isSuited = (r1 < r2);  // upper right = suited
-  const isOffsuit = (r1 > r2); // lower left = offsuit
+  const isSuited = (r1 < r2);
+  const isOffsuit = (r1 > r2);
   const suits = ['s','h','d','c'];
-
   if (isPair) {
     const rank = RANKS[r1];
     const label = rank + rank;
     const hands = handsMatchingLabel(handMap, label);
     const avg = averageHands(hands);
-    // Fully blocked only if 3+ suits of this rank are on board.
     const ri = RANK_MAP[rank];
     let blockedSuits = 0;
-    for (let s = 0; s < 4; s++) {
-      if (blockedSet.has(ri * 4 + s)) blockedSuits++;
-    }
-    const blocked = blockedSuits >= 3;
-    return {
-      hands: hands,
-      label: label,
-      blocked: blocked,
-      comboKey: label,
-      strategy: avg.strategy,
-      ev: avg.ev,
-      maxFreq: avg.maxFreq,
-    };
+    for (let s = 0; s < 4; s++) if (blockedSet.has(ri * 4 + s)) blockedSuits++;
+    return { hands, label, blocked: blockedSuits >= 3, comboKey: label, strategy: avg.strategy, ev: avg.ev, maxFreq: avg.maxFreq };
   }
-
   if (isSuited) {
     const rHi = RANKS[r1], rLo = RANKS[r2];
     const label = rHi + rLo + 's';
@@ -547,23 +665,11 @@ function computeGridCell(r1, r2, handMap, blockedSet) {
     const riHi = RANK_MAP[rHi], riLo = RANK_MAP[rLo];
     let blocked = true;
     for (const s of suits) {
-      if (!blockedSet.has(riHi * 4 + suits.indexOf(s)) && !blockedSet.has(riLo * 4 + suits.indexOf(s))) {
-        blocked = false; break;
-      }
+      if (!blockedSet.has(riHi * 4 + suits.indexOf(s)) && !blockedSet.has(riLo * 4 + suits.indexOf(s))) { blocked = false; break; }
     }
-    return {
-      hands: hands,
-      label: label,
-      blocked: blocked,
-      comboKey: label,
-      strategy: avg.strategy,
-      ev: avg.ev,
-      maxFreq: avg.maxFreq,
-    };
+    return { hands, label, blocked, comboKey: label, strategy: avg.strategy, ev: avg.ev, maxFreq: avg.maxFreq };
   }
-
   if (isOffsuit) {
-    // Lower left (r1 > r2): offsuit. Row = lower rank, col = higher rank.
     const rHi2 = RANKS[r2], rLo2 = RANKS[r1];
     const label = rHi2 + rLo2 + 'o';
     const hands = handsMatchingLabel(handMap, label);
@@ -573,287 +679,215 @@ function computeGridCell(r1, r2, handMap, blockedSet) {
     for (const s1 of suits) {
       for (const s2 of suits) {
         if (s1 === s2) continue;
-        if (!blockedSet.has(riHi * 4 + suits.indexOf(s1)) && !blockedSet.has(riLo * 4 + suits.indexOf(s2))) {
-          blocked = false; break;
-        }
+        if (!blockedSet.has(riHi * 4 + suits.indexOf(s1)) && !blockedSet.has(riLo * 4 + suits.indexOf(s2))) { blocked = false; break; }
       }
       if (!blocked) break;
     }
-    return {
-      hands: hands,
-      label: label,
-      blocked: blocked,
-      comboKey: label,
-      strategy: avg.strategy,
-      ev: avg.ev,
-      maxFreq: avg.maxFreq,
-    };
+    return { hands, label, blocked, comboKey: label, strategy: avg.strategy, ev: avg.ev, maxFreq: avg.maxFreq };
   }
-
   return { hands: [], label: '', blocked: false, comboKey: '', strategy: null, ev: null, maxFreq: 0 };
 }
 
 function cellColor(strategy, actions) {
-  if (!strategy || strategy.length === 0) return '#161b22';
-  let r = 0, g = 0, b = 0;
-  let totalWeight = 0;
+  if (!strategy || strategy.length === 0) return '#1a2233';
+  let r = 0, g = 0, b = 0, totalWeight = 0;
   for (let i = 0; i < strategy.length; i++) {
     const w = strategy[i];
     if (w <= 0) continue;
-    const cls = classifyAction(actions[i]);
-    const col = ACTION_COLORS[cls] || [0x88,0x88,0x88];
-    r += col[0] * w;
-    g += col[1] * w;
-    b += col[2] * w;
+    const col = ACTION_COLORS[classifyAction(actions[i])] || [0x88,0x88,0x88];
+    r += col[0] * w; g += col[1] * w; b += col[2] * w;
     totalWeight += w;
   }
-  if (totalWeight <= 0) return '#161b22';
-  r = Math.round(r / totalWeight);
-  g = Math.round(g / totalWeight);
-  b = Math.round(b / totalWeight);
-  // Darken slightly for readability
-  const scale = 0.55;
-  r = Math.round(22 + (r - 22) * scale);
-  g = Math.round(22 + (g - 22) * scale);
-  b = Math.round(22 + (b - 22) * scale);
+  if (totalWeight <= 0) return '#1a2233';
+  r = Math.round(r / totalWeight); g = Math.round(g / totalWeight); b = Math.round(b / totalWeight);
+  const scale = 0.62;
+  r = Math.round(24 + (r - 24) * scale); g = Math.round(26 + (g - 26) * scale); b = Math.round(32 + (b - 32) * scale);
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 
-function dominantAction(strategy, actions) {
+// ── Detail panel ────────────────────────────────────────────────────────────
+function mixBarHtml(actions, strategy) {
   if (!strategy) return '';
-  let maxI = 0, maxV = 0;
+  let h = '<div class="mixbar">';
   for (let i = 0; i < strategy.length; i++) {
-    if (strategy[i] > maxV) { maxV = strategy[i]; maxI = i; }
+    if (strategy[i] <= 0.001) continue;
+    const col = ACTION_CSS[classifyAction(actions[i])] || '#888';
+    h += '<div style="width:' + (strategy[i] * 100).toFixed(2) + '%;background:' + col + '" title="' + esc(actions[i]) + ' ' + (strategy[i]*100).toFixed(1) + '%"></div>';
   }
-  return maxV > 0 ? actions[maxI] : '';
+  return h + '</div>';
 }
 
-// ── Detail panel ────────────────────────────────────────────────────────────
-function renderStrategyBars(htmlActions, strategy) {
+function renderStrategyBars(actions, strategy) {
   let html = '';
   if (!strategy) return html;
   for (let i = 0; i < strategy.length; i++) {
     const pct = strategy[i];
-    if (pct <= 0) continue;
-    const cls = classifyAction(htmlActions[i]);
-    const col = ACTION_COLORS[cls] || [0x88,0x88,0x88];
-    const barW = Math.max(pct * 100, 2);
-    html += '<div class="action-bar">';
-    html += '<span class="action-label">' + htmlActions[i] + '</span>';
-    html += '<span class="action-bar-fill" style="width:' + barW + 'px;background:rgb(' +
-      col.join(',') + ')"></span>';
-    html += '<span class="action-pct">' + (pct * 100).toFixed(1) + '%</span>';
-    html += '</div>';
+    if (pct <= 0.0005) continue;
+    const cls = classifyAction(actions[i]);
+    const col = ACTION_CSS[cls] || '#888';
+    html += '<div class="strat-row"><div class="top"><span class="name"><i style="background:' + col + '"></i>' + esc(actions[i]) + '</span><span class="pct">' + (pct * 100).toFixed(1) + '%</span></div>';
+    html += '<div class="track"><div style="width:' + (pct * 100).toFixed(1) + '%;background:' + col + '"></div></div></div>';
   }
   return html;
 }
 
-function renderDetail(node) {
-  let html = '<div class="detail-panel">';
+function evHtml(ev) {
+  if (ev === null || ev === undefined || !Number.isFinite(ev))
+    return '<div class="ev-hero"><span class="k">Expected value</span><span class="v">—</span></div>';
+  const cls = ev >= 0 ? 'pos' : 'neg';
+  return '<div class="ev-hero"><span class="k">Expected value</span><span class="v ' + cls + '">' + (ev >= 0 ? '+' : '') + ev.toFixed(2) + '</span></div>';
+}
 
+function renderDetailInner(node) {
+  let html = '';
   if (selectedCombo) {
-    const classHands = [];
-    for (const h of node.hands) {
-      if (comboToLabel(h.combo) === selectedCombo) classHands.push(h);
+    const classHands = node.hands.filter(h => comboToLabel(h.combo) === selectedCombo)
+      .sort((a,b) => a.combo < b.combo ? -1 : a.combo > b.combo ? 1 : 0);
+    if (classHands.length === 0) return '<div class="empty-detail"><div class="big">🚫</div>Hand not in range at this node.</div>';
+    let specific = null;
+    if (selectedSpecific) {
+      specific = classHands.find(h => h.combo === selectedSpecific) || null;
+      if (!specific) selectedSpecific = null;
     }
-    classHands.sort(function(a, b) {
-      return a.combo < b.combo ? -1 : a.combo > b.combo ? 1 : 0;
-    });
-
-    if (classHands.length === 0) {
-      html += '<div class="no-data">Hand not in range</div>';
+    if (specific) {
+      html += '<div class="detail-eyebrow">Selected combo</div>';
+      html += '<div class="detail-title">' + esc(formatCombo(specific.combo)) + '</div>';
+      html += '<div class="detail-sub">' + esc(selectedCombo) + ' · <a href="#" onclick="selectSpecificCombo(null);return false" style="color:var(--accent)">back to class average</a></div>';
+      html += evHtml(specific.ev);
+      html += mixBarHtml(node.actions, specific.strategy);
+      html += renderStrategyBars(node.actions, specific.strategy);
     } else {
-      // Prefer a concrete combo if still present; otherwise class average.
-      let specific = null;
-      if (selectedSpecific) {
-        for (const h of classHands) {
-          if (h.combo === selectedSpecific) { specific = h; break; }
-        }
-        if (!specific) selectedSpecific = null;
-      }
-
-      if (specific) {
-        html += '<h3>Selected Combo</h3>';
-        html += '<div class="combo-name">' + formatCombo(specific.combo) + '</div>';
-        html += '<div class="avg-badge">' + selectedCombo +
-          ' · click again in the list for class average</div>';
-        if (specific.ev !== null && specific.ev !== undefined) {
-          html += '<div class="ev-line">EV: <span class="ev-val">' +
-            (specific.ev >= 0 ? '+' : '') + specific.ev.toFixed(2) + '</span></div>';
-        } else {
-          html += '<div class="ev-line">EV: <span class="ev-val">—</span></div>';
-        }
-        html += renderStrategyBars(node.actions, specific.strategy);
-      } else {
-        const avg = averageHands(classHands);
-        html += '<h3>Selected Hand</h3>';
-        html += '<div class="combo-name">' + selectedCombo + '</div>';
-        if (classHands.length > 1) {
-          html += '<div class="avg-badge">Average of ' + classHands.length +
-            ' combos · click a combo below to drill in</div>';
-        } else {
-          html += '<div class="avg-badge">' + formatCombo(classHands[0].combo) + '</div>';
-        }
-        if (avg.ev !== null && avg.ev !== undefined) {
-          html += '<div class="ev-line">EV: <span class="ev-val">' +
-            (avg.ev >= 0 ? '+' : '') + avg.ev.toFixed(2) + '</span></div>';
-        } else {
-          html += '<div class="ev-line">EV: <span class="ev-val">—</span></div>';
-        }
-        html += renderStrategyBars(node.actions, avg.strategy);
-      }
-
-      if (classHands.length > 1) {
-        html += '<div class="combo-list">';
-        html += '<h4>Combos in class</h4>';
-        // Average row
-        const avgActive = !selectedSpecific ? ' active' : '';
-        html += '<div class="combo-row' + avgActive + '" onclick="selectSpecificCombo(null)">';
-        html += '<span class="combo-txt">Average (' + classHands.length + ')</span>';
-        const avg = averageHands(classHands);
-        if (avg.ev !== null) {
-          html += '<span class="combo-ev">' + (avg.ev >= 0 ? '+' : '') + avg.ev.toFixed(1) + '</span>';
-        }
-        html += '</div>';
-        for (const h of classHands) {
-          const active = (selectedSpecific === h.combo) ? ' active' : '';
-          html += '<div class="combo-row' + active + '" onclick="selectSpecificCombo(\'' +
-            h.combo + '\')">';
-          html += '<span class="combo-txt">' + formatCombo(h.combo) + '</span>';
-          if (h.ev !== null && h.ev !== undefined) {
-            html += '<span class="combo-ev">' + (h.ev >= 0 ? '+' : '') + h.ev.toFixed(1) + '</span>';
-          }
-          html += '</div>';
-        }
-        html += '</div>';
-      }
+      const avg = averageHands(classHands);
+      html += '<div class="detail-eyebrow">Selected hand</div>';
+      html += '<div class="detail-title">' + esc(selectedCombo) + '</div>';
+      html += '<div class="detail-sub">' + (classHands.length > 1
+        ? 'Average of ' + classHands.length + ' combos · pick one below to drill in'
+        : esc(formatCombo(classHands[0].combo))) + '</div>';
+      html += evHtml(avg.ev);
+      html += mixBarHtml(node.actions, avg.strategy);
+      html += renderStrategyBars(node.actions, avg.strategy);
     }
-  } else {
-    html += '<h3>Hand Detail</h3>';
-    html += '<div style="color:#8b949e;font-size:12px">Click a cell to see per-hand strategy and EV. ' +
-      'Cells with multiple combos show a suit-averaged strategy.</div>';
-    if (node.hands.length > 0 && node.hands[0].ev !== null) {
-      html += '<div style="margin-top:12px;font-size:11px;color:#8b949e">';
-      html += node.hands.filter(h => h.ev !== null).length + ' combos with EV data';
+    if (classHands.length > 1) {
+      html += '<div class="combo-list"><h4>Combos in ' + esc(selectedCombo) + ' (' + classHands.length + ')</h4>';
+      html += '<input class="combo-search" placeholder="Filter combos… (e.g. Ah)" value="' + esc(comboFilter) + '" oninput="setComboFilter(this.value)" onclick="event.stopPropagation()">';
+      const avg = averageHands(classHands);
+      const avgActive = !selectedSpecific ? ' active' : '';
+      html += '<div class="combo-row' + avgActive + '" onclick="selectSpecificCombo(null)"><span>⌀ Average (' + classHands.length + ')</span>' +
+        (avg.ev !== null ? '<span class="ce">' + (avg.ev >= 0 ? '+' : '') + avg.ev.toFixed(1) + '</span>' : '') + '</div>';
+      const f = comboFilter.trim().toLowerCase();
+      for (const h of classHands) {
+        if (f && h.combo.toLowerCase().indexOf(f) < 0 && formatCombo(h.combo).toLowerCase().indexOf(f) < 0) continue;
+        const active = (selectedSpecific === h.combo) ? ' active' : '';
+        html += '<div class="combo-row' + active + '" onclick="selectSpecificCombo(\'' + h.combo + '\')"><span>' + esc(formatCombo(h.combo)) + '</span>' +
+          ((h.ev !== null && h.ev !== undefined) ? '<span class="ce">' + (h.ev >= 0 ? '+' : '') + h.ev.toFixed(1) + '</span>' : '') + '</div>';
+      }
       html += '</div>';
     }
+  } else {
+    // Node overview: aggregate mix across all hands
+    const agg = averageHands(node.hands);
+    html += '<div class="empty-detail"><div class="big">👆</div><b style="color:var(--text)">Select any hand in the grid</b><br>to see its mixed strategy &amp; EV.</div>';
+    if (agg.strategy) {
+      html += '<div class="detail-eyebrow" style="margin-top:6px">Node average · ' + node.hands.length + ' combos</div>';
+      html += mixBarHtml(node.actions, agg.strategy);
+      html += renderStrategyBars(node.actions, agg.strategy);
+    } else if (node.hands.length > 0) {
+      html += '<div class="detail-sub">' + node.hands.length + ' combos at this node.</div>';
+    }
   }
-
-  html += '</div>';
   return html;
 }
+function renderDetail(node) { return renderDetailInner(node); }
 
 function comboToLabel(combo) {
   if (combo.length < 4) return combo;
   let r1 = combo[0], s1 = combo[1], r2 = combo[2], s2 = combo[3];
-  // JSON combos are canonical low-card-index first (e.g. "KsAs"). Labels use
-  // high-card-first poker order so they match the 13×13 grid ("AKs").
   if (RANK_MAP[r1.toUpperCase()] > RANK_MAP[r2.toUpperCase()]) {
-    const tr = r1, ts = s1;
-    r1 = r2; s1 = s2;
-    r2 = tr; s2 = ts;
+    const tr = r1, ts = s1; r1 = r2; s1 = s2; r2 = tr; s2 = ts;
   }
-  if (r1 === r2) return r1 + r2; // pair
-  if (s1 === s2) return r1 + r2 + 's'; // suited
-  return r1 + r2 + 'o'; // offsuit
+  if (r1 === r2) return r1 + r2;
+  if (s1 === s2) return r1 + r2 + 's';
+  return r1 + r2 + 'o';
 }
 
 function formatCombo(combo) {
   if (combo.length < 4) return combo;
   let r1 = combo[0], s1 = combo[1], r2 = combo[2], s2 = combo[3];
   if (RANK_MAP[r1.toUpperCase()] > RANK_MAP[r2.toUpperCase()]) {
-    const tr = r1, ts = s1;
-    r1 = r2; s1 = s2;
-    r2 = tr; s2 = ts;
+    const tr = r1, ts = s1; r1 = r2; s1 = s2; r2 = tr; s2 = ts;
   }
-  return r1 + SUIT_SYMBOLS[s1.toLowerCase()] + ' ' +
-    r2 + SUIT_SYMBOLS[s2.toLowerCase()];
+  return r1 + SUIT_SYMBOLS[s1.toLowerCase()] + ' ' + r2 + SUIT_SYMBOLS[s2.toLowerCase()];
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 function selectCombo(key) {
-  if (selectedCombo === key && !selectedSpecific) {
-    selectedCombo = null;
-    selectedSpecific = null;
-  } else {
-    selectedCombo = key;
-    selectedSpecific = null;
-  }
+  if (selectedCombo === key && !selectedSpecific) { selectedCombo = null; selectedSpecific = null; }
+  else { selectedCombo = key; selectedSpecific = null; }
+  comboFilter = '';
   render();
+  // keep focus out of re-created search box
 }
-
+function clearSelection() { selectedCombo = null; selectedSpecific = null; comboFilter = ''; render(); }
+function setComboFilter(v) {
+  comboFilter = v;
+  // update list only, without losing input focus
+  const street = DATA.streets[streetIdx];
+  const node = street.nodes[nodeIdx];
+  let player = playerPerspective || node.player;
+  let displayNode = node;
+  if (playerPerspective && playerPerspective !== node.player)
+    displayNode = findNodeByLineAndPlayer(street.nodes, node.line, playerPerspective) || node;
+  const panels = document.querySelectorAll('.detail-body');
+  if (panels.length) {
+    const pos = v.length;
+    panels[panels.length-1].innerHTML = renderDetailInner(displayNode);
+    const inp = document.querySelector('.combo-search');
+    if (inp) { inp.focus(); inp.setSelectionRange(pos, pos); }
+  }
+}
 function selectSpecificCombo(combo) {
-  // null clears concrete selection and shows the class average.
-  if (combo === null || selectedSpecific === combo) {
-    selectedSpecific = null;
-  } else {
-    selectedSpecific = combo;
-  }
+  if (combo === null || selectedSpecific === combo) selectedSpecific = null;
+  else selectedSpecific = combo;
   render();
 }
-
-function setPerspective(p) {
-  playerPerspective = p;
-  render();
-}
-
+function setPerspective(p) { playerPerspective = p; render(); }
 function changeStreet(idx) {
-  streetIdx = parseInt(idx);
-  nodeIdx = 0;
-  selectedCombo = null;
-  selectedSpecific = null;
-  pathHistory = [];
-  render();
+  streetIdx = parseInt(idx); nodeIdx = 0;
+  selectedCombo = null; selectedSpecific = null; comboFilter = '';
+  pathHistory = []; render();
 }
-
 function findChildNode(actionIdx) {
   const street = DATA.streets[streetIdx];
   if (!street || !street.nodes[nodeIdx]) return null;
   const node = street.nodes[nodeIdx];
   if (actionIdx >= node.actions.length) return null;
   const newLine = [...node.line, node.actions[actionIdx]];
-  // Search all streets for the child node (cross-street navigation)
   for (let s = 0; s < DATA.streets.length; s++) {
     const key = newLine.join('|') + '|' + s;
-    if (nodeIndex[key] !== undefined) {
-      return { streetIdx: s, nodeIdx: nodeIndex[key] };
-    }
+    if (nodeIndex[key] !== undefined) return { streetIdx: s, nodeIdx: nodeIndex[key] };
   }
   return null;
 }
-
-function canNavigateAction(actionIdx) {
-  return findChildNode(actionIdx) !== null;
-}
-
+function canNavigateAction(actionIdx) { return findChildNode(actionIdx) !== null; }
 function navigateAction(actionIdx) {
   const found = findChildNode(actionIdx);
   if (!found) return;
   pathHistory.push({ streetIdx, nodeIdx });
-  streetIdx = found.streetIdx;
-  nodeIdx = found.nodeIdx;
-  selectedCombo = null;
-  selectedSpecific = null;
+  streetIdx = found.streetIdx; nodeIdx = found.nodeIdx;
+  selectedCombo = null; selectedSpecific = null; comboFilter = '';
   render();
 }
-
 function goBack() {
   if (pathHistory.length === 0) return;
   const prev = pathHistory.pop();
-  streetIdx = prev.streetIdx;
-  nodeIdx = prev.nodeIdx;
-  selectedCombo = null;
-  selectedSpecific = null;
+  streetIdx = prev.streetIdx; nodeIdx = prev.nodeIdx;
+  selectedCombo = null; selectedSpecific = null; comboFilter = '';
   render();
 }
-
 function findNodeByLineAndPlayer(nodes, line, player) {
-  for (const n of nodes) {
-    if (arraysEqual(n.line, line) && n.player === player) return n;
-  }
+  for (const n of nodes) if (arraysEqual(n.line, line) && n.player === player) return n;
   return null;
 }
-
 function arraysEqual(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -863,11 +897,12 @@ function arraysEqual(a, b) {
 // ── Keyboard navigation ─────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (!DATA) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA')) return;
   if (e.key === 'Backspace') { e.preventDefault(); goBack(); }
   else if (e.key === 'Escape') {
     e.preventDefault();
-    if (selectedSpecific) { selectedSpecific = null; }
-    else { selectedCombo = null; }
+    if (selectedSpecific) selectedSpecific = null;
+    else selectedCombo = null;
     render();
   }
   if (e.key === 'ArrowLeft') { e.preventDefault(); if (streetIdx > 0) changeStreet(streetIdx - 1); }

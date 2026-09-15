@@ -5,266 +5,313 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Zolver — Config Builder</title>
 <style>
+:root {
+  --bg: #0a0e14;
+  --bg-soft: #0f1520;
+  --card: #141b29;
+  --card-2: #1a2334;
+  --card-3: #222d44;
+  --border: #26314a;
+  --border-soft: #1d2639;
+  --text: #e8edf5;
+  --muted: #8b98b0;
+  --faint: #5b6a85;
+  --accent: #5ea2ff;
+  --accent-solid: #2563eb;
+  --green: #34d399;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 12px 40px rgba(0,0,0,.4);
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'SF Mono','Fira Code','Consolas',monospace;background:#0d1117;color:#c9d1d9}
-.header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}
-.header h1{font-size:16px;color:#58a6ff}
-.header .export-btn{background:#238636;color:#fff;border:none;border-radius:6px;padding:8px 18px;font-size:12px;cursor:pointer;font-family:inherit}
-.header .export-btn:hover{background:#2ea043}
-.main{display:flex;height:calc(100vh - 53px)}
-.left{width:520px;border-right:1px solid #30363d;overflow-y:auto;padding:16px}
-.right{flex:1;overflow-y:auto;padding:16px;min-width:420px}
+body{font-family:var(--font);background:radial-gradient(1100px 380px at 50% -80px, rgba(94,162,255,.10), transparent 70%),var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
 
-/* Tabs */
-.tabs{display:flex;gap:2px;margin-bottom:12px}
-.tab-btn{flex:1;background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:6px 6px 0 0;padding:8px;font-size:12px;cursor:pointer;font-family:inherit;text-align:center}
-.tab-btn.active{background:#0d1117;color:#c9d1d9;border-bottom-color:#0d1117}
-.tab-content{display:none}
-.tab-content.active{display:block}
+/* Header */
+.header{position:sticky;top:0;z-index:60;backdrop-filter:blur(14px);background:rgba(10,14,20,.85);border-bottom:1px solid var(--border-soft)}
+.header-inner{max-width:1280px;margin:0 auto;padding:11px 22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:11px;margin-right:auto}
+.brand-mark{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:19px;color:#fff;background:linear-gradient(135deg,#2563eb,#7c3aed);box-shadow:0 4px 16px rgba(59,130,246,.4);flex:none}
+.brand h1{font-size:15px;font-weight:700}.brand h1 span{color:var(--muted);font-weight:500}
+.brand .tag{display:block;font-size:10px;color:var(--faint);font-weight:600;letter-spacing:.7px;text-transform:uppercase;margin-top:1px}
+.steps{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--faint);font-weight:600}
+.steps .st{display:flex;align-items:center;gap:6px}
+.steps .n{width:20px;height:20px;border-radius:50%;background:var(--card-2);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;font-family:var(--mono)}
+.steps .st.done .n{background:rgba(52,211,153,.15);border-color:rgba(52,211,153,.5);color:var(--green)}
+.steps .st.done{color:var(--muted)}
+.hdr-btns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{background:var(--card-2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 15px;font-size:12.5px;font-weight:600;font-family:var(--font);cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{background:var(--card-3);transform:translateY(-1px)}
+.btn.primary{background:var(--accent-solid);border-color:var(--accent-solid);color:#fff;box-shadow:0 4px 14px rgba(37,99,235,.4)}
+.btn.primary:hover{background:#1d4ed8}
+.btn.success{background:#15803d;border-color:#15803d;color:#fff}
+.btn.success:hover{background:#16a34a}
+
+.main{max-width:1280px;margin:0 auto;padding:20px 22px 70px;display:grid;grid-template-columns:560px minmax(0,1fr);gap:16px;align-items:start}
+.card{background:var(--card);border:1px solid var(--border-soft);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px}
+.card-head{padding:14px 18px;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:10px}
+.card-head h3{font-size:12px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:var(--muted)}
+.card-head .num{width:22px;height:22px;border-radius:7px;background:var(--accent-solid);color:#fff;font-size:11.5px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.card-head .spacer{flex:1}.card-head .hint{font-size:11px;color:var(--faint)}
+.card-body{padding:16px 18px}
+
+/* Segmented tabs */
+.segmented{display:flex;background:var(--bg-soft);border:1px solid var(--border-soft);border-radius:11px;padding:4px;gap:4px;margin-bottom:12px}
+.tab-btn{flex:1;background:transparent;color:var(--muted);border:none;border-radius:8px;padding:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font);transition:all .15s;display:flex;align-items:center;justify-content:center;gap:8px}
+.tab-btn:hover{color:var(--text)}
+.tab-btn.active{background:var(--card-3);color:#fff;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.tab-btn .cnt{font-family:var(--mono);font-size:10.5px;font-weight:700;background:rgba(255,255,255,.09);border-radius:12px;padding:2px 9px}
+.tab-btn.active .cnt{background:rgba(94,162,255,.22);color:var(--accent)}
+.tab-content{display:none}.tab-content.active{display:block}
 
 /* Range grid */
-.grid-table{border-collapse:collapse;margin:0 auto 8px}
-.grid-table th{width:36px;height:18px;font-size:9px;color:#484f58;text-align:center;font-weight:normal}
-.grid-table td{width:36px;height:36px;text-align:center;font-size:10px;cursor:pointer;border:1px solid #21262d;position:relative;user-select:none;transition:background 0.1s}
-.grid-table td:hover{border-color:#58a6ff;z-index:1}
-.grid-table td.included{background:#1a3a5c;color:#c9d1d9}
-.grid-table td.included:hover{background:#1f4480}
-.grid-table td.partial{background:#3d2e0a;color:#c9d1d9}
-.grid-table td.partial:hover{background:#4d3a10}
-.grid-table td .wt{font-size:8px;color:rgba(255,255,255,0.5);display:block}
+.grid-scroll{overflow-x:auto;display:flex;justify-content:center;padding:2px}
+.grid-table{border-collapse:separate;border-spacing:3px}
+.grid-table th{font-size:9px;font-weight:700;color:var(--faint);text-align:center;font-family:var(--mono);padding:2px 0;min-width:34px}
+.grid-table td{width:36px;height:36px;text-align:center;font-size:10px;font-weight:700;font-family:var(--mono);cursor:pointer;border-radius:7px;border:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.03);color:var(--muted);position:relative;user-select:none;transition:all .1s;line-height:1.2}
+.grid-table td:hover{border-color:var(--accent);z-index:1;transform:scale(1.08);color:var(--text)}
+.grid-table td.included{background:linear-gradient(180deg,#2f63c4,#21489b);color:#fff;border-color:rgba(94,162,255,.55);box-shadow:inset 0 1px 0 rgba(255,255,255,.18);text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.grid-table td.included:hover{background:#356fc9}
+.grid-table td.partial{background:linear-gradient(180deg,rgba(251,191,36,.85),rgba(180,120,10,.85));color:#1a1000;border-color:rgba(251,191,36,.6);text-shadow:none}
+.grid-table td.partial:hover{filter:brightness(1.1)}
+.grid-table td.dead{background:rgba(255,255,255,.015)!important;color:#3a4763;cursor:default;border-color:transparent;border-style:dashed}
+.grid-table td .wt{font-size:8px;font-weight:700;display:block;opacity:.85}
 
-/* Range stats */
-.range-stats{display:flex;gap:16px;justify-content:center;font-size:11px;color:#8b949e;margin-bottom:10px}
-.range-stats span{color:#c9d1d9}
+/* stat pills */
+.range-stats{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:12px 0}
+.stat-pill{font-size:11.5px;color:var(--muted);background:var(--bg-soft);border:1px solid var(--border-soft);border-radius:20px;padding:5px 13px;font-weight:600}
+.stat-pill b{color:var(--text);font-family:var(--mono);font-weight:700}
 
-/* Range paste */
-.range-paste{display:flex;gap:6px;margin:0 0 10px;align-items:stretch}
-.range-paste input{flex:1;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 8px;font-size:11px;font-family:inherit;min-width:0}
-.range-paste input:focus{outline:none;border-color:#58a6ff}
-.range-paste input::placeholder{color:#484f58}
-.range-paste button{background:#1f6feb;color:#fff;border:1px solid #1f6feb;border-radius:4px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:inherit;white-space:nowrap}
-.range-paste button:hover{background:#388bfd}
-.range-paste-hint{font-size:10px;color:#484f58;text-align:center;margin:-4px 0 10px}
+/* paste */
+.range-paste{display:flex;gap:8px;align-items:stretch;margin-bottom:6px}
+.range-paste input{flex:1;background:var(--bg-soft);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px 12px;font-size:12px;font-family:var(--mono);min-width:0}
+.range-paste input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(94,162,255,.15)}
+.range-paste input::placeholder{color:var(--faint)}
+.range-paste button{background:var(--accent-solid);color:#fff;border:1px solid var(--accent-solid);border-radius:var(--radius-sm);padding:9px 18px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:var(--font);white-space:nowrap}
+.range-paste button:hover{background:#1d4ed8}
+.range-paste-hint{font-size:11px;color:var(--faint);text-align:center;margin-bottom:12px}
 
-/* Presets */
-.presets{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-bottom:10px}
-.preset-btn{background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:10px;cursor:pointer;font-family:inherit}
-.preset-btn:hover{background:#30363d;color:#c9d1d9}
-.preset-btn.danger{color:#da3633}
-.preset-btn.danger:hover{background:#3d1f1f}
+/* presets */
+.presets{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:10px}
+.preset-btn{background:var(--card-2);color:var(--muted);border:1px solid var(--border);border-radius:20px;padding:5px 13px;font-size:11.5px;font-weight:600;cursor:pointer;font-family:var(--font);transition:all .13s}
+.preset-btn:hover{background:var(--card-3);color:var(--text);border-color:#35435f}
+.preset-btn.danger{color:var(--red)}.preset-btn.danger:hover{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.4)}
+.micro-hint{font-size:11px;color:var(--faint);text-align:center}
 
-/* Weight popup */
-.weight-popup{display:none;position:fixed;background:#21262d;border:1px solid #58a6ff;border-radius:8px;padding:12px;z-index:100;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,0.5)}
-.weight-popup label{font-size:11px;color:#8b949e;display:block;margin-bottom:4px}
-.weight-popup input[type=range]{width:100%;margin-bottom:6px}
-.weight-popup .popup-btns{display:flex;gap:4px}
-.weight-popup button{flex:1;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px;font-size:10px;cursor:pointer;font-family:inherit}
-.weight-popup button:hover{background:#30363d}
+/* Board slots */
+.selected-cards{display:flex;gap:10px;justify-content:center;margin-bottom:6px;align-items:center}
+.board-slot{width:62px;height:82px;border-radius:11px;border:1.5px dashed var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:13px;color:var(--faint);font-family:var(--mono);background:rgba(255,255,255,.02);transition:all .15s}
+.board-slot .slot-n{font-size:9px;font-weight:700;letter-spacing:.6px;font-family:var(--font);text-transform:uppercase;opacity:.6;margin-top:4px}
+.board-slot.filled{background:linear-gradient(180deg,#fff,#e9edf3);color:#111827;border-style:solid;border-color:var(--accent);font-weight:800;font-size:21px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.board-slot.filled.red{color:#dc2626}
+.board-slot.filled .slot-n{display:none}
+.board-clear{font-size:11.5px;color:var(--faint);background:none;border:none;cursor:pointer;font-family:var(--font);font-weight:600}
+.board-clear:hover{color:var(--red)}
 
-/* Card picker */
-.card-picker{display:flex;gap:4px;justify-content:center;margin-bottom:10px;flex-wrap:wrap}
-.card-btn{width:30px;height:40px;border-radius:4px;border:1px solid #30363d;background:#161b22;color:#c9d1d9;font-size:10px;cursor:pointer;font-family:inherit;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
-.card-btn:hover{border-color:#58a6ff}
-.card-btn.selected{border-color:#58a6ff;background:#1a3a5c;box-shadow:0 0 6px rgba(88,166,255,0.3)}
-.card-btn.red{color:#f85149}
-.card-btn .card-suit{font-size:14px}
-.selected-cards{display:flex;gap:6px;justify-content:center;margin-bottom:12px;min-height:48px;align-items:center}
-.board-slot{width:44px;height:58px;border-radius:6px;border:2px dashed #30363d;display:flex;align-items:center;justify-content:center;font-size:18px;color:#484f58}
-.board-slot.filled{background:#fff;color:#000;border-style:solid;border-color:#58a6ff;font-weight:bold}
-.board-slot.filled.red{color:#d32f2f}
+/* Deck */
+.deck{margin-top:12px}
+.suit-row{display:flex;gap:5px;align-items:center;margin-bottom:5px;justify-content:center}
+.suit-lab{width:26px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex:none;background:var(--bg-soft);border:1px solid var(--border-soft)}
+.card-btn{min-width:30px;height:38px;border-radius:7px;border:1px solid var(--border);background:var(--card-2);color:var(--text);font-size:10.5px;font-weight:700;cursor:pointer;font-family:var(--mono);display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.15;padding:2px 4px;transition:all .12s;flex:1;max-width:44px}
+.card-btn small{font-size:12px;line-height:1}
+.card-btn:hover{border-color:var(--accent);transform:translateY(-1px)}
+.card-btn.selected{border-color:var(--accent);background:rgba(94,162,255,.18);box-shadow:0 0 0 1.5px var(--accent),0 0 12px rgba(94,162,255,.35);color:#fff}
+.card-btn.red{color:#fca5a5}.card-btn.red.selected{color:#fff}
+.card-btn:disabled{opacity:.25;cursor:default;transform:none}
 
-/* Config section */
-.config-section{margin-bottom:16px}
-.config-section h3{font-size:13px;color:#58a6ff;margin-bottom:8px;border-bottom:1px solid #21262d;padding-bottom:4px}
-.config-row{display:flex;gap:8px;margin-bottom:6px;align-items:center}
-.config-row label{font-size:11px;color:#8b949e;min-width:90px;text-align:right}
-.config-row input,.config-row select{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:5px 8px;font-size:11px;font-family:inherit;width:100px}
-.config-row input:focus,.config-row select:focus{outline:none;border-color:#58a6ff}
-.config-row input.wide{width:60px}
-.config-row .config-check{display:flex;align-items:center;gap:6px}
-.config-row .config-check input[type=checkbox]{accent-color:#1f6feb}
+/* Inputs */
+.f-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.field label{display:block;font-size:10.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);margin-bottom:6px}
+.field input,.field select{background:var(--bg-soft);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px 12px;font-size:13px;font-family:var(--mono);width:100%}
+.field input:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(94,162,255,.15)}
+.check-row{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px}
+.config-check{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);cursor:pointer}
+.config-check input[type=checkbox]{accent-color:var(--accent-solid);width:16px;height:16px;cursor:pointer}
+.dcfr-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px}
 
 /* Sizings */
-.sizing-street{margin-bottom:10px}
-.sizing-street h4{font-size:11px;color:#c9d1d9;margin-bottom:4px}
-.sizing-row{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
-.sizing-tag{display:flex;align-items:center;gap:4px;background:#161b22;border:1px solid #30363d;border-radius:4px;padding:2px 6px;font-size:11px}
-.sizing-tag input{background:transparent;color:#c9d1d9;border:none;width:32px;font-size:11px;font-family:inherit;text-align:center}
+.sizing-street{background:var(--bg-soft);border:1px solid var(--border-soft);border-radius:11px;padding:11px 13px;margin-bottom:10px}
+.sizing-street h4{font-size:12px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.sizing-street h4 .dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.sizing-row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.sizing-tag{display:flex;align-items:center;gap:3px;background:var(--card-2);border:1px solid var(--border);border-radius:9px;padding:4px 4px 4px 10px;font-size:12px;font-family:var(--mono)}
+.sizing-tag input{background:transparent;color:var(--text);border:none;width:44px;font-size:13px;font-weight:700;font-family:var(--mono);text-align:center}
 .sizing-tag input:focus{outline:none}
-.sizing-tag span{color:#8b949e}
-.sizing-tag .remove{color:#da3633;cursor:pointer;font-size:14px;line-height:1}
-.sizing-add{background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;font-family:inherit}
+.sizing-tag span{color:var(--faint);font-size:11px}
+.sizing-tag .remove{color:var(--red);cursor:pointer;font-size:16px;line-height:1;background:rgba(248,113,113,.1);border-radius:6px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;margin-left:4px}
+.sizing-tag .remove:hover{background:rgba(248,113,113,.25)}
+.sizing-add{background:transparent;color:var(--accent);border:1px dashed rgba(94,162,255,.5);border-radius:9px;padding:6px 13px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:var(--font)}
+.sizing-add:hover{background:rgba(94,162,255,.1)}
+.cap-row{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--muted)}
+.cap-row select{background:var(--card-2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:5px 9px;font-size:12px;font-family:var(--mono)}
 
-/* TOML preview */
-.toml-preview{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;font-size:11px;font-family:'SF Mono','Fira Code','Consolas',monospace;color:#c9d1d9;white-space:pre;overflow-x:auto;max-height:300px;overflow-y:auto;line-height:1.5}
-.toml-actions{display:flex;gap:6px;margin-top:8px}
-.toml-actions button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:inherit}
-.toml-actions button:hover{background:#30363d}
-.toml-actions button.copy{background:#1f6feb;border-color:#1f6feb}
-.toml-actions button.copy:hover{background:#388bfd}
+/* TOML */
+.toml-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.toml-head .fn{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.toml-preview{background:#080b11;border:1px solid var(--border-soft);border-radius:11px;padding:14px;font-size:11.5px;font-family:var(--mono);color:#c9d4e8;white-space:pre;overflow:auto;max-height:300px;line-height:1.6}
+.toml-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.check-list{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.check-item{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);background:var(--bg-soft);border:1px solid var(--border-soft);border-radius:9px;padding:8px 12px}
+.check-item .ic{width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex:none;background:var(--card-3);color:var(--faint)}
+.check-item.ok{color:var(--text)}.check-item.ok .ic{background:rgba(52,211,153,.18);color:var(--green)}
+.next-steps{margin-top:12px;background:var(--bg-soft);border:1px solid var(--border-soft);border-radius:11px;padding:12px 14px;font-size:12px;color:var(--muted);line-height:1.55}
+.next-steps code{display:block;margin-top:7px;color:var(--text);background:#080b11;border:1px solid var(--border-soft);border-radius:8px;padding:9px 11px;white-space:pre-wrap;word-break:break-all;font-family:var(--mono);font-size:11.5px}
 
-/* Weight slider value display */
-.wt-val{font-size:10px;color:#58a6ff;text-align:center;display:block}
+/* popup + toast */
+.weight-popup{display:none;position:fixed;background:var(--card-2);border:1px solid var(--accent);border-radius:13px;padding:15px;z-index:100;min-width:210px;box-shadow:0 16px 50px rgba(0,0,0,.6)}
+.weight-popup label{font-size:12px;color:var(--muted);display:block;margin-bottom:8px;font-weight:600}
+.weight-popup label span{color:var(--accent);font-family:var(--mono);font-weight:800;font-size:14px}
+.weight-popup input[type=range]{width:100%;margin-bottom:10px;accent-color:var(--accent-solid)}
+.popup-btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.popup-btns button{background:var(--card-3);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:6px 4px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--mono)}
+.popup-btns button:hover{border-color:var(--accent)}
+.popup-btns button.go{background:var(--accent-solid);border-color:var(--accent-solid);grid-column:1/-1;padding:8px}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(12px);background:#15803d;color:#fff;padding:11px 22px;border-radius:12px;font-size:13px;font-weight:600;z-index:200;opacity:0;transition:all .25s;max-width:min(560px,90vw);text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.5);pointer-events:none}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.error{background:#b91c1c}
 
-/* Toast */
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#238636;color:#fff;padding:10px 24px;border-radius:8px;font-size:12px;z-index:200;opacity:0;transition:opacity 0.3s;max-width:min(560px,90vw);text-align:center}
-.toast.show{opacity:1}
-.toast.error{background:#da3633}
-.next-steps{margin-top:10px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;font-size:11px;color:#8b949e;line-height:1.5}
-.next-steps code{display:block;margin-top:4px;color:#c9d1d9;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:6px 8px;white-space:pre-wrap;word-break:break-all}
-.next-steps .hint{margin-top:6px;color:#484f58;font-size:10px}
+@media (max-width:1080px){.main{grid-template-columns:1fr}.f-grid,.dcfr-grid{grid-template-columns:1fr 1fr}}
+@media (max-width:560px){.f-grid,.dcfr-grid{grid-template-columns:1fr}.grid-table td{width:30px;height:30px;font-size:9px}.header-inner{padding:10px 14px}.main{padding:14px 14px 60px}}
+::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:6px}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>&#9824; Zolver Config Builder</h1>
-  <div style="display:flex;gap:8px;align-items:center">
-    <input type="file" id="importFile" accept=".toml,.txt,text/plain" style="display:none" onchange="handleImportFile(event)">
-    <button class="export-btn" style="background:#21262d;border:1px solid #30363d" onclick="document.getElementById('importFile').click()">Import TOML</button>
-    <button class="export-btn" onclick="downloadToml()">Download spot.toml</button>
-    <button class="export-btn" style="background:#1f6feb" onclick="copyToml()">Copy TOML</button>
+  <div class="header-inner">
+    <div class="brand"><div class="brand-mark">♠</div><div><h1>Zolver <span>Config Builder</span></h1><span class="tag">Flop spot setup</span></div></div>
+    <div class="steps" id="stepBar">
+      <span class="st" id="stBoard"><span class="n">1</span> Board</span><span>→</span>
+      <span class="st" id="stOop"><span class="n">2</span> Ranges</span><span>→</span>
+      <span class="st" id="stExp"><span class="n">3</span> Export</span>
+    </div>
+    <div class="hdr-btns">
+      <input type="file" id="importFile" accept=".toml,.txt,text/plain" style="display:none" onchange="handleImportFile(event)">
+      <button class="btn" onclick="document.getElementById('importFile').click()">Import</button>
+      <button class="btn" onclick="downloadToml()">Download</button>
+      <button class="btn primary" onclick="copyToml()">Copy TOML</button>
+    </div>
   </div>
 </div>
 
 <div class="main">
-  <!-- LEFT: Range grids -->
-  <div class="left">
-    <div class="tabs">
-      <button class="tab-btn active" onclick="switchTab('oop')">OOP Range</button>
-      <button class="tab-btn" onclick="switchTab('ip')">IP Range</button>
+  <!-- LEFT -->
+  <div>
+    <div class="card">
+      <div class="card-head"><span class="num">1</span><h3>Ranges</h3><div class="spacer"></div><span class="hint">click · right-click · drag</span></div>
+      <div class="card-body">
+        <div class="segmented">
+          <button class="tab-btn active" id="btn-oop" onclick="switchTab('oop')">OOP <span class="cnt" id="cnt-oop">0</span></button>
+          <button class="tab-btn" id="btn-ip" onclick="switchTab('ip')">IP <span class="cnt" id="cnt-ip">0</span></button>
+        </div>
+        <div id="tab-oop" class="tab-content active"></div>
+        <div id="tab-ip" class="tab-content"></div>
+        <div class="range-stats" id="rangeStats"></div>
+        <div class="range-paste">
+          <input type="text" id="rangeInput" spellcheck="false" placeholder="QQ+, AKs, A5s-A2s:0.5, T9s+ …" onkeydown="if(event.key==='Enter'){event.preventDefault();applyRangePaste();}">
+          <button type="button" onclick="applyRangePaste()">Apply</button>
+        </div>
+        <div class="range-paste-hint">Paste an Equilab / Flopzilla range for the active side — replaces the grid</div>
+        <div class="presets">
+          <button class="preset-btn" onclick="preset('top10')">Top 10%</button>
+          <button class="preset-btn" onclick="preset('top20')">Top 20%</button>
+          <button class="preset-btn" onclick="preset('top30')">Top 30%</button>
+          <button class="preset-btn" onclick="preset('allPairs')">Pairs</button>
+          <button class="preset-btn" onclick="preset('allSuitedAces')">Suited A</button>
+          <button class="preset-btn" onclick="preset('allBroadways')">Broadway</button>
+          <button class="preset-btn" onclick="preset('allConnectors')">Connectors</button>
+          <button class="preset-btn" onclick="preset('clear')">Clear</button>
+          <button class="preset-btn danger" onclick="preset('fill')">Fill all</button>
+        </div>
+        <div class="micro-hint">Left-click toggles · right-click sets weight · drag paints an area</div>
+      </div>
     </div>
 
-    <div id="tab-oop" class="tab-content active"></div>
-    <div id="tab-ip" class="tab-content"></div>
-
-    <div class="range-stats" id="rangeStats"></div>
-
-    <div class="range-paste">
-      <input type="text" id="rangeInput" spellcheck="false"
-        placeholder="QQ+, AKs, A5s-A2s:0.5, T9s+ …"
-        onkeydown="if(event.key==='Enter'){event.preventDefault();applyRangePaste();}">
-      <button type="button" onclick="applyRangePaste()">Apply</button>
-    </div>
-    <div class="range-paste-hint">Paste an Equilab/Flopzilla range for the active tab (replaces the grid)</div>
-
-    <div class="presets">
-      <button class="preset-btn" onclick="preset('clear')">Clear</button>
-      <button class="preset-btn" onclick="preset('allPairs')">All Pairs</button>
-      <button class="preset-btn" onclick="preset('allSuitedAces')">Suited Aces</button>
-      <button class="preset-btn" onclick="preset('allBroadways')">Broadway</button>
-      <button class="preset-btn" onclick="preset('top10')">Top 10%</button>
-      <button class="preset-btn" onclick="preset('top20')">Top 20%</button>
-      <button class="preset-btn" onclick="preset('top30')">Top 30%</button>
-      <button class="preset-btn" onclick="preset('allConnectors')">Connectors</button>
-      <button class="preset-btn danger" onclick="preset('fill')">Fill All</button>
-    </div>
-
-    <div style="font-size:10px;color:#484f58;text-align:center">
-      Click: toggle hand &bull; Right-click: set weight &bull; Drag: select area
+    <div class="card">
+      <div class="card-head"><span class="num">2</span><h3>Board</h3><div class="spacer"></div><button class="board-clear" onclick="clearBoard()">clear ✕</button></div>
+      <div class="card-body">
+        <div class="selected-cards" id="selectedCards">
+          <div class="board-slot" id="slot0"><span>—</span><span class="slot-n">Flop 1</span></div>
+          <div class="board-slot" id="slot1"><span>—</span><span class="slot-n">Flop 2</span></div>
+          <div class="board-slot" id="slot2"><span>—</span><span class="slot-n">Flop 3</span></div>
+        </div>
+        <div class="micro-hint" style="margin-bottom:6px">Pick 3 flop cards — the range grid auto-grays blocked hands</div>
+        <div id="cardPicker" class="deck"></div>
+      </div>
     </div>
   </div>
 
-  <!-- RIGHT: Config -->
-  <div class="right">
-    <!-- Board -->
-    <div class="config-section">
-      <h3>Board</h3>
-      <div class="selected-cards" id="selectedCards">
-        <div class="board-slot" id="slot0"></div>
-        <div class="board-slot" id="slot1"></div>
-        <div class="board-slot" id="slot2"></div>
-      </div>
-      <div style="font-size:10px;color:#8b949e;text-align:center;margin-bottom:8px">Click 3 cards for the flop</div>
-      <div id="cardPicker" class="card-picker"></div>
-    </div>
-
-    <!-- Stack / Pot -->
-    <div class="config-section">
-      <h3>Game</h3>
-      <div class="config-row">
-        <label>Initial Pot</label><input type="number" id="cfgPot" value="100" min="1" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label>Eff Stack</label><input type="number" id="cfgStack" value="150" min="1" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label>Min Bet</label><input type="number" id="cfgMinBet" value="1" min="1" onchange="updateToml()">
+  <!-- RIGHT -->
+  <div>
+    <div class="card">
+      <div class="card-head"><span class="num">3</span><h3>Game</h3></div>
+      <div class="card-body">
+        <div class="f-grid">
+          <div class="field"><label>Initial pot</label><input type="number" id="cfgPot" value="100" min="1" onchange="updateToml()"></div>
+          <div class="field"><label>Eff. stack</label><input type="number" id="cfgStack" value="150" min="1" onchange="updateToml()"></div>
+          <div class="field"><label>Min bet</label><input type="number" id="cfgMinBet" value="1" min="1" onchange="updateToml()"></div>
+        </div>
       </div>
     </div>
 
-    <!-- Sizings -->
-    <div class="config-section">
-      <h3>Sizings (% of pot)</h3>
-      <div id="sizingEditor"></div>
+    <div class="card">
+      <div class="card-head"><h3>Bet sizings · % of pot</h3><div class="spacer"></div><span class="hint">empty = check / all-in only</span></div>
+      <div class="card-body"><div id="sizingEditor"></div></div>
     </div>
 
-    <!-- Solver -->
-    <div class="config-section">
-      <h3>Solver</h3>
-      <div class="config-row">
-        <label>Algorithm</label>
-        <select id="cfgAlgo" onchange="onAlgoChange()"><option>dcfr</option><option>cfr_plus</option></select>
-      </div>
-      <div class="config-row">
-        <label>Max Iters</label><input type="number" id="cfgMaxIter" value="1000" min="1" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label>Target Expl%</label><input class="wide" type="number" id="cfgTarget" value="0.5" step="0.1" min="0.01" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label>Threads</label><input type="number" id="cfgThreads" value="4" min="0" max="128" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label></label>
-        <div class="config-check"><input type="checkbox" id="cfgSimd" checked onchange="updateToml()"><span style="font-size:11px">Use SIMD</span></div>
-      </div>
-      <div class="config-row">
-        <label></label>
-        <div class="config-check"><input type="checkbox" id="cfgPrune" onchange="updateToml()"><span style="font-size:11px">Prune zero reach</span></div>
-      </div>
-      <div id="dcfrFields">
-      <div class="config-row" style="margin-top:4px">
-        <label>DCFR &alpha;</label><input class="wide" type="number" id="cfgAlpha" value="1.5" step="0.1" min="0" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label>DCFR &beta;</label><input class="wide" type="number" id="cfgBeta" value="0.0" step="0.1" min="0" onchange="updateToml()">
-      </div>
-      <div class="config-row">
-        <label>DCFR &gamma;</label><input class="wide" type="number" id="cfgGamma" value="2.0" step="0.1" min="0" onchange="updateToml()">
-      </div>
+    <div class="card">
+      <div class="card-head"><h3>Solver</h3></div>
+      <div class="card-body">
+        <div class="f-grid">
+          <div class="field"><label>Algorithm</label><select id="cfgAlgo" onchange="onAlgoChange()"><option>dcfr</option><option>cfr_plus</option></select></div>
+          <div class="field"><label>Max iters</label><input type="number" id="cfgMaxIter" value="1000" min="1" onchange="updateToml()"></div>
+          <div class="field"><label>Target expl %</label><input type="number" id="cfgTarget" value="0.5" step="0.1" min="0.01" onchange="updateToml()"></div>
+          <div class="field"><label>Threads</label><input type="number" id="cfgThreads" value="4" min="0" max="128" onchange="updateToml()"></div>
+          <div class="field" style="display:flex;align-items:flex-end;padding-bottom:10px"><label class="config-check" style="margin:0"><input type="checkbox" id="cfgSimd" checked onchange="updateToml()"> Use SIMD</label></div>
+          <div class="field" style="display:flex;align-items:flex-end;padding-bottom:10px"><label class="config-check" style="margin:0"><input type="checkbox" id="cfgPrune" onchange="updateToml()"> Prune zero reach</label></div>
+        </div>
+        <div id="dcfrFields" class="dcfr-grid">
+          <div class="field"><label>DCFR α</label><input type="number" id="cfgAlpha" value="1.5" step="0.1" min="0" onchange="updateToml()"></div>
+          <div class="field"><label>DCFR β</label><input type="number" id="cfgBeta" value="0.0" step="0.1" min="0" onchange="updateToml()"></div>
+          <div class="field"><label>DCFR γ</label><input type="number" id="cfgGamma" value="2.0" step="0.1" min="0" onchange="updateToml()"></div>
+        </div>
       </div>
     </div>
 
-    <!-- TOML Preview -->
-    <div class="config-section">
-      <h3>TOML Preview</h3>
-      <div class="toml-preview" id="tomlOutput"></div>
-      <div class="toml-actions">
-        <button class="copy" onclick="copyToml()">Copy to Clipboard</button>
-        <button onclick="downloadToml()">Download spot.toml</button>
-        <button onclick="document.getElementById('importFile').click()">Import file…</button>
-        <button onclick="importTomlFromPreview()">Import preview</button>
-      </div>
-      <div class="next-steps" id="nextSteps">
-        <div><strong style="color:#c9d1d9">Next</strong> — after saving as <code style="display:inline;padding:1px 4px">spot.toml</code>:</div>
-        <code id="nextCmd">zolver solve spot.toml -o results.json --summary
+    <div class="card">
+      <div class="card-head"><span class="num">4</span><h3>Export</h3><div class="spacer"></div><span class="hint">live preview</span></div>
+      <div class="card-body">
+        <div class="check-list" id="exportChecks"></div>
+        <div class="toml-head"><span class="fn">spot.toml</span></div>
+        <div class="toml-preview" id="tomlOutput"></div>
+        <div class="toml-actions">
+          <button class="btn primary" onclick="copyToml()">Copy to clipboard</button>
+          <button class="btn success" onclick="downloadToml()">Download spot.toml</button>
+          <button class="btn" onclick="document.getElementById('importFile').click()">Import file…</button>
+          <button class="btn" onclick="importTomlFromPreview()">Import preview</button>
+        </div>
+        <div class="next-steps">
+          <div><strong style="color:var(--text)">Next</strong> — save as <code style="display:inline;padding:1px 6px">spot.toml</code>, then:</div>
+          <code id="nextCmd">zolver solve spot.toml -o results.json --summary
 zolver view results.json</code>
-        <div class="hint">Pick a flop and both ranges before export. Empty exports are blocked.</div>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
 <div class="weight-popup" id="weightPopup">
-  <label>Weight: <span id="wtLabel">1.0</span></label>
+  <label>Weight · <span id="wtLabel">1.00</span></label>
   <input type="range" id="wtSlider" min="0" max="100" value="100" oninput="updateWtLabel()">
   <div class="popup-btns">
-    <button onclick="closeWeightPopup(false)">Apply</button>
     <button onclick="setWeight(1.0)">100%</button>
     <button onclick="setWeight(0.75)">75%</button>
     <button onclick="setWeight(0.5)">50%</button>
     <button onclick="setWeight(0.25)">25%</button>
+    <button onclick="closeWeightPopup(false)" class="go">Apply</button>
     <button onclick="closeWeightPopup(true)">Cancel</button>
   </div>
 </div>
@@ -276,366 +323,178 @@ zolver view results.json</code>
 const RANKS = ['A','K','Q','J','T','9','8','7','6','5','4','3','2'];
 const SUITS = ['s','h','d','c'];
 const SUIT_SYMB = {s:'\u2660',h:'\u2665',d:'\u2666',c:'\u2663'};
+const SUIT_NAME = {s:'Spades',h:'Hearts',d:'Diamonds',c:'Clubs'};
 const SUIT_COLOR = {s:'black',h:'red',d:'red',c:'black'};
 
 // ── State ───────────────────────────────────────────────────────────────────
 let currentTab = 'oop';
 let selectedCards = [null,null,null];
 let weightPopup = { visible: false, tab: '', r: 0, c: 0, cell: null };
-
-// Ranges: oopRanges[r][c] = { included: bool, weight: float }
 let oopRange = initRange();
 let ipRange = initRange();
-
-// Sizings — match `zolver example` starter profile (small, fast-solving tree).
-let sizings = {
-  flop: [33, 75],
-  turn: [66],
-  river: [75]
-};
+let sizings = { flop: [33, 75], turn: [66], river: [75] };
 let raiseCaps = { flop: '1', turn: '1', river: '0' };
 
 function initRange() {
   const r = [];
-  for (let i = 0; i < 13; i++) {
-    r[i] = [];
-    for (let j = 0; j < 13; j++) {
-      r[i][j] = { included: false, weight: 1.0 };
-    }
-  }
+  for (let i = 0; i < 13; i++) { r[i] = []; for (let j = 0; j < 13; j++) r[i][j] = { included: false, weight: 1.0 }; }
   return r;
 }
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
 
-function clearRangeGrid(range) {
-  for (let r = 0; r < 13; r++) {
-    for (let c = 0; c < 13; c++) {
-      range[r][c].included = false;
-      range[r][c].weight = 1.0;
-    }
-  }
-}
-
-// ── Range string parser (mirrors src/parse.zig parseRange / expandPlus / expandDash)
-// Zig rank indices: 2=0 … A=12. Grid axes: RANKS = A…2 (0…12).
-const RANK_TO_ZIG = {
-  '2':0,'3':1,'4':2,'5':3,'6':4,'7':5,'8':6,'9':7,
-  'T':8,'t':8,'J':9,'j':9,'Q':10,'q':10,'K':11,'k':11,'A':12,'a':12
-};
-
+// ── Range string parser (mirrors src/parse.zig) ──
+const RANK_TO_ZIG = {'2':0,'3':1,'4':2,'5':3,'6':4,'7':5,'8':6,'9':7,'T':8,'t':8,'J':9,'j':9,'Q':10,'q':10,'K':11,'k':11,'A':12,'a':12};
 function zigToGrid(z) { return 12 - z; }
-
 function parseBaseHandJS(s) {
   s = s.trim();
   if (s.length < 2 || s.length > 3) throw new Error("invalid hand '" + s + "'");
-  const r1 = RANK_TO_ZIG[s[0]];
-  const r2 = RANK_TO_ZIG[s[1]];
+  const r1 = RANK_TO_ZIG[s[0]], r2 = RANK_TO_ZIG[s[1]];
   if (r1 === undefined || r2 === undefined) throw new Error("invalid rank in '" + s + "'");
   let suffix = null;
-  if (s.length === 3) {
-    const c = s[2].toLowerCase();
-    if (c !== 's' && c !== 'o') throw new Error("invalid suffix in '" + s + "'");
-    suffix = c;
-  }
+  if (s.length === 3) { const c = s[2].toLowerCase(); if (c !== 's' && c !== 'o') throw new Error("invalid suffix in '" + s + "'"); suffix = c; }
   return { rank1: r1, rank2: r2, suffix: suffix };
 }
-
 function expandPlusJS(base) {
   const out = [];
-  if (base.rank1 === base.rank2) {
-    for (let r = base.rank1; r <= 12; r++) {
-      out.push({ rank1: r, rank2: r, suffix: null });
-    }
-    return out;
-  }
-  const hi = Math.max(base.rank1, base.rank2);
-  const lo = Math.min(base.rank1, base.rank2);
-  if (hi === 12) {
-    // Ace fixed; kicker climbs toward the King.
-    for (let k = lo; k <= 11; k++) {
-      out.push({ rank1: 12, rank2: k, suffix: base.suffix });
-    }
-  } else {
-    // Preserve gap; both ranks climb until the top hits Ace.
-    const gap = hi - lo;
-    for (let top = hi; top <= 12; top++) {
-      out.push({ rank1: top, rank2: top - gap, suffix: base.suffix });
-    }
-  }
+  if (base.rank1 === base.rank2) { for (let r = base.rank1; r <= 12; r++) out.push({ rank1: r, rank2: r, suffix: null }); return out; }
+  const hi = Math.max(base.rank1, base.rank2), lo = Math.min(base.rank1, base.rank2);
+  if (hi === 12) { for (let k = lo; k <= 11; k++) out.push({ rank1: 12, rank2: k, suffix: base.suffix }); }
+  else { const gap = hi - lo; for (let top = hi; top <= 12; top++) out.push({ rank1: top, rank2: top - gap, suffix: base.suffix }); }
   return out;
 }
-
 function expandDashJS(a, b) {
-  const aPair = a.rank1 === a.rank2;
-  const bPair = b.rank1 === b.rank2;
+  const aPair = a.rank1 === a.rank2, bPair = b.rank1 === b.rank2;
   if (aPair !== bPair) throw new Error('dash range mixes pair and non-pair');
-
   const out = [];
-  if (aPair) {
-    const lo = Math.min(a.rank1, b.rank1);
-    const hi = Math.max(a.rank1, b.rank1);
-    for (let r = lo; r <= hi; r++) out.push({ rank1: r, rank2: r, suffix: null });
-    return out;
-  }
-
+  if (aPair) { const lo = Math.min(a.rank1, b.rank1), hi = Math.max(a.rank1, b.rank1); for (let r = lo; r <= hi; r++) out.push({ rank1: r, rank2: r, suffix: null }); return out; }
   if (a.suffix !== b.suffix) throw new Error('dash range suffix mismatch');
   const suffix = a.suffix;
-  const hiA = Math.max(a.rank1, a.rank2);
-  const loA = Math.min(a.rank1, a.rank2);
-  const hiB = Math.max(b.rank1, b.rank2);
-  const loB = Math.min(b.rank1, b.rank2);
-
-  if (hiA === hiB) {
-    // Same high card: span the kicker.
-    const klo = Math.min(loA, loB);
-    const khi = Math.max(loA, loB);
-    for (let k = klo; k <= khi; k++) out.push({ rank1: hiA, rank2: k, suffix: suffix });
-    return out;
-  }
-
+  const hiA = Math.max(a.rank1, a.rank2), loA = Math.min(a.rank1, a.rank2);
+  const hiB = Math.max(b.rank1, b.rank2), loB = Math.min(b.rank1, b.rank2);
+  if (hiA === hiB) { const klo = Math.min(loA, loB), khi = Math.max(loA, loB); for (let k = klo; k <= khi; k++) out.push({ rank1: hiA, rank2: k, suffix: suffix }); return out; }
   const gap = hiA - loA;
   if (gap !== hiB - loB) throw new Error('dash range gap mismatch');
-  let top = Math.min(hiA, hiB);
-  const topHi = Math.max(hiA, hiB);
-  for (; top <= topHi; top++) {
-    out.push({ rank1: top, rank2: top - gap, suffix: suffix });
-  }
+  for (let top = Math.min(hiA, hiB); top <= Math.max(hiA, hiB); top++) out.push({ rank1: top, rank2: top - gap, suffix: suffix });
   return out;
 }
-
 function setGridCell(range, r, c, weight) {
-  if (weight <= 0) {
-    range[r][c].included = false;
-    range[r][c].weight = 1.0;
-  } else {
-    range[r][c].included = true;
-    range[r][c].weight = weight;
-  }
+  if (weight <= 0) { range[r][c].included = false; range[r][c].weight = 1.0; }
+  else { range[r][c].included = true; range[r][c].weight = weight; }
 }
-
-// Apply one hand-class spec (zig ranks) onto the 13×13 grid. Last write wins.
 function applySpecToGrid(range, sp, weight) {
-  const hi = Math.max(sp.rank1, sp.rank2);
-  const lo = Math.min(sp.rank1, sp.rank2);
-  const gHi = zigToGrid(hi);
-  const gLo = zigToGrid(lo);
-  if (hi === lo) {
-    setGridCell(range, gHi, gHi, weight);
-    return;
-  }
-  if (sp.suffix === 's') {
-    setGridCell(range, gHi, gLo, weight); // upper triangle
-  } else if (sp.suffix === 'o') {
-    setGridCell(range, gLo, gHi, weight); // lower triangle
-  } else {
-    // Unsuffixed non-pair = suited + offsuit.
-    setGridCell(range, gHi, gLo, weight);
-    setGridCell(range, gLo, gHi, weight);
-  }
+  const hi = Math.max(sp.rank1, sp.rank2), lo = Math.min(sp.rank1, sp.rank2);
+  const gHi = zigToGrid(hi), gLo = zigToGrid(lo);
+  if (hi === lo) { setGridCell(range, gHi, gHi, weight); return; }
+  if (sp.suffix === 's') setGridCell(range, gHi, gLo, weight);
+  else if (sp.suffix === 'o') setGridCell(range, gLo, gHi, weight);
+  else { setGridCell(range, gHi, gLo, weight); setGridCell(range, gLo, gHi, weight); }
 }
-
-/// Parse a comma-separated range string into a fresh grid.
-/// Throws Error with a human message on invalid tokens/weights; never mutates
-/// the caller's range (commit separately so bad pastes don't partial-apply).
 function parseRangeStringToGrid(str) {
   const range = initRange();
   if (!str || !String(str).trim()) return range;
-
   const parts = String(str).split(',');
   for (let i = 0; i < parts.length; i++) {
     const token = parts[i].trim();
     if (!token) continue;
-
     const colon = token.indexOf(':');
     const handPart = (colon >= 0 ? token.slice(0, colon) : token).trim();
     const weightStr = colon >= 0 ? token.slice(colon + 1).trim() : null;
-
     let weight = 1.0;
-    if (weightStr !== null) {
-      weight = Number(weightStr);
-      if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
-        throw new Error("invalid weight in '" + token + "' (need 0..1)");
-      }
-    }
+    if (weightStr !== null) { weight = Number(weightStr); if (!Number.isFinite(weight) || weight < 0 || weight > 1) throw new Error("invalid weight in '" + token + "' (need 0..1)"); }
     if (weight <= 0) continue;
     if (!handPart) throw new Error("empty hand in '" + token + "'");
-
     let specs;
-    if (handPart.charAt(handPart.length - 1) === '+') {
-      const base = parseBaseHandJS(handPart.slice(0, -1));
-      specs = expandPlusJS(base);
-    } else {
-      const dash = handPart.indexOf('-');
-      if (dash >= 0) {
-        const lhs = parseBaseHandJS(handPart.slice(0, dash));
-        const rhs = parseBaseHandJS(handPart.slice(dash + 1));
-        specs = expandDashJS(lhs, rhs);
-      } else {
-        specs = [parseBaseHandJS(handPart)];
-      }
-    }
-
+    if (handPart.charAt(handPart.length - 1) === '+') specs = expandPlusJS(parseBaseHandJS(handPart.slice(0, -1)));
+    else { const dash = handPart.indexOf('-'); specs = dash >= 0 ? expandDashJS(parseBaseHandJS(handPart.slice(0, dash)), parseBaseHandJS(handPart.slice(dash + 1))) : [parseBaseHandJS(handPart)]; }
     for (const sp of specs) applySpecToGrid(range, sp, weight);
   }
   return range;
 }
-
 function copyRangeGrid(dst, src) {
-  for (let r = 0; r < 13; r++) {
-    for (let c = 0; c < 13; c++) {
-      dst[r][c].included = src[r][c].included;
-      dst[r][c].weight = src[r][c].weight;
-    }
-  }
+  for (let r = 0; r < 13; r++) for (let c = 0; c < 13; c++) { dst[r][c].included = src[r][c].included; dst[r][c].weight = src[r][c].weight; }
 }
-
 function syncRangeInput() {
   const el = document.getElementById('rangeInput');
-  if (!el) return;
-  // Don't stomp text the user is mid-edit.
-  if (document.activeElement === el) return;
+  if (!el || document.activeElement === el) return;
   const s = getRangeStr(currentTab);
   el.value = (s === 'AA' && !rangeHasHands(currentTab)) ? '' : s;
 }
-
 function applyRangePaste() {
   const el = document.getElementById('rangeInput');
   const raw = el ? el.value : '';
   const range = currentTab === 'oop' ? oopRange : ipRange;
   let parsed;
-  try {
-    parsed = parseRangeStringToGrid(raw);
-  } catch (e) {
-    showToast((e && e.message) ? e.message : String(e), true);
-    return;
-  }
+  try { parsed = parseRangeStringToGrid(raw); }
+  catch (e) { showToast((e && e.message) ? e.message : String(e), true); return; }
   copyRangeGrid(range, parsed);
-  renderRangeGrid(currentTab);
-  updateStats();
-  updateToml();
-  // Force-refresh the field from the compressed export form.
-  if (el) {
-    const s = getRangeStr(currentTab);
-    el.value = (s === 'AA' && !rangeHasHands(currentTab)) ? '' : s;
-  }
-  const label = currentTab.toUpperCase();
-  if (!rangeHasHands(currentTab)) {
-    showToast(label + ' range cleared');
-  } else {
-    showToast(label + ' range applied');
-  }
+  renderRangeGrid(currentTab); updateStats(); updateToml();
+  if (el) { const s = getRangeStr(currentTab); el.value = (s === 'AA' && !rangeHasHands(currentTab)) ? '' : s; }
+  showToast(rangeHasHands(currentTab) ? currentTab.toUpperCase() + ' range applied' : currentTab.toUpperCase() + ' range cleared');
 }
 
-// ── Init ────────────────────────────────────────────────────────────────────
-function init() {
-  renderCardPicker();
-  renderSizingEditor();
-  switchTab('oop');
-  updateToml();
-}
+// ── Init ──
+function init() { renderCardPicker(); renderSizingEditor(); switchTab('oop'); updateToml(); }
 init();
 
-// ── Tabs ────────────────────────────────────────────────────────────────────
+// ── Tabs ──
 function switchTab(tab) {
+  if (weightPopup.visible) closeWeightPopup(true);
   currentTab = tab;
-  document.querySelectorAll('.tab-btn').forEach((b,i) => {
-    b.classList.toggle('active', (i===0 && tab==='oop') || (i===1 && tab==='ip'));
-  });
-  document.getElementById('tab-oop').classList.toggle('active', tab==='oop');
-  document.getElementById('tab-ip').classList.toggle('active', tab==='ip');
-  renderRangeGrid(tab);
-  updateStats();
-  syncRangeInput();
+  document.getElementById('btn-oop').classList.toggle('active', tab === 'oop');
+  document.getElementById('btn-ip').classList.toggle('active', tab === 'ip');
+  document.getElementById('tab-oop').classList.toggle('active', tab === 'oop');
+  document.getElementById('tab-ip').classList.toggle('active', tab === 'ip');
+  renderRangeGrid(tab); updateStats(); syncRangeInput();
 }
 
-// ── Range Grid ──────────────────────────────────────────────────────────────
+// ── Range Grid ──
 function cellInfo(r, c) {
-  if (r === c) {
-    const rk = RANKS[r];
-    return { type: 'pair', label: rk+rk, hi: rk, lo: rk, comboKeys: genPairKeys(rk) };
-  } else if (r < c) {
-    const rkHi = RANKS[r], rkLo = RANKS[c];
-    return { type: 'suited', label: rkHi+rkLo+'s', hi: rkHi, lo: rkLo, comboKeys: genSuitedKeys(rkHi, rkLo) };
-  } else {
-    const rkHi = RANKS[c], rkLo = RANKS[r];
-    return { type: 'offsuit', label: rkHi+rkLo+'o', hi: rkHi, lo: rkLo, comboKeys: genOffsuitKeys(rkHi, rkLo) };
-  }
+  if (r === c) { const rk = RANKS[r]; return { type: 'pair', label: rk+rk, hi: rk, lo: rk, comboKeys: genPairKeys(rk) }; }
+  else if (r < c) { const a = RANKS[r], b = RANKS[c]; return { type: 'suited', label: a+b+'s', hi: a, lo: b, comboKeys: genSuitedKeys(a, b) }; }
+  else { const a = RANKS[c], b = RANKS[r]; return { type: 'offsuit', label: a+b+'o', hi: a, lo: b, comboKeys: genOffsuitKeys(a, b) }; }
 }
-
-function genPairKeys(rk) {
-  const keys = [];
-  for (let i = 0; i < 4; i++)
-    for (let j = i+1; j < 4; j++)
-      keys.push(rk+SUITS[i]+rk+SUITS[j]);
-  return keys;
-}
-function genSuitedKeys(hi, lo) {
-  return SUITS.map(s => hi+s+lo+s);
-}
-function genOffsuitKeys(hi, lo) {
-  const keys = [];
-  for (const s1 of SUITS)
-    for (const s2 of SUITS)
-      if (s1 !== s2) keys.push(hi+s1+lo+s2);
-  return keys;
-}
-
+function genPairKeys(rk) { const k = []; for (let i = 0; i < 4; i++) for (let j = i+1; j < 4; j++) k.push(rk+SUITS[i]+rk+SUITS[j]); return k; }
+function genSuitedKeys(hi, lo) { return SUITS.map(s => hi+s+lo+s); }
+function genOffsuitKeys(hi, lo) { const k = []; for (const s1 of SUITS) for (const s2 of SUITS) if (s1 !== s2) k.push(hi+s1+lo+s2); return k; }
 function getRange() { return currentTab === 'oop' ? oopRange : ipRange; }
-
-function cellState(r, c) {
-  const range = getRange();
-  return range[r][c];
-}
-
+function rangeOf(tab) { return tab === 'oop' ? oopRange : ipRange; }
+function cellState(r, c) { return getRange()[r][c]; }
 function isBlocked(r, c) {
-  // Check if any of the hand's specific combos are blocked by selected flop cards
   const info = cellInfo(r, c);
   for (const key of info.comboKeys) {
     let blocked = false;
     for (const sc of selectedCards) {
       if (!sc) continue;
       const scKey = RANKS[sc.rank] + SUITS[sc.suit];
-      if (key.startsWith(scKey) || key.endsWith(scKey) || key.includes(scKey)) {
-        blocked = true; break;
-      }
+      if (key.startsWith(scKey) || key.endsWith(scKey) || key.includes(scKey)) { blocked = true; break; }
     }
-    if (!blocked) return false; // At least one combo is unblocked
+    if (!blocked) return false;
   }
-  return true; // All combos blocked
+  return true;
 }
-
 function renderRangeGrid(tab) {
   const container = document.getElementById('tab-' + tab);
-  let html = '<div style="overflow-x:auto"><table class="grid-table">';
+  let html = '<div class="grid-scroll"><table class="grid-table">';
   html += '<tr><th></th>';
   for (let c = 0; c < 13; c++) html += '<th>' + RANKS[c] + '</th>';
   html += '</tr>';
-
   for (let r = 0; r < 13; r++) {
     html += '<tr><th>' + RANKS[r] + '</th>';
     for (let c = 0; c < 13; c++) {
       const info = cellInfo(r, c);
-      const state = cellState(r, c);
+      const st = (tab === 'oop' ? oopRange : ipRange)[r][c];
       const blocked = isBlocked(r, c);
       let cls = '';
-      let bg = '';
-      if (blocked) {
-        cls = 'blocked';
-        bg = 'background:#161b22;cursor:default';
-      } else if (state.included && state.weight >= 0.999) {
-        cls = 'included';
-      } else if (state.included) {
-        cls = 'partial';
-        bg = 'background:rgba(210,153,34,' + (state.weight*0.6) + ')';
-      }
-      html += '<td class="' + cls + '" style="' + bg + '" ' +
+      if (blocked) cls = 'dead';
+      else if (st.included && st.weight >= 0.999) cls = 'included';
+      else if (st.included) cls = 'partial';
+      html += '<td class="' + cls + '" ' +
         'onclick="handleCellClick(event,' + r + ',' + c + ')" ' +
         'oncontextmenu="handleCellRightClick(event,' + r + ',' + c + ');return false" ' +
         'onmousedown="handleCellDragStart(event,' + r + ',' + c + ')" ' +
-        'data-r="' + r + '" data-c="' + c + '">';
-      html += info.label;
-      if (state.included && state.weight < 0.999) {
-        html += '<span class="wt">' + Math.round(state.weight*100) + '%</span>';
-      }
+        'data-r="' + r + '" data-c="' + c + '" title="' + info.label + '">';
+      html += esc(info.label);
+      if (st.included && st.weight < 0.999 && !blocked) html += '<span class="wt">' + Math.round(st.weight*100) + '%</span>';
       html += '</td>';
     }
     html += '</tr>';
@@ -644,23 +503,16 @@ function renderRangeGrid(tab) {
   container.innerHTML = html;
 }
 
-// ── Cell interaction ────────────────────────────────────────────────────────
-let dragMode = null;
-let isDragging = false;
-let dragStartR = -1, dragStartC = -1;
-let wasDragging = false;
-
+// ── Cell interaction ──
+let dragMode = null, isDragging = false, dragStartR = -1, dragStartC = -1, wasDragging = false;
 function handleCellClick(e, r, c) {
   if (wasDragging) { wasDragging = false; return; }
   if (isBlocked(r, c)) return;
   const state = cellState(r, c);
   state.included = !state.included;
   if (state.included) state.weight = 1.0;
-  renderRangeGrid(currentTab);
-  updateStats();
-  updateToml();
+  renderRangeGrid(currentTab); updateStats(); updateToml();
 }
-
 function handleCellRightClick(e, r, c) {
   e.preventDefault();
   if (isBlocked(r, c)) return;
@@ -668,42 +520,22 @@ function handleCellRightClick(e, r, c) {
   if (!state.included) { state.included = true; state.weight = 1.0; renderRangeGrid(currentTab); }
   showWeightPopup(e.clientX, e.clientY, r, c, state);
 }
-
 function handleCellDragStart(e, r, c) {
   if (e.button !== 0) return;
   if (isBlocked(r, c)) return;
-  dragStartR = r; dragStartC = c;
-  wasDragging = false;
-  isDragging = true;
-  const state = cellState(r, c);
-  dragMode = state.included ? 'exclude' : 'include';
+  dragStartR = r; dragStartC = c; wasDragging = false; isDragging = true;
+  dragMode = cellState(r, c).included ? 'exclude' : 'include';
 }
-
 document.addEventListener('mousemove', function(e) {
   if (!isDragging) return;
   var el = document.elementFromPoint(e.clientX, e.clientY);
   if (!el || !el.hasAttribute('data-r')) return;
-  var r = parseInt(el.getAttribute('data-r'));
-  var c = parseInt(el.getAttribute('data-c'));
-  if (r !== dragStartR || c !== dragStartC) {
-    wasDragging = true;
-    applyDrag(dragStartR, dragStartC);
-    applyDrag(r, c);
-    dragStartR = r; dragStartC = c;
-  }
+  var r = parseInt(el.getAttribute('data-r')), c = parseInt(el.getAttribute('data-c'));
+  if (r !== dragStartR || c !== dragStartC) { wasDragging = true; applyDrag(dragStartR, dragStartC); applyDrag(r, c); dragStartR = r; dragStartC = c; }
 });
-
 document.addEventListener('mouseup', function() {
-  if (isDragging) {
-    isDragging = false;
-    if (wasDragging) {
-      renderRangeGrid(currentTab);
-      updateStats();
-      updateToml();
-    }
-  }
+  if (isDragging) { isDragging = false; if (wasDragging) { renderRangeGrid(currentTab); updateStats(); updateToml(); } }
 });
-
 function applyDrag(r, c) {
   if (isBlocked(r, c)) return;
   const state = cellState(r, c);
@@ -711,162 +543,117 @@ function applyDrag(r, c) {
   else { state.included = false; state.weight = 1.0; }
 }
 
-// ── Weight popup ────────────────────────────────────────────────────────────
+// ── Weight popup ──
 function showWeightPopup(x, y, r, c, state) {
-  weightPopup.visible = true;
-  weightPopup.r = r;
-  weightPopup.c = c;
-  weightPopup.startWeight = state.weight;
+  weightPopup.visible = true; weightPopup.tab = currentTab; weightPopup.r = r; weightPopup.c = c;
   const popup = document.getElementById('weightPopup');
   popup.style.display = 'block';
-  popup.style.left = Math.max(0, Math.min(x - 90, window.innerWidth - 200)) + 'px';
-  popup.style.top = Math.max(0, Math.min(y - 20, window.innerHeight - 160)) + 'px';
+  popup.style.left = Math.max(8, Math.min(x - 105, window.innerWidth - 230)) + 'px';
+  popup.style.top = Math.max(8, Math.min(y - 20, window.innerHeight - 200)) + 'px';
   document.getElementById('wtSlider').value = Math.round(state.weight * 100);
   updateWtLabel();
 }
-
 function updateWtLabel() {
-  const v = parseInt(document.getElementById('wtSlider').value) / 100;
-  document.getElementById('wtLabel').textContent = v.toFixed(2);
+  document.getElementById('wtLabel').textContent = (parseInt(document.getElementById('wtSlider').value) / 100).toFixed(2);
 }
-
-function setWeight(w) {
-  document.getElementById('wtSlider').value = Math.round(w * 100);
-  updateWtLabel();
-  closeWeightPopup(false);
-}
-
+function setWeight(w) { document.getElementById('wtSlider').value = Math.round(w * 100); updateWtLabel(); closeWeightPopup(false); }
 function closeWeightPopup(cancel) {
-  document.getElementById('weightPopup').style.display = 'none';
-  if (!cancel && weightPopup.r !== undefined) {
-    const state = cellState(weightPopup.r, weightPopup.c);
+  const popup = document.getElementById('weightPopup');
+  if (popup) popup.style.display = 'none';
+  const wasVisible = weightPopup.visible;
+  weightPopup.visible = false;
+  if (!cancel && wasVisible && weightPopup.r !== undefined) {
+    const tab = weightPopup.tab || currentTab;
+    const state = rangeOf(tab)[weightPopup.r][weightPopup.c];
     const w = parseInt(document.getElementById('wtSlider').value, 10) / 100;
     state.weight = w;
-    if (w === 0) state.included = false;
-    renderRangeGrid(currentTab);
-    updateStats();
-    updateToml();
+    if (w === 0) state.included = false; else state.included = true;
+    if (tab !== currentTab) switchTab(tab); else { renderRangeGrid(currentTab); updateStats(); updateToml(); }
   }
-  weightPopup.visible = false;
 }
 
-// ── Presets ─────────────────────────────────────────────────────────────────
+// ── Presets ──
 function preset(name) {
   const range = getRange();
-  const shouldClear = name !== 'clear' && name !== 'fill';
-  if (shouldClear) {
-    for (let r=0;r<13;r++) for (let c=0;c<13;c++) { range[r][c].included = false; range[r][c].weight = 1.0; }
-  }
+  if (name !== 'clear' && name !== 'fill') for (let r=0;r<13;r++) for (let c=0;c<13;c++) { range[r][c].included = false; range[r][c].weight = 1.0; }
   switch(name) {
-    case 'clear':
-      for (let r=0;r<13;r++) for (let c=0;c<13;c++) { range[r][c].included = false; range[r][c].weight = 1.0; }
-      break;
-    case 'fill':
-      for (let r=0;r<13;r++) for (let c=0;c<13;c++) { range[r][c].included = true; range[r][c].weight = 1.0; }
-      break;
-    case 'allPairs':
-      for (let r=0;r<13;r++) for (let c=0;c<13;c++) {
-        if (r===c) { range[r][c].included = true; range[r][c].weight = 1.0; }
-      }
-      break;
-    case 'allSuitedAces':
-      for (let c=1;c<13;c++) { range[0][c].included = true; range[0][c].weight = 1.0; }
-      break;
-    case 'allBroadways':
-      for (let r=0;r<5;r++) for (let c=0;c<5;c++) {
-        range[r][c].included = true; range[r][c].weight = 1.0;
-      }
-      break;
+    case 'clear': for (let r=0;r<13;r++) for (let c=0;c<13;c++) { range[r][c].included = false; range[r][c].weight = 1.0; } break;
+    case 'fill': for (let r=0;r<13;r++) for (let c=0;c<13;c++) { range[r][c].included = true; range[r][c].weight = 1.0; } break;
+    case 'allPairs': for (let r=0;r<13;r++) for (let c=0;c<13;c++) if (r===c) { range[r][c].included = true; range[r][c].weight = 1.0; } break;
+    case 'allSuitedAces': for (let c=1;c<13;c++) { range[0][c].included = true; range[0][c].weight = 1.0; } break;
+    case 'allBroadways': for (let r=0;r<5;r++) for (let c=0;c<5;c++) { range[r][c].included = true; range[r][c].weight = 1.0; } break;
     case 'top10': setTopPct(10); break;
     case 'top20': setTopPct(20); break;
     case 'top30': setTopPct(30); break;
-    case 'allConnectors':
-      for (let r=0;r<12;r++) for (let c=r+1;c<13&&c<=r+1;c++) {
-        range[r][c].included = true; range[r][c].weight = 1.0;
-        range[c][r].included = true; range[c][r].weight = 1.0;
-      }
-      break;
+    case 'allConnectors': for (let r=0;r<12;r++) { range[r][r+1].included = true; range[r][r+1].weight = 1.0; range[r+1][r].included = true; range[r+1][r].weight = 1.0; } break;
   }
-  renderRangeGrid(currentTab);
-  updateStats();
-  updateToml();
-  syncRangeInput();
+  renderRangeGrid(currentTab); updateStats(); updateToml(); syncRangeInput();
 }
-
 function setTopPct(pct) {
-  // Simplified: include hands down to a certain rank cutoff
   const range = getRange();
   for (let r=0;r<13;r++) for (let c=0;c<13;c++) range[r][c].included = false;
-  if (pct >= 10) fillRect(0,0,3,3); // ~10% = top 3x3
-  if (pct >= 20) fillRect(0,0,5,5); // ~20% = top 5x5
-  if (pct >= 30) fillRect(0,0,6,6); // ~30% = top 6x6
+  if (pct >= 10) fillRect(0,0,3,3);
+  if (pct >= 20) fillRect(0,0,5,5);
+  if (pct >= 30) fillRect(0,0,6,6);
 }
+function fillRect(r1,c1,r2,c2) { const range = getRange(); for (let r=r1;r<=r2;r++) for (let c=c1;c<=c2;c++) { range[r][c].included = true; range[r][c].weight = 1.0; } }
 
-function fillRect(r1,c1,r2,c2) {
-  const range = getRange();
-  for (let r=r1;r<=r2;r++) for (let c=c1;c<=c2;c++) {
-    range[r][c].included = true; range[r][c].weight = 1.0;
-  }
-}
-
-// ── Stats ───────────────────────────────────────────────────────────────────
-function updateStats() {
-  const range = getRange();
-  let combos = 0, weighted = 0;
+// ── Stats + tab badges ──
+function countRange(tab) {
+  const range = tab === 'oop' ? oopRange : ipRange;
+  let combos = 0, weighted = 0, cells = 0;
   for (let r=0;r<13;r++) for (let c=0;c<13;c++) {
-    if (!range[r][c].included) continue;
-    if (isBlocked(r,c)) continue;
+    if (!range[r][c].included || isBlocked(r,c)) continue;
     const info = cellInfo(r,c);
     const n = info.type === 'pair' ? 6 : info.type === 'suited' ? 4 : 12;
-    combos += n;
-    weighted += n * range[r][c].weight;
+    combos += n; weighted += n * range[r][c].weight; cells++;
   }
+  return { combos, weighted, cells };
+}
+function updateStats() {
+  const cur = countRange(currentTab);
+  const oop = countRange('oop'), ip = countRange('ip');
+  document.getElementById('cnt-oop').textContent = oop.combos;
+  document.getElementById('cnt-ip').textContent = ip.combos;
+  const boardN = selectedCards.filter(c=>c!==null).length;
   document.getElementById('rangeStats').innerHTML =
-    '<span>Combos: ' + combos + '</span>' +
-    '<span>Weighted: ' + weighted.toFixed(1) + '</span>' +
-    '<span>Blocked by board: ' + (selectedCards.filter(c=>c!==null).length > 0 ? 'yes' : 'no') + '</span>';
+    '<span class="stat-pill">Combos <b>' + cur.combos + '</b></span>' +
+    '<span class="stat-pill">Weighted <b>' + cur.weighted.toFixed(1) + '</b></span>' +
+    '<span class="stat-pill">Board <b>' + boardN + '/3</b></span>';
   syncRangeInput();
 }
 
-// ── Card Picker ─────────────────────────────────────────────────────────────
+// ── Card Picker ──
 function renderCardPicker() {
   let html = '';
   for (const suit of SUITS) {
+    html += '<div class="suit-row"><div class="suit-lab" title="' + SUIT_NAME[suit] + '">' + SUIT_SYMB[suit] + '</div>';
     for (let rank = 0; rank < 13; rank++) {
       const rk = RANKS[rank];
       const isSel = selectedCards.some(c => c && c.rank === rank && c.suit === suit);
+      const usedElsewhere = selectedCards.some(c => c && c.rank === rank && c.suit === suit);
       const cls = (SUIT_COLOR[suit] === 'red' ? ' red' : '') + (isSel ? ' selected' : '');
-      html += '<button class="card-btn' + cls + '" onclick="toggleCard(' + rank + ',\'' + suit + '\')">' +
-        '<span class="card-suit">' + SUIT_SYMB[suit] + '</span>' + rk + '</button>';
+      html += '<button class="card-btn' + cls + '" onclick="toggleCard(' + rank + ',\'' + suit + '\')" title="' + rk + suit + '">' +
+        '<small>' + SUIT_SYMB[suit] + '</small>' + rk + '</button>';
     }
-    html += '<br>';
+    html += '</div>';
   }
   document.getElementById('cardPicker').innerHTML = html;
   updateBoardSlots();
 }
-
 function toggleCard(rank, suit) {
   const idx = selectedCards.findIndex(c => c && c.rank === rank && c.suit === suit);
-  if (idx >= 0) {
-    selectedCards[idx] = null;
-  } else {
-    // Find first empty slot
+  if (idx >= 0) selectedCards[idx] = null;
+  else {
     const emptyIdx = selectedCards.findIndex(c => c === null);
-    if (emptyIdx >= 0) {
-      selectedCards[emptyIdx] = { rank, suit };
-    } else {
-      // Shift: remove first, add new
-      selectedCards.shift();
-      selectedCards.push({ rank, suit });
-    }
+    if (emptyIdx >= 0) selectedCards[emptyIdx] = { rank, suit };
+    else { selectedCards.shift(); selectedCards.push({ rank, suit }); }
   }
-  renderCardPicker();
-  renderRangeGrid(currentTab);
-  updateStats();
-  updateToml();
+  renderCardPicker(); renderRangeGrid(currentTab); updateStats(); updateToml();
 }
-
+function clearBoard() { selectedCards = [null,null,null]; renderCardPicker(); renderRangeGrid(currentTab); updateStats(); updateToml(); }
 function updateBoardSlots() {
+  const labels = ['Flop 1','Flop 2','Flop 3'];
   for (let i = 0; i < 3; i++) {
     const slot = document.getElementById('slot' + i);
     const card = selectedCards[i];
@@ -874,342 +661,205 @@ function updateBoardSlots() {
       const rk = RANKS[card.rank];
       const isRed = SUIT_COLOR[card.suit] === 'red';
       slot.className = 'board-slot filled' + (isRed ? ' red' : '');
-      slot.innerHTML = rk + SUIT_SYMB[card.suit];
+      slot.innerHTML = '<span>' + rk + SUIT_SYMB[card.suit] + '</span>';
     } else {
       slot.className = 'board-slot';
-      slot.innerHTML = '';
+      slot.innerHTML = '<span>—</span><span class="slot-n">' + labels[i] + '</span>';
     }
   }
 }
 
-// ── Sizing Editor ───────────────────────────────────────────────────────────
+// ── Sizing Editor ──
 function renderSizingEditor() {
   const streets = ['flop','turn','river'];
   let html = '';
   for (const st of streets) {
-    html += '<div class="sizing-street"><h4>' + st.charAt(0).toUpperCase() + st.slice(1) + '</h4>';
+    html += '<div class="sizing-street"><h4><span class="dot"></span>' + st.charAt(0).toUpperCase() + st.slice(1) + '</h4>';
     html += '<div class="sizing-row" id="sizings-' + st + '">';
     for (let i = 0; i < sizings[st].length; i++) {
-      html += '<div class="sizing-tag">' +
-        '<input type="number" value="' + sizings[st][i] + '" min="0" max="1000" onchange="updateSizing(\'' + st + '\',' + i + ',this.value)">' +
-        '<span>%</span>' +
-        '<span class="remove" onclick="removeSizing(\'' + st + '\',' + i + ')">&times;</span>' +
-        '</div>';
+      html += '<div class="sizing-tag"><input type="number" value="' + sizings[st][i] + '" min="0" max="1000" onchange="updateSizing(\'' + st + '\',' + i + ',this.value)"><span>%</span><span class="remove" onclick="removeSizing(\'' + st + '\',' + i + ')">×</span></div>';
     }
-    html += '<button class="sizing-add" onclick="addSizing(\'' + st + '\')">+ Add</button>';
-    html += '</div>';
-    // Raise cap
-    html += '<div class="config-row" style="margin-top:2px">' +
-      '<label>Raise cap</label>' +
-      '<select style="width:80px" onchange="raiseCaps.' + st + '=this.value;updateToml()">' +
-      '<option value="none"' + (raiseCaps[st]==='none'?' selected':'') + '>none</option>';
-    for (let rc = 0; rc <= 3; rc++) {
-      html += '<option value="' + rc + '"' + (raiseCaps[st]===String(rc)?' selected':'') + '>' + rc + '</option>';
-    }
-    html += '</select></div>';
-    html += '</div>';
+    html += '<button class="sizing-add" onclick="addSizing(\'' + st + '\')">+ Add size</button></div>';
+    html += '<div class="cap-row"><span>Raise cap</span><select onchange="raiseCaps.' + st + '=this.value;updateToml()">' +
+      '<option value="none"' + (raiseCaps[st]==='none'?' selected':'') + '>none (unlimited)</option>';
+    for (let rc = 0; rc <= 3; rc++) html += '<option value="' + rc + '"' + (raiseCaps[st]===String(rc)?' selected':'') + '>' + rc + '</option>';
+    html += '</select></div></div>';
   }
   document.getElementById('sizingEditor').innerHTML = html;
 }
+function addSizing(street) { sizings[street].push(sizings[street].length > 0 ? sizings[street][sizings[street].length-1] + 25 : 50); renderSizingEditor(); updateToml(); }
+function removeSizing(street, idx) { sizings[street].splice(idx, 1); renderSizingEditor(); updateToml(); }
+function updateSizing(street, idx, val) { sizings[street][idx] = parseInt(val, 10) || 0; updateToml(); }
 
-function addSizing(street) {
-  sizings[street].push(sizings[street].length > 0 ? sizings[street][sizings[street].length-1] + 25 : 50);
-  renderSizingEditor();
-  updateToml();
-}
-
-function removeSizing(street, idx) {
-  sizings[street].splice(idx, 1);
-  renderSizingEditor();
-  updateToml();
-}
-
-function updateSizing(street, idx, val) {
-  sizings[street][idx] = parseInt(val, 10) || 0;
-  updateToml();
-}
-
-// ── TOML Generation ─────────────────────────────────────────────────────────
+// ── TOML Generation ──
 function getFlopStr() {
   const cards = selectedCards.filter(c => c !== null);
   if (cards.length !== 3) return 'SELECT_3_CARDS';
   return cards.map(c => RANKS[c.rank] + c.suit).join(' ');
 }
-
 function getRangeStr(tab) {
   const range = tab === 'oop' ? oopRange : ipRange;
   const tokens = [];
   const byWeight = {};
-
-  for (let r = 0; r < 13; r++) {
-    for (let c = 0; c < 13; c++) {
-      if (!range[r][c].included) continue;
-      if (isBlocked(r, c)) continue; // Skip fully blocked combos
-      const info = cellInfo(r, c);
-      const w = range[r][c].weight;
-      const key = w.toFixed(2);
-      if (!byWeight[key]) byWeight[key] = [];
-      byWeight[key].push(info);
-    }
+  for (let r = 0; r < 13; r++) for (let c = 0; c < 13; c++) {
+    if (!range[r][c].included || isBlocked(r, c)) continue;
+    const info = cellInfo(r, c);
+    const key = range[r][c].weight.toFixed(2);
+    if (!byWeight[key]) byWeight[key] = [];
+    byWeight[key].push(info);
   }
-
   for (const [wStr, cells] of Object.entries(byWeight)) {
     const w = parseFloat(wStr);
     const suffix = w < 0.999 ? ':' + w.toFixed(2).replace(/0+$/,'').replace(/\.$/,'') : '';
-
-    // Separate by type for compression
     const pairs = cells.filter(c => c.type === 'pair').map(c => c.hi);
     const suited = cells.filter(c => c.type === 'suited');
     const offsuit = cells.filter(c => c.type === 'offsuit');
-
-    // Compress pairs
     if (pairs.length > 0) {
       pairs.sort((a,b) => RANKS.indexOf(a) - RANKS.indexOf(b));
       let i = 0;
       while (i < pairs.length) {
         let j = i;
         while (j+1 < pairs.length && RANKS.indexOf(pairs[j]) + 1 === RANKS.indexOf(pairs[j+1])) j++;
-        if (j > i + 1) {
-          tokens.push(pairs[i] + pairs[i] + '-' + pairs[j] + pairs[j] + suffix);
-        } else if (j > i && pairs[i] === 'A') {
-          tokens.push(pairs[j] + pairs[j] + '+' + suffix);
-        } else {
-          for (let k = i; k <= j; k++) tokens.push(pairs[k] + pairs[k] + suffix);
-        }
+        if (j > i + 1) tokens.push(pairs[i] + pairs[i] + '-' + pairs[j] + pairs[j] + suffix);
+        else if (j > i && pairs[i] === 'A') tokens.push(pairs[j] + pairs[j] + '+' + suffix);
+        else for (let k = i; k <= j; k++) tokens.push(pairs[k] + pairs[k] + suffix);
         i = j + 1;
       }
     }
-
-    // Compress suited by high card
     const suitedByHi = {};
-    for (const s of suited) {
-      if (!suitedByHi[s.hi]) suitedByHi[s.hi] = [];
-      suitedByHi[s.hi].push(s.lo);
-    }
+    for (const s of suited) { if (!suitedByHi[s.hi]) suitedByHi[s.hi] = []; suitedByHi[s.hi].push(s.lo); }
     for (const [hi, los] of Object.entries(suitedByHi)) {
       los.sort((a,b) => RANKS.indexOf(a) - RANKS.indexOf(b));
       let i = 0;
       while (i < los.length) {
         let j = i;
         while (j+1 < los.length && RANKS.indexOf(los[j]) + 1 === RANKS.indexOf(los[j+1])) j++;
-        if (j > i + 1) {
-          tokens.push(hi + los[i] + 's-' + hi + los[j] + 's' + suffix);
-        } else if (j > i && hi === 'A' && los[i] === 'K') {
-          tokens.push(hi + los[j] + 's+' + suffix);
-        } else {
-          for (let k = i; k <= j; k++) tokens.push(hi + los[k] + 's' + suffix);
-        }
+        if (j > i + 1) tokens.push(hi + los[i] + 's-' + hi + los[j] + 's' + suffix);
+        else if (j > i && hi === 'A' && los[i] === 'K') tokens.push(hi + los[j] + 's+' + suffix);
+        else for (let k = i; k <= j; k++) tokens.push(hi + los[k] + 's' + suffix);
         i = j + 1;
       }
     }
-
-    // Compress offsuit by high card
     const offsuitByHi = {};
-    for (const o of offsuit) {
-      if (!offsuitByHi[o.hi]) offsuitByHi[o.hi] = [];
-      offsuitByHi[o.hi].push(o.lo);
-    }
+    for (const o of offsuit) { if (!offsuitByHi[o.hi]) offsuitByHi[o.hi] = []; offsuitByHi[o.hi].push(o.lo); }
     for (const [hi, los] of Object.entries(offsuitByHi)) {
       los.sort((a,b) => RANKS.indexOf(a) - RANKS.indexOf(b));
       let i = 0;
       while (i < los.length) {
         let j = i;
         while (j+1 < los.length && RANKS.indexOf(los[j]) + 1 === RANKS.indexOf(los[j+1])) j++;
-        if (j > i + 1) {
-          tokens.push(hi + los[i] + 'o-' + hi + los[j] + 'o' + suffix);
-        } else if (j > i && hi === 'A' && los[i] === 'K') {
-          tokens.push(hi + los[j] + 'o+' + suffix);
-        } else {
-          for (let k = i; k <= j; k++) tokens.push(hi + los[k] + 'o' + suffix);
-        }
+        if (j > i + 1) tokens.push(hi + los[i] + 'o-' + hi + los[j] + 'o' + suffix);
+        else if (j > i && hi === 'A' && los[i] === 'K') tokens.push(hi + los[j] + 'o+' + suffix);
+        else for (let k = i; k <= j; k++) tokens.push(hi + los[k] + 'o' + suffix);
         i = j + 1;
       }
     }
   }
-
-  // Empty ranges should never reach export (validateExport blocks them). Keep a
-  // non-empty fallback so the live preview still shows a legal-looking string.
   return tokens.join(', ') || 'AA';
 }
-
-function getSizingsStr(street) {
-  const arr = sizings[street];
-  if (arr.length === 0) return '[]';
-  return '[' + arr.join(', ') + ']';
-}
-
-function getRaiseCapStr(street) {
-  const v = raiseCaps[street];
-  // Bare identifier — the config parser accepts `none`/`unlimited`, not a quoted string.
-  if (v === 'none') return 'none';
-  return v;
-}
-
+function getSizingsStr(street) { const arr = sizings[street]; return arr.length === 0 ? '[]' : '[' + arr.join(', ') + ']'; }
+function getRaiseCapStr(street) { return raiseCaps[street] === 'none' ? 'none' : raiseCaps[street]; }
 function rangeHasHands(tab) {
   const range = tab === 'oop' ? oopRange : ipRange;
-  for (let r = 0; r < 13; r++) {
-    for (let c = 0; c < 13; c++) {
-      if (!range[r][c].included) continue;
-      // Fully board-blocked cells never make it into the exported range string.
-      if (isBlocked(r, c)) continue;
-      return true;
-    }
+  for (let r = 0; r < 13; r++) for (let c = 0; c < 13; c++) {
+    if (!range[r][c].included || isBlocked(r, c)) continue;
+    return true;
   }
   return false;
 }
-
 function validateExport() {
-  const cards = selectedCards.filter(c => c !== null);
-  if (cards.length !== 3) {
-    return 'Pick exactly 3 flop cards before exporting.';
-  }
-  if (!rangeHasHands('oop')) {
-    return 'OOP range is empty (or fully blocked by the board).';
-  }
-  if (!rangeHasHands('ip')) {
-    return 'IP range is empty (or fully blocked by the board).';
-  }
+  if (selectedCards.filter(c => c !== null).length !== 3) return 'Pick exactly 3 flop cards before exporting.';
+  if (!rangeHasHands('oop')) return 'OOP range is empty (or fully blocked by the board).';
+  if (!rangeHasHands('ip')) return 'IP range is empty (or fully blocked by the board).';
   return null;
 }
-
 function generateToml() {
   const flop = getFlopStr();
-  const pot = document.getElementById('cfgPot').value;
-  const stack = document.getElementById('cfgStack').value;
-  const minBet = document.getElementById('cfgMinBet').value;
-  const algo = document.getElementById('cfgAlgo').value;
-  const maxIter = document.getElementById('cfgMaxIter').value;
-  const target = document.getElementById('cfgTarget').value;
+  const pot = document.getElementById('cfgPot').value, stack = document.getElementById('cfgStack').value;
+  const minBet = document.getElementById('cfgMinBet').value, algo = document.getElementById('cfgAlgo').value;
+  const maxIter = document.getElementById('cfgMaxIter').value, target = document.getElementById('cfgTarget').value;
   const threads = document.getElementById('cfgThreads').value;
-  const simd = document.getElementById('cfgSimd').checked;
-  const prune = document.getElementById('cfgPrune').checked;
-  const alpha = document.getElementById('cfgAlpha').value;
-  const beta = document.getElementById('cfgBeta').value;
-  const gamma = document.getElementById('cfgGamma').value;
-
+  const simd = document.getElementById('cfgSimd').checked, prune = document.getElementById('cfgPrune').checked;
+  const alpha = document.getElementById('cfgAlpha').value, beta = document.getElementById('cfgBeta').value, gamma = document.getElementById('cfgGamma').value;
   let toml = '[game]\n';
-  toml += 'flop = "' + flop + '"\n';
-  toml += 'initial_pot = ' + pot + '\n';
-  toml += 'effective_stack = ' + stack + '\n';
-  toml += 'min_bet = ' + minBet + '\n\n';
-
-  toml += '[game.sizings]\n';
-  toml += 'flop = ' + getSizingsStr('flop') + '\n';
-  toml += 'turn = ' + getSizingsStr('turn') + '\n';
-  toml += 'river = ' + getSizingsStr('river') + '\n\n';
-
-  toml += '[game.raise_cap]\n';
-  toml += 'flop = ' + getRaiseCapStr('flop') + '\n';
-  toml += 'turn = ' + getRaiseCapStr('turn') + '\n';
-  toml += 'river = ' + getRaiseCapStr('river') + '\n\n';
-
-  toml += '[ranges]\n';
-  toml += 'oop = "' + getRangeStr('oop') + '"\n';
-  toml += 'ip  = "' + getRangeStr('ip') + '"\n\n';
-
-  toml += '[solver]\n';
-  toml += 'algorithm = "' + algo + '"\n';
-  toml += 'max_iterations = ' + maxIter + '\n';
-  toml += 'target_exploitability_pct = ' + target + '\n';
-  toml += 'num_threads = ' + threads + '\n';
-  toml += 'prune_zero_reach = ' + prune + '\n';
-  toml += 'use_simd = ' + simd + '\n';
-  toml += 'check_interval = 64\n';
-
-  if (algo === 'dcfr') {
-    toml += '\n[solver.dcfr]\n';
-    toml += 'alpha = ' + alpha + '\n';
-    toml += 'beta = ' + beta + '\n';
-    toml += 'gamma = ' + gamma + '\n';
-  }
-
+  toml += 'flop = "' + flop + '"\ninitial_pot = ' + pot + '\neffective_stack = ' + stack + '\nmin_bet = ' + minBet + '\n\n';
+  toml += '[game.sizings]\nflop = ' + getSizingsStr('flop') + '\nturn = ' + getSizingsStr('turn') + '\nriver = ' + getSizingsStr('river') + '\n\n';
+  toml += '[game.raise_cap]\nflop = ' + getRaiseCapStr('flop') + '\nturn = ' + getRaiseCapStr('turn') + '\nriver = ' + getRaiseCapStr('river') + '\n\n';
+  toml += '[ranges]\noop = "' + getRangeStr('oop') + '"\nip  = "' + getRangeStr('ip') + '"\n\n';
+  toml += '[solver]\nalgorithm = "' + algo + '"\nmax_iterations = ' + maxIter + '\ntarget_exploitability_pct = ' + target + '\nnum_threads = ' + threads + '\nprune_zero_reach = ' + prune + '\nuse_simd = ' + simd + '\ncheck_interval = 64\n';
+  if (algo === 'dcfr') toml += '\n[solver.dcfr]\nalpha = ' + alpha + '\nbeta = ' + beta + '\ngamma = ' + gamma + '\n';
   return toml;
 }
-
 function updateToml() {
   document.getElementById('tomlOutput').textContent = generateToml();
+  updateExportChecks();
 }
-
+function updateExportChecks() {
+  const boardOk = selectedCards.filter(c => c !== null).length === 3;
+  const oopN = countRange('oop').combos, ipN = countRange('ip').combos;
+  const oopOk = oopN > 0, ipOk = ipN > 0;
+  const item = (ok, label, detail) =>
+    '<div class="check-item' + (ok ? ' ok' : '') + '"><span class="ic">' + (ok ? '✓' : '·') + '</span><span>' + label + ' <b style="font-family:var(--mono)">' + detail + '</b></span></div>';
+  document.getElementById('exportChecks').innerHTML =
+    item(boardOk, 'Flop —', boardOk ? esc(getFlopStr()) : 'pick 3 cards') +
+    item(oopOk, 'OOP range —', oopN + ' combos') +
+    item(ipOk, 'IP range —', ipN + ' combos');
+  document.getElementById('stBoard').classList.toggle('done', boardOk);
+  document.getElementById('stOop').classList.toggle('done', oopOk && ipOk);
+  document.getElementById('stExp').classList.toggle('done', boardOk && oopOk && ipOk);
+}
 function onAlgoChange() {
-  var algo = document.getElementById('cfgAlgo').value;
-  document.getElementById('dcfrFields').style.display = (algo === 'dcfr') ? '' : 'none';
+  document.getElementById('dcfrFields').style.display = (document.getElementById('cfgAlgo').value === 'dcfr') ? '' : 'none';
   updateToml();
 }
-
 function copyToml() {
   const err = validateExport();
   if (err) { showToast(err, true); return; }
   const toml = generateToml();
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(toml).then(function() {
-      showToast('TOML copied — next: zolver solve spot.toml -o results.json --summary');
-    }).catch(function() { showToast('Copy failed', true); });
+    navigator.clipboard.writeText(toml).then(() => showToast('TOML copied — next: zolver solve spot.toml -o results.json --summary')).catch(() => showToast('Copy failed', true));
   } else {
-    // Fallback for older browsers
-    var ta = document.createElement('textarea');
-    ta.value = toml; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    var ta = document.createElement('textarea'); ta.value = toml; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
-    try {
-      document.execCommand('copy');
-      showToast('TOML copied — next: zolver solve spot.toml -o results.json --summary');
-    } catch(e) {
-      showToast('Copy failed', true);
-    }
+    try { document.execCommand('copy'); showToast('TOML copied — next: zolver solve spot.toml -o results.json --summary'); }
+    catch(e) { showToast('Copy failed', true); }
     document.body.removeChild(ta);
   }
 }
-
 function downloadToml() {
   const err = validateExport();
   if (err) { showToast(err, true); return; }
   const blob = new Blob([generateToml()], {type:'text/plain'});
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = 'spot.toml'; a.click();
+  const a = document.createElement('a'); a.href = url; a.download = 'spot.toml'; a.click();
   URL.revokeObjectURL(url);
   showToast('Downloaded spot.toml — next: zolver solve spot.toml -o results.json --summary');
 }
 
-// ── TOML import (subset matching zolver's config grammar / builder export) ──
+// ── TOML import ──
 function stripTomlLineComment(val) {
-  // Remove a trailing # comment when it is not inside a double-quoted string.
   let inStr = false;
-  for (let i = 0; i < val.length; i++) {
-    const ch = val[i];
-    if (ch === '"') inStr = !inStr;
-    else if (ch === '#' && !inStr) return val.slice(0, i).trim();
-  }
+  for (let i = 0; i < val.length; i++) { const ch = val[i]; if (ch === '"') inStr = !inStr; else if (ch === '#' && !inStr) return val.slice(0, i).trim(); }
   return val.trim();
 }
-
 function parseTomlScalar(raw) {
   const v = stripTomlLineComment(raw);
   if (v === '') return '';
   if (v === 'true') return true;
   if (v === 'false') return false;
   if (v === 'none' || v === 'unlimited') return v;
-  if (v[0] === '"' && v[v.length - 1] === '"') {
-    // Minimal unescape for \" and \\.
-    return v.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-  }
+  if (v[0] === '"' && v[v.length - 1] === '"') return v.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
   if (v[0] === "'" && v[v.length - 1] === "'") return v.slice(1, -1);
   if (v[0] === '[' && v[v.length - 1] === ']') {
     const inner = v.slice(1, -1).trim();
     if (!inner) return [];
-    return inner.split(',').map(function(p) {
-      const s = p.trim();
-      const n = Number(s);
-      if (!Number.isFinite(n)) throw new Error('invalid array value: ' + s);
-      return n;
-    });
+    return inner.split(',').map(function(p) { const n = Number(p.trim()); if (!Number.isFinite(n)) throw new Error('invalid array value: ' + p.trim()); return n; });
   }
   const n = Number(v);
   if (Number.isFinite(n) && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(v)) return n;
-  // Bare identifier (e.g. dcfr) — keep as string.
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) return v;
   throw new Error('unsupported value: ' + v);
 }
-
 function parseSimpleToml(text) {
   const out = {};
   let section = '';
@@ -1222,149 +872,93 @@ function parseSimpleToml(text) {
     const eq = line.indexOf('=');
     if (eq < 0) continue;
     const key = line.slice(0, eq).trim();
-    const valRaw = line.slice(eq + 1);
     if (!key) continue;
-    const full = section ? (section + '.' + key) : key;
-    try {
-      out[full] = parseTomlScalar(valRaw);
-    } catch (e) {
-      throw new Error('line ' + (li + 1) + ' (' + full + '): ' + (e.message || e));
-    }
+    try { out[(section ? section + '.' + key : key)] = parseTomlScalar(line.slice(eq + 1)); }
+    catch (e) { throw new Error('line ' + (li + 1) + ': ' + (e.message || e)); }
   }
   return out;
 }
-
 function applyFlopFromString(s) {
   const parts = String(s).trim().split(/[\s,]+/).filter(Boolean);
   if (parts.length !== 3) throw new Error('game.flop must be 3 cards (got ' + parts.length + ')');
-  const next = [null, null, null];
-  const used = {};
+  const next = [null, null, null], used = {};
   for (let i = 0; i < 3; i++) {
     const p = parts[i];
     if (p.length !== 2) throw new Error('invalid card \'' + p + '\'');
-    const rankCh = p[0].toUpperCase();
-    const suit = p[1].toLowerCase();
+    const rankCh = p[0].toUpperCase(), suit = p[1].toLowerCase();
     const rank = RANKS.indexOf(rankCh);
     if (rank < 0 || SUITS.indexOf(suit) < 0) throw new Error('invalid card \'' + p + '\'');
-    const key = rankCh + suit;
-    if (used[key]) throw new Error('duplicate flop card \'' + p + '\'');
-    used[key] = true;
+    if (used[rankCh + suit]) throw new Error('duplicate flop card \'' + p + '\'');
+    used[rankCh + suit] = true;
     next[i] = { rank: rank, suit: suit };
   }
   selectedCards = next;
 }
-
 function setNumInput(id, val, fallback) {
   const el = document.getElementById(id);
   if (!el) return;
-  if (val === undefined || val === null || val === '') {
-    if (fallback !== undefined) el.value = fallback;
-    return;
-  }
+  if (val === undefined || val === null || val === '') { if (fallback !== undefined) el.value = fallback; return; }
   el.value = val;
 }
-
 function setCheck(id, val, fallback) {
   const el = document.getElementById(id);
   if (!el) return;
   if (typeof val === 'boolean') el.checked = val;
   else if (fallback !== undefined) el.checked = fallback;
 }
-
 function applyImportedToml(text) {
   const kv = parseSimpleToml(text);
-
   if (kv['game.flop'] !== undefined) applyFlopFromString(kv['game.flop']);
-
   setNumInput('cfgPot', kv['game.initial_pot']);
   setNumInput('cfgStack', kv['game.effective_stack']);
   setNumInput('cfgMinBet', kv['game.min_bet']);
-
-  // Sizings — only replace streets that are present.
   ['flop', 'turn', 'river'].forEach(function(st) {
     const key = 'game.sizings.' + st;
     if (kv[key] === undefined) return;
     if (!Array.isArray(kv[key])) throw new Error(key + ' must be an array');
-    sizings[st] = kv[key].map(function(n) {
-      const v = Number(n);
-      if (!Number.isFinite(v)) throw new Error(key + ' has non-numeric entry');
-      return v;
-    });
+    sizings[st] = kv[key].map(function(n) { const v = Number(n); if (!Number.isFinite(v)) throw new Error(key + ' has non-numeric entry'); return v; });
   });
-
   ['flop', 'turn', 'river'].forEach(function(st) {
     const key = 'game.raise_cap.' + st;
     if (kv[key] === undefined) return;
     const v = kv[key];
     if (v === 'none' || v === 'unlimited') raiseCaps[st] = 'none';
     else if (typeof v === 'number' && v >= 0 && v <= 3 && Number.isInteger(v)) raiseCaps[st] = String(v);
-    else if (typeof v === 'number' && v > 3 && Number.isInteger(v)) raiseCaps[st] = 'none'; // treat high as unlimited UI-wise
+    else if (typeof v === 'number' && v > 3 && Number.isInteger(v)) raiseCaps[st] = 'none';
     else throw new Error(key + ' must be 0-3 or none');
   });
-
-  if (kv['ranges.oop'] !== undefined) {
-    copyRangeGrid(oopRange, parseRangeStringToGrid(String(kv['ranges.oop'])));
-  }
-  if (kv['ranges.ip'] !== undefined) {
-    copyRangeGrid(ipRange, parseRangeStringToGrid(String(kv['ranges.ip'])));
-  }
-
+  if (kv['ranges.oop'] !== undefined) copyRangeGrid(oopRange, parseRangeStringToGrid(String(kv['ranges.oop'])));
+  if (kv['ranges.ip'] !== undefined) copyRangeGrid(ipRange, parseRangeStringToGrid(String(kv['ranges.ip'])));
   if (kv['solver.algorithm'] !== undefined) {
-    const algo = String(kv['solver.algorithm']);
     const sel = document.getElementById('cfgAlgo');
-    if (sel) {
-      sel.value = (algo === 'cfr_plus') ? 'cfr_plus' : 'dcfr';
-    }
+    if (sel) sel.value = (String(kv['solver.algorithm']) === 'cfr_plus') ? 'cfr_plus' : 'dcfr';
   }
   setNumInput('cfgMaxIter', kv['solver.max_iterations']);
   setNumInput('cfgTarget', kv['solver.target_exploitability_pct']);
   setNumInput('cfgThreads', kv['solver.num_threads']);
   setCheck('cfgPrune', kv['solver.prune_zero_reach']);
   setCheck('cfgSimd', kv['solver.use_simd']);
-
   setNumInput('cfgAlpha', kv['solver.dcfr.alpha']);
   setNumInput('cfgBeta', kv['solver.dcfr.beta']);
   setNumInput('cfgGamma', kv['solver.dcfr.gamma']);
-
-  // Refresh UI from state.
-  onAlgoChange();
-  renderCardPicker();
-  renderSizingEditor();
-  renderRangeGrid(currentTab);
-  updateStats();
-  updateToml();
-  syncRangeInput();
+  onAlgoChange(); renderCardPicker(); renderSizingEditor(); renderRangeGrid(currentTab); updateStats(); updateToml(); syncRangeInput();
 }
-
 function handleImportFile(ev) {
   const file = ev.target.files && ev.target.files[0];
-  // Allow re-importing the same path later.
   ev.target.value = '';
   if (!file) return;
   const reader = new FileReader();
   reader.onload = function() {
-    try {
-      applyImportedToml(String(reader.result || ''));
-      showToast('Imported ' + file.name);
-    } catch (e) {
-      showToast('Import failed: ' + (e.message || e), true);
-    }
+    try { applyImportedToml(String(reader.result || '')); showToast('Imported ' + file.name); }
+    catch (e) { showToast('Import failed: ' + (e.message || e), true); }
   };
   reader.onerror = function() { showToast('Failed to read file', true); };
   reader.readAsText(file);
 }
-
 function importTomlFromPreview() {
-  const el = document.getElementById('tomlOutput');
-  const text = el ? el.textContent : '';
-  try {
-    applyImportedToml(text);
-    showToast('Imported from preview');
-  } catch (e) {
-    showToast('Import failed: ' + (e.message || e), true);
-  }
+  try { applyImportedToml(document.getElementById('tomlOutput').textContent); showToast('Imported from preview'); }
+  catch (e) { showToast('Import failed: ' + (e.message || e), true); }
 }
-
 function showToast(msg, isError) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -1373,10 +967,14 @@ function showToast(msg, isError) {
   clearTimeout(showToast._timer);
   showToast._timer = setTimeout(() => t.classList.remove('show'), isError ? 3500 : 2800);
 }
-
 document.addEventListener('click', function(e) {
-  if (weightPopup.visible && !e.target.closest('#weightPopup') && !e.target.closest('.grid-table td')) {
-    closeWeightPopup(true);
+  if (weightPopup.visible && !e.target.closest('#weightPopup') && !e.target.closest('.grid-table td')) closeWeightPopup(true);
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && weightPopup.visible) closeWeightPopup(true);
+  if ((e.key === '1' || e.key === '2') && document.activeElement !== document.getElementById('rangeInput')) {
+    if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT' && e.target.tagName !== 'TEXTAREA')
+      switchTab(e.key === '1' ? 'oop' : 'ip');
   }
 });
 </script>
