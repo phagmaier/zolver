@@ -203,7 +203,7 @@ test "Poker Hand Correctness" {
     try std.testing.expect(eval.handStrength(p1_hand) > eval.handStrength(p2_hand));
 }
 
-test "Histogram categorization vs prime-product oracle" {
+test "histogram category edge cases" {
     // For every 7-card hand that is neither a flush nor a straight, the new
     // histogram path must produce the same hand-category ordering as a
     // brute-force best-of-21 evaluation. We sanity-check a handful of edge
@@ -248,6 +248,88 @@ test "Histogram categorization vs prime-product oracle" {
     // Top 5 ranks: A(12), K(11), J(9), 9(7), 7(5). Bitmask = bits {5,7,9,11,12}.
     const expected_bits: u32 = (1 << 5) | (1 << 7) | (1 << 9) | (1 << 11) | (1 << 12);
     try std.testing.expectEqual(expected_bits, hc & 0x3FFFFFF);
+}
+
+// Independent five-card reference: sort ranks, group adjacent duplicates, and
+// classify exactly five cards. Seven-card tests enumerate all 21 subsets. This
+// intentionally does not call handStrength or reuse its histogram/straight scan.
+fn fiveCardReference(hand: [5]u32) u32 {
+    var ranks: [5]u32 = undefined;
+    var bits: u32 = 0;
+    var flush = true;
+    for (hand, 0..) |c, i| {
+        ranks[i] = (c >> 8) & 15;
+        bits |= @as(u32, 1) << @intCast(ranks[i]);
+        flush = flush and ((c >> 12) & 15) == ((hand[0] >> 12) & 15);
+    }
+    std.mem.sort(u32, &ranks, {}, std.sort.desc(u32));
+    var straight: u32 = 0;
+    if (@popCount(bits) == 5) {
+        if (ranks[0] - ranks[4] == 4) straight = ranks[0] - 2;
+        if (bits == 0x100f) straight = 1;
+    }
+    if (flush) return if (straight != 0) (9 << 26) | straight else (6 << 26) | bits;
+    if (straight != 0) return (5 << 26) | straight;
+    const Group = struct { rank: u32, count: u32 };
+    var groups: [5]Group = undefined;
+    var n: usize = 0;
+    for (ranks) |r| {
+        if (n > 0 and groups[n - 1].rank == r) {
+            groups[n - 1].count += 1;
+        } else {
+            groups[n] = .{ .rank = r, .count = 1 };
+            n += 1;
+        }
+    }
+    const Order = struct {
+        fn less(_: void, a: Group, b: Group) bool {
+            return if (a.count != b.count) a.count > b.count else a.rank > b.rank;
+        }
+    };
+    std.mem.sort(Group, groups[0..n], {}, Order.less);
+    const a = groups[0].rank;
+    const b = groups[1].rank;
+    if (groups[0].count == 4) return (8 << 26) | (a << 13) | b;
+    if (groups[0].count == 3) {
+        if (groups[1].count == 2) return (7 << 26) | (a << 13) | b;
+        return (4 << 26) | (a << 13) | (b << 4) | groups[2].rank;
+    }
+    if (groups[0].count == 2) {
+        if (groups[1].count == 2) return (3 << 26) | (a << 13) | (b << 9) | groups[2].rank;
+        return (2 << 26) | (a << 13) | (bits & ~(@as(u32, 1) << @intCast(a)));
+    }
+    return (1 << 26) | bits;
+}
+
+test "seven-card ranking matches independent best-of-21 reference" {
+    var rng = std.Random.DefaultPrng.init(0x901b_1234);
+    var eval = Evaluator{};
+    for (0..5000) |_| {
+        var hand: [7]u32 = undefined;
+        var mask: u64 = 0;
+        for (&hand) |*c| {
+            while (true) {
+                const index = rng.random().uintLessThan(u8, 52);
+                const bit = @as(u64, 1) << @intCast(index);
+                if (mask & bit != 0) continue;
+                mask |= bit;
+                c.* = try Card.fromIndex(index);
+                break;
+            }
+        }
+        var best: u32 = 0;
+        for (0..6) |omit_a| for (omit_a + 1..7) |omit_b| {
+            var five: [5]u32 = undefined;
+            var j: usize = 0;
+            for (hand, 0..) |c, i| {
+                if (i == omit_a or i == omit_b) continue;
+                five[j] = c;
+                j += 1;
+            }
+            best = @max(best, fiveCardReference(five));
+        };
+        try std.testing.expectEqual(best, eval.handStrength(hand));
+    }
 }
 
 test "wheel straight flush hidden behind suited over-kickers" {

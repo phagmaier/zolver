@@ -57,7 +57,7 @@ theory optimal) strategy. It is not a poker bot or a real-time assistant.
 - **JSON output** — per-street strategy grids + per-hand EVs for any runout
 - **Helpful error messages** — `spot.toml:3: expected integer for 'game.initial_pot', got 'abc'`
 - **Exploitability measurement** — know exactly how close to Nash equilibrium you are
-- **Convergence stopping** — halts once exploitability hits your target, or automatically when it plateaus at the precision floor (no wasted iterations)
+- **Convergence stopping** — halts at your exploitability target or iteration limit, with optional early stopping on lack of progress
 - **Physical runouts** — evaluates every turn/river runout with private-card-aware blocking
 
 ## Quick Start
@@ -172,6 +172,11 @@ next: zolver view results.json
 > `avg_ev_oop` and `avg_ev_ip` sum to `initial_pot`, including when a line ends
 > all-in before the river. Turn and river chance is conditioned on the four
 > dealt private cards: 45 cards to a flop turn, then 44 to a river.
+
+Per-hand JSON `ev` values are conditional net EVs in chips, measured from the
+solve root and normalized by compatible opponent reach at that history. They
+are `null` when that hand has no compatible opponent reach. Library consumers
+can use `extract.nodeCFVs` for raw reach-weighted counterfactual values.
 
 ### `zolver view <results.json>`
 
@@ -388,8 +393,9 @@ ip  = "JJ+, AKs, KQs, A5s-A2s:0.5"
 | `prune_zero_reach` | boolean | `false` | Skip subtrees where the opponent has zero probability mass. Safe to enable. |
 | `use_simd` | boolean | `true` | Use SIMD vectorized kernels (8-wide f32). Recommended. |
 | `check_interval` | integer | `64` | Exploitability re-check cadence after iterations 32, 64, 128. |
-| `stall_patience` | integer | `5` | Stop early after this many exploitability checks with no real improvement (the solve has hit the precision floor). `0` disables. |
+| `stall_patience` | integer | `0` | Optional early stopping after this many checks without sufficient improvement. A plateau does not prove convergence. `0` disables. |
 | `stall_rel_improvement` | float | `0.01` | Minimum fractional drop in exploitability that counts as progress for `stall_patience`. |
+| `allin_cache_max_bytes` | integer | `16777216` | Budget for optional all-in equity matrices, including construction scratch. `0` disables. Ranges with more than 65,536 hand pairs use the river sweep to bound startup work. |
 | `debug_invariants` | boolean | `true` (Debug) | Run NaN/Inf scans of regret arrays after every pass. |
 
 ### `[solver.dcfr]`
@@ -433,7 +439,7 @@ max_iterations = 1000
 target_exploitability_pct = 0.5
 num_threads = 4
 prune_zero_reach = true
-stall_patience = 5            # stop early once exploitability plateaus (0 = off)
+stall_patience = 0            # optional plateau heuristic; 0 = off
 stall_rel_improvement = 0.01
 
 [solver.dcfr]
@@ -527,11 +533,10 @@ iteration still pins ~7.9 cores and scales ~6× on 8 threads, while the adaptive
 - **Heads-up only.** Multi-way pots are not supported.
 - **Post-flop only.** The solver always begins at the flop; preflop solving is out of scope.
 - **No abstraction.** It solves the full game tree with no card bucketing — exact, but the tree can grow large with many bet sizes.
-- **~0.2% exploitability floor.** Regret/strategy storage is `f32`, which keeps
-  memory light but caps how close to Nash a solve can get (~0.2% of pot for
-  DCFR). Convergence is fast to that floor; the solver then stops automatically
-  rather than spinning. This is within the range commercial solvers are commonly
-  run to. See [`bench/README.md`](bench/README.md#convergence-characteristics-speed-vs-accuracy-floor).
+- **Finite numerical precision.** Regret/strategy storage is `f32`; achievable
+  accuracy depends on the game and numerical conditioning. There is no established
+  universal 0.2% floor. Earlier plateau measurements were affected by incorrect
+  pruning updates. See [convergence notes](bench/README.md#convergence-characteristics).
 
 ## Project Status
 
@@ -589,4 +594,3 @@ This project draws on the academic literature on CFR and its variants:
 - Brown & Sandholm (2019) — Discounted CFR
 - Tammelin (2014) — CFR+
 - Johanson et al. (2012) — Suit isomorphism for poker
-

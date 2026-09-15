@@ -130,7 +130,7 @@ pub fn strategyForHand(
     solver.averageStrategyHand(res.street, res.runoutId(), node_ref, h, out[0..node.num_children]);
 }
 
-/// Per-hand counterfactual values at a node under the average profile, in the
+/// Per-hand conditional net EV in chips from the solve root, in the
 /// node's player's *canonical* hand space. `out` must be length `N[player]`.
 /// Returns false if the node was not reached (e.g. zero-reach prune). This is
 /// the per-node EV instrument of spec §11.3 (an average-profile pass that mixes
@@ -148,7 +148,17 @@ pub fn nodeEVs(
     if (out.len < solver.N[node.player]) return ExtractError.OutTooSmall;
 
     const res = try resolveRunout(is, turn, river);
-    return solver.captureNodeValues(node.player, node_ref, res.runoutId(), out[0..solver.N[node.player]]);
+    return solver.captureNodeEVs(node.player, node_ref, res.runoutId(), out[0..solver.N[node.player]]);
+}
+
+/// Raw counterfactual values, including opponent reach and chance factors.
+/// Use nodeEVs for conditional chip EVs. Undefined conditional EVs are NaN.
+pub fn nodeCFVs(solver: *Solver, node_ref: NodeRef, turn: ?Card, river: ?Card, out: []f32) ExtractError!bool {
+    if ((game_tree.refTag(node_ref) catch unreachable) != .action) return ExtractError.NotAnActionNode;
+    const player = solver.init_state.tree.action_nodes.items[game_tree.refIndex(node_ref)].player;
+    if (out.len < solver.N[player]) return ExtractError.OutTooSmall;
+    const res = try resolveRunout(solver.init_state, turn, river);
+    return solver.captureNodeValues(player, node_ref, res.runoutId(), out[0..solver.N[player]]);
 }
 
 /// Range-local canonical hand index for a real hand under a resolved runout, or
@@ -397,7 +407,7 @@ test "strategyForHand on the canonical board matches the raw average strategy" {
     for (0..a) |ai| try testing.expectApproxEqAbs(full[ai * n + hidx], got[ai], 1e-9);
 }
 
-test "nodeEVs at the root reconstruct the average root EV" {
+test "nodeCFVs at the root reconstruct the average root EV" {
     const alloc = testing.allocator;
     const r = try symmetricRange();
     var is = try buildInit(alloc, two_tone, &r, &r);
@@ -414,7 +424,7 @@ test "nodeEVs at the root reconstruct the average root EV" {
 
     const evs = try alloc.alloc(f32, n);
     defer alloc.free(evs);
-    const found = try nodeEVs(&solver, root, null, null, evs);
+    const found = try nodeCFVs(&solver, root, null, null, evs);
     try testing.expect(found);
 
     // sum_h reach_u[h] * v[h] == averageEV(player): root reach is weight*flop-mask.
@@ -423,6 +433,59 @@ test "nodeEVs at the root reconstruct the average root EV" {
         ev += (w * m) * evs[i];
     }
     try testing.expectApproxEqAbs(solver.averageEV(player), ev, 1e-3);
+}
+
+test "conditional EV is invariant to range scale on flop turn and river" {
+    const alloc = testing.allocator;
+    const r = try symmetricRange();
+    var is = try buildInit(alloc, two_tone, &r, &r);
+    defer is.deinit();
+    var solver = try Solver.init(alloc, &is, .{});
+    defer solver.deinit();
+    solver.iterate(8);
+    const turn = is.runout_tables.canonical_turns[0].card;
+    const river = is.runout_tables.canonical_rivers[0].card;
+    for ([_]Street{ .flop, .turn, .river }) |street| {
+        const node = findActionAtStreet(&is, is.tree.root, .flop, street).?;
+        const player = is.tree.action_nodes.items[game_tree.refIndex(node)].player;
+        const t: ?Card = if (street != .flop) turn else null;
+        const rv: ?Card = if (street == .river) river else null;
+        var before: [4]f32 = undefined;
+        var after: [4]f32 = undefined;
+        try testing.expect(try nodeEVs(&solver, node, t, rv, &before));
+        for (is.ranges[1 - player].weights) |*w| w.* *= 0.5;
+        try testing.expect(try nodeEVs(&solver, node, t, rv, &after));
+        for (before, after) |a, b| {
+            if (std.math.isNan(a)) {
+                try testing.expect(std.math.isNan(b));
+            } else try testing.expectApproxEqAbs(a, b, 1e-4);
+        }
+        for (is.ranges[1 - player].weights) |*w| w.* *= 2;
+    }
+}
+
+test "batched conditional EV capture matches individual queries with threads" {
+    const alloc = testing.allocator;
+    const r = try symmetricRange();
+    var is = try buildInit(alloc, two_tone, &r, &r);
+    defer is.deinit();
+    var solver = try Solver.init(alloc, &is, .{ .num_threads = 2 });
+    defer solver.deinit();
+    solver.iterate(8);
+    const values = try alloc.alloc(f32, is.tree.action_nodes.items.len * 4);
+    defer alloc.free(values);
+    solver.captureNodeEVBatch(.{ 0, 0, 0 }, values);
+    for ([_]Street{ .flop, .turn, .river }) |street| {
+        const ref = findActionAtStreet(&is, is.tree.root, .flop, street).?;
+        const node = is.tree.action_nodes.items[game_tree.refIndex(ref)];
+        var individual: [4]f32 = undefined;
+        try testing.expect(solver.captureNodeEVs(node.player, ref, 0, &individual));
+        for (individual, values[game_tree.refIndex(ref) * 4 ..][0..4]) |a, b| {
+            if (std.math.isNan(a)) {
+                try testing.expect(std.math.isNan(b));
+            } else try testing.expectEqual(a, b);
+        }
+    }
 }
 
 test "canonicalHandIndex selects the same row strategyForHand reads" {

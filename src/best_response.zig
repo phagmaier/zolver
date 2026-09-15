@@ -22,6 +22,28 @@ pub const Exploitability = struct {
     z: f32,
 };
 
+pub const Gap = struct {
+    chips: f32,
+    pct: f32,
+    br: [2]f32,
+    z: f32,
+};
+
+/// Two best-response traversals suffice for a constant-sum game. Full profile
+/// evaluation remains available independently for reporting and invariant tests.
+pub fn exploitabilityGap(solver: *Solver) Gap {
+    const z = compatibleMass64(solver.init_state);
+    const br0 = solver.bestResponseEV64(0);
+    const br1 = solver.bestResponseEV64(1);
+    const pot: f64 = @floatFromInt(solver.init_state.tree.initial_pot);
+    const chips = if (z > 0 and pot > 0) (br0 + br1 - pot * z) / (2 * z) else std.math.nan(f64);
+    return .{ .chips = @floatCast(chips), .pct = @floatCast(chips / pot * 100), .br = .{ @floatCast(br0), @floatCast(br1) }, .z = @floatCast(z) };
+}
+
+pub fn withProfileValues(solver: *Solver, gap: Gap) Exploitability {
+    return .{ .chips = gap.chips, .pct = gap.pct, .br = gap.br, .z = gap.z, .avg_ev = .{ solver.averageEV(0), solver.averageEV(1) } };
+}
+
 /// Compute exploitability of the current average strategy.
 ///
 /// For each player u: `BR_u` is the value of best-responding while the opponent
@@ -29,30 +51,23 @@ pub const Exploitability = struct {
 /// average strategy. Because every terminal is constant-sum to `initial_pot`,
 /// `(BR_u - v_u) >= 0`, and the average gap is the exploitability.
 ///
-/// NOTE (deviation from CFR spec §10): the published formula uses the closed
-/// form `(BR_0/Z + BR_1/Z - initial_pot)/2`, which assumes `v_0 + v_1 = Z ·
-/// initial_pot`. That identity holds only when every dealt matchup reaches a
-/// terminal with full weight. Pre-river all-in terminals enumerate the remaining
-/// runouts with fixed denominators (1/49, 1/48) and reach-masking, so a matchup
-/// only "arrives" at the runouts compatible with its private cards — its weight
-/// is < 1, and `v_0 + v_1 < Z · initial_pot`. We therefore measure `v_u`
-/// directly (an average-profile pass) instead of assuming it. This reduces to
-/// the spec formula exactly when there are no pre-river all-ins.
+/// This four-pass reference measures the profile independently. Routine checks
+/// use exploitabilityGap, which relies on the tested constant-sum identity.
 pub fn exploitability(solver: *Solver) Exploitability {
-    const z = compatibleMass(solver.init_state);
-    const br0 = solver.bestResponseEV(0);
-    const br1 = solver.bestResponseEV(1);
-    const v0 = solver.averageEV(0);
-    const v1 = solver.averageEV(1);
+    const z = compatibleMass64(solver.init_state);
+    const br0 = solver.bestResponseEV64(0);
+    const br1 = solver.bestResponseEV64(1);
+    const v0 = solver.averageEV64(0);
+    const v1 = solver.averageEV64(1);
 
     const ip: f32 = @floatFromInt(solver.init_state.tree.initial_pot);
-    const chips = if (z > 0) ((br0 - v0) + (br1 - v1)) / (2.0 * z) else 0.0;
+    const chips = if (z > 0) ((br0 - v0) + (br1 - v1)) / (2.0 * z) else std.math.nan(f64);
     return .{
-        .chips = chips,
-        .pct = if (ip > 0) chips / ip * 100.0 else 0.0,
-        .br = .{ br0, br1 },
-        .avg_ev = .{ v0, v1 },
-        .z = z,
+        .chips = @floatCast(chips),
+        .pct = if (ip > 0) @floatCast(chips / ip * 100.0) else std.math.nan(f32),
+        .br = .{ @floatCast(br0), @floatCast(br1) },
+        .avg_ev = .{ @floatCast(v0), @floatCast(v1) },
+        .z = @floatCast(z),
     };
 }
 
@@ -60,6 +75,10 @@ pub fn exploitability(solver: *Solver) Exploitability {
 /// flop-masked weights (matching the root reach seeding). O(N) via the
 /// fold-kernel card-sum trick.
 pub fn compatibleMass(is: *SolverInit) f32 {
+    return @floatCast(compatibleMass64(is));
+}
+
+pub fn compatibleMass64(is: *SolverInit) f64 {
     const w0 = is.ranges[0].weights;
     const w1 = is.ranges[1].weights;
     const h0 = is.ranges[0].hands;
@@ -68,8 +87,8 @@ pub fn compatibleMass(is: *SolverInit) f32 {
     const m1 = is.mask_flop[1];
     const same = is.same_combo_idx[0];
 
-    var cardsum1 = [_]f32{0} ** 52;
-    var total1: f32 = 0;
+    var cardsum1 = [_]f64{0} ** 52;
+    var total1: f64 = 0;
     for (h1, w1, m1) |hand, w, m| {
         const r = w * m;
         total1 += r;
@@ -77,13 +96,13 @@ pub fn compatibleMass(is: *SolverInit) f32 {
         cardsum1[card.index(hand.second)] += r;
     }
 
-    var z: f32 = 0;
+    var z: f64 = 0;
     for (h0, w0, m0, same) |hand, w, m, sc| {
         const c1 = card.index(hand.first);
         const c2 = card.index(hand.second);
         var compat = total1 - cardsum1[c1] - cardsum1[c2];
         if (sc != sentinel) compat += w1[sc] * m1[sc];
-        z += (w * m) * compat;
+        z += (@as(f64, w) * m) * compat;
     }
     return z;
 }
@@ -100,11 +119,8 @@ pub const SolveResult = struct {
     stalled: bool = false,
 };
 
-/// Detects when the average strategy's exploitability has plateaued. DCFR on
-/// f32 regret/strategy storage converges fast but hits a precision floor
-/// (~0.2% of pot); past that, extra iterations only burn time — each check runs
-/// a full best-response + average pass. Feed every exploitability reading to
-/// `update`; it reports when the solve should stop.
+/// Optional progress heuristic. Temporary plateaus are possible; this detector
+/// neither proves convergence nor identifies a floating-point precision limit.
 ///
 /// "Improvement" is measured relatively against the best value seen so far, so
 /// the test is scale-free (works whether exploitability is 5% or 0.05%). After
@@ -141,25 +157,28 @@ pub const StallDetector = struct {
 /// then every `check_interval`). Logs `(t, pct, chips)` at each check.
 pub fn solve(solver: *Solver) SolveResult {
     const cfg = solver.config;
-    var last = exploitability(solver);
+    var last = exploitabilityGap(solver);
+    var checked_at = solver.t;
     var stall = StallDetector.init(cfg.stall_patience, cfg.stall_rel_improvement);
     while (solver.t < cfg.max_iterations) {
         solver.iterate(1);
         if (shouldCheck(solver.t, cfg.check_interval)) {
-            last = exploitability(solver);
+            last = exploitabilityGap(solver);
+            checked_at = solver.t;
+            if (!std.math.isFinite(last.pct)) break;
             std.log.debug("cfr t={d} exploitability={d:.4}% ({d:.5} chips)", .{ solver.t, last.pct, last.chips });
             if (last.pct <= cfg.target_exploitability_pct) {
-                return .{ .iterations = solver.t, .exploitability = last, .converged = true };
+                return .{ .iterations = solver.t, .exploitability = withProfileValues(solver, last), .converged = true };
             }
             if (stall.update(last.pct)) {
-                return .{ .iterations = solver.t, .exploitability = last, .converged = false, .stalled = true };
+                return .{ .iterations = solver.t, .exploitability = withProfileValues(solver, last), .converged = false, .stalled = true };
             }
         }
     }
-    last = exploitability(solver);
+    if (checked_at != solver.t) last = exploitabilityGap(solver);
     return .{
         .iterations = solver.t,
-        .exploitability = last,
+        .exploitability = withProfileValues(solver, last),
         .converged = last.pct <= cfg.target_exploitability_pct,
     };
 }
@@ -360,17 +379,32 @@ test "solve stops early when exploitability plateaus below no target" {
     try testing.expect(result.iterations < 128);
 }
 
-test "exploitability stays non-negative on a single-combo game" {
+test "a game with no compatible private deal is rejected" {
     const alloc = testing.allocator;
     const hands = [_]WeightedCombo{try wc(card.makeCard(9, 0), card.makeCard(8, 0))};
 
     var is = try buildInit(alloc, mono_flop, &hands, &hands);
     defer is.deinit();
 
-    var solver = try Solver.init(alloc, &is, .{});
-    defer solver.deinit();
-    solver.iterate(10);
+    try testing.expectError(error.NoCompatibleHands, Solver.init(alloc, &is, .{}));
+}
 
+test "known game value: a flopped royal flush wins the initial pot" {
+    // OOP cannot lose on any runout. IP's best action facing a bet is fold;
+    // OOP can guarantee the initial pot. This value is independent of the
+    // solver's own best-response and terminal reference implementations.
+    const alloc = testing.allocator;
+    const oop = [_]WeightedCombo{try wc(card.makeCard(9, 0), card.makeCard(8, 0))};
+    const ip = [_]WeightedCombo{try wc(card.makeCard(3, 1), card.makeCard(2, 1))};
+    var is = try buildInit(alloc, mono_flop, &oop, &ip);
+    defer is.deinit();
+    var solver = try Solver.init(alloc, &is, .{ .prune_zero_reach = true });
+    defer solver.deinit();
+    solver.iterate(128);
     const e = exploitability(&solver);
-    try testing.expect(e.chips >= -1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 10), e.avg_ev[0] / e.z, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, 0), e.avg_ev[1] / e.z, 0.002);
+    try testing.expect(e.pct < 0.02);
+    const fast = exploitabilityGap(&solver);
+    try testing.expectApproxEqAbs(e.pct, fast.pct, 1e-3);
 }

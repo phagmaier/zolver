@@ -121,13 +121,16 @@ pub const SolverInit = struct {
         }
         errdefer if (remap) |*rm| rm.deinit();
         const remap_bytes: u64 = if (remap) |*rm| rm.memoryBytes() else 0;
-        if (remap_bytes > config.max_budget_bytes) return error.StorageBudgetExceeded;
+        // Reserve all board/range/tree tables before allocating the dominant
+        // storage arrays. The later Solver check adds thread-dependent arenas.
+        const overhead = try overheadEstimate(&tree, &runout_tables, range_sizes, remap_bytes);
+        if (overhead > config.max_budget_bytes) return error.StorageBudgetExceeded;
 
         var store = try Storage.init(
             allocator,
             tree.slots_per_runout,
             runout_counts,
-            config.max_budget_bytes - remap_bytes,
+            config.max_budget_bytes - overhead,
         );
         errdefer store.deinit();
 
@@ -225,10 +228,7 @@ pub const SolverInit = struct {
     /// retained solver arrays, not only regret/strategy storage.
     pub fn memoryBytes(self: *const SolverInit) !u64 {
         var total: u64 = 0;
-        try addSliceBytes(&total, self.tree.action_nodes.items, game_tree.ActionNode);
-        try addSliceBytes(&total, self.tree.chance_nodes.items, game_tree.ChanceNode);
-        try addSliceBytes(&total, self.tree.terminal_nodes.items, game_tree.TerminalNode);
-        try addSliceBytes(&total, self.tree.edges.items, game_tree.NodeRef);
+        total += treeMemoryBytes(&self.tree);
         try addSliceBytes(&total, self.runout_tables.valid_permutations, isomorphism.SuitPermutation);
         try addSliceBytes(&total, self.runout_tables.canonical_turns, isomorphism.CanonicalTurn);
         try addSliceBytes(&total, self.runout_tables.canonical_rivers, isomorphism.CanonicalRiver);
@@ -259,6 +259,28 @@ pub const SolverInit = struct {
     }
 };
 
+fn treeMemoryBytes(tree: *const Tree) u64 {
+    return @as(u64, tree.action_nodes.capacity) * @sizeOf(game_tree.ActionNode) +
+        @as(u64, tree.chance_nodes.capacity) * @sizeOf(game_tree.ChanceNode) +
+        @as(u64, tree.terminal_nodes.capacity) * @sizeOf(game_tree.TerminalNode) +
+        @as(u64, tree.edges.capacity) * @sizeOf(game_tree.NodeRef);
+}
+
+fn overheadEstimate(tree: *const Tree, rt: *const RunoutTables, n: [2]u32, remap_bytes: u64) !u64 {
+    const hands = @as(u64, n[0]) + n[1];
+    const turns: u64 = rt.canonical_turns.len;
+    const rivers: u64 = rt.canonical_rivers.len;
+    var total = try std.math.add(u64, treeMemoryBytes(tree), remap_bytes);
+    try addSliceBytes(&total, rt.valid_permutations, isomorphism.SuitPermutation);
+    try addSliceBytes(&total, rt.canonical_turns, isomorphism.CanonicalTurn);
+    try addSliceBytes(&total, rt.canonical_rivers, isomorphism.CanonicalRiver);
+    // Owned ranges, identical-combo indices, and two card indices per hand.
+    total = try std.math.add(u64, total, try std.math.mul(u64, hands, @sizeOf(Combo) + @sizeOf(f32) + @sizeOf(u32) + 2));
+    // Bool and float masks for all streets, plus strengths and sorted orders.
+    total = try std.math.add(u64, total, try std.math.mul(u64, hands, (1 + turns + rivers) * 5 + rivers * 8));
+    return std.math.add(u64, total, (turns + rivers) * @sizeOf(f32));
+}
+
 /// All user-provided configuration needed to initialize the solver.
 pub const Config = struct {
     flop: [3]Card,
@@ -269,8 +291,8 @@ pub const Config = struct {
     raise_cap: [3]?u8,
     oop_range: []const WeightedCombo,
     ip_range: []const WeightedCombo,
-    /// Total solver-memory limit. `SolverInit` reserves remap + storage before
-    /// allocating storage; `Solver.init` also checks all retained and working data.
+    /// Total solver-memory limit. `SolverInit` reserves all representation tables
+    /// before allocating storage; `Solver.init` also checks working data and cache.
     max_budget_bytes: u64,
     /// Solve over suit-isomorphic canonical runouts and remap private-hand
     /// reaches/values per orbit member. Disable only to use the physical-runout
@@ -368,6 +390,39 @@ fn allocChanceWeights(allocator: Allocator, cards: anytype, cards_remaining: f32
 fn addSliceBytes(total: *u64, slice: anytype, comptime T: type) !void {
     const bytes = try std.math.mul(u64, @as(u64, @intCast(slice.len)), @sizeOf(T));
     total.* = try std.math.add(u64, total.*, bytes);
+}
+
+test "weighted overrides preserve an identity suit permutation" {
+    const alloc = std.testing.allocator;
+    const oop = try @import("parse.zig").parseRange(alloc, "QQ+,AA:0.5");
+    defer alloc.free(oop);
+    const ip = try @import("parse.zig").parseRange(alloc, "AKs");
+    defer alloc.free(ip);
+    var config = Config.default(.{ card.makeCard(12, 0), card.makeCard(6, 1), card.makeCard(4, 2) }, oop, ip);
+    config.effective_stack = 2;
+    config.sizings = .{ &.{}, &.{}, &.{} };
+    var state = try SolverInit.init(alloc, config);
+    defer state.deinit();
+    try std.testing.expect(state.runout_tables.valid_permutations.len >= 1);
+    config.initial_pot = 0;
+    try std.testing.expectError(error.InvalidInitialPot, SolverInit.init(alloc, config));
+}
+
+test "representation budget reserves all tables before storage allocation" {
+    const alloc = std.testing.allocator;
+    const oop = [_]WeightedCombo{.{ .combo = try Combo.init(card.makeCard(9, 0), card.makeCard(8, 0)), .weight = 1 }};
+    const ip = [_]WeightedCombo{.{ .combo = try Combo.init(card.makeCard(7, 0), card.makeCard(6, 0)), .weight = 1 }};
+    var config = Config.default(.{ card.makeCard(12, 0), card.makeCard(11, 0), card.makeCard(10, 0) }, &oop, &ip);
+    config.effective_stack = 2;
+    config.sizings = .{ &.{}, &.{}, &.{} };
+    var full = try SolverInit.init(alloc, config);
+    defer full.deinit();
+    config.max_budget_bytes = try full.memoryBytes();
+    var exact = try SolverInit.init(alloc, config);
+    defer exact.deinit();
+    try std.testing.expectEqual(config.max_budget_bytes, try exact.memoryBytes());
+    config.max_budget_bytes -= 1;
+    try std.testing.expectError(error.StorageBudgetExceeded, SolverInit.init(alloc, config));
 }
 
 test "full init and deinit cycle" {

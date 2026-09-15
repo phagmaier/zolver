@@ -35,6 +35,7 @@ pub fn buildRange(allocator: Allocator, input: []const WeightedCombo) !Range {
     var lookup = [_]?f32{null} ** (max_combo_key + 1);
 
     for (input) |entry| {
+        if (!std.math.isFinite(entry.weight) or entry.weight < 0 or entry.weight > 1) return error.InvalidWeight;
         if (entry.weight <= 0.0) continue;
         const key = entry.combo.canonicalKey();
         lookup[key] = entry.weight;
@@ -115,13 +116,12 @@ test "zero weight combos are filtered" {
     try std.testing.expectEqual(@as(u32, 0), range.N());
 }
 
-test "negative weight combos are filtered" {
+test "invalid weights are rejected at the library boundary" {
     const combo = try Combo.init(card.makeCard(12, 0), card.makeCard(11, 0));
-    const input = [_]WeightedCombo{.{ .combo = combo, .weight = -0.5 }};
-    var range = try buildRange(std.testing.allocator, &input);
-    defer range.deinit();
-
-    try std.testing.expectEqual(@as(u32, 0), range.N());
+    for ([_]f32{ -0.5, 1.5, std.math.nan(f32), std.math.inf(f32) }) |weight| {
+        const input = [_]WeightedCombo{.{ .combo = combo, .weight = weight }};
+        try std.testing.expectError(error.InvalidWeight, buildRange(std.testing.allocator, &input));
+    }
 }
 
 test "mixed zero and nonzero weights" {

@@ -311,12 +311,16 @@ fn boardMask(board: []const Card) !u64 {
 fn preservesRange(range: []const WeightedCombo, perm: SuitPermutation) !bool {
     var lookup = [_]?f32{null} ** 2652;
     for (range) |entry| {
+        if (entry.weight <= 0) continue;
         lookup[entry.combo.canonicalKey()] = entry.weight;
     }
-    for (range) |entry| {
-        const mapped = try perm.applyCombo(entry.combo);
+    // Match buildRange's last-positive-weight deduplication.
+    for (lookup, 0..) |weight, key| {
+        const original_weight = weight orelse continue;
+        const combo = try card.Combo.init(try card.fromIndex(@intCast(key / 52)), try card.fromIndex(@intCast(key % 52)));
+        const mapped = try perm.applyCombo(combo);
         const w = lookup[mapped.canonicalKey()];
-        if (w == null or w.? != entry.weight) return false;
+        if (w == null or w.? != original_weight) return false;
     }
     return true;
 }

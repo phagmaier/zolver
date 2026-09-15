@@ -124,10 +124,43 @@ Takeaways:
 - **Spin-then-park does not change retained memory** (still covered by
   `max_budget_bytes`); it only cuts idle CPU during serial phases.
 
-## Convergence characteristics (speed vs accuracy floor)
+## Convergence characteristics
 
-Measured on the `v2` cross-validation spot (As8d3c, 400bb, flop-only), DCFR,
-8 threads, ReleaseFast:
+### September 2026 solver corrections
+
+Matched comparison against `5fcec85` on this machine: Zig 0.16.0, ReleaseFast,
+`validation/zolver/v2.toml`, DCFR, 8 threads, physical runouts, pruning enabled,
+1,000 forced iterations without periodic checks. Timings are medians of three
+sequential samples per version; each process starts with a fresh solver. These
+are single-fixture measurements, not a guarantee for other ranges or trees.
+
+| Measurement | Before | Updated |
+|-------------|-------:|--------:|
+| Initialization | 53.3 ms | 226.3 ms |
+| Training, 1,000 iterations | 16,406.6 ms | 11,852.9 ms |
+| Four-pass reference exploitability evaluation | 145.8 ms | 23.6 ms |
+| Default JSON output | 510.9 ms | 12.5 ms |
+| Exploitability at 1,000 iterations | 0.2564485% | 0.0264893% |
+
+The new two-pass routine gap check takes 11.3 ms and reports 0.0264935%; the
+tiny difference from the four-pass result is floating-point reduction error.
+Re-evaluating the trained strategy with all-in caching disabled reports
+0.0264893%, agreeing with the cached reference to the shown precision.
+The lower gap reflects the combined correctness/numerical changes, not caching
+alone. Training time falls about 27%; caching trades additional initialization
+work for cheaper repeated terminal evaluation.
+
+All-in caching defaults to a 16 MiB construction budget, also constrained by the
+remaining total solver budget. It retains turn matrices when affordable, falls
+back to a flop-only matrix at smaller budgets, and uses the original river sweeps
+for wide ranges or when disabled with `solver.allin_cache_max_bytes = 0`.
+Output now collects conditional per-hand EVs in two shared profile traversals.
+
+### Historical results
+
+Historical measurements on the `v2` cross-validation spot (As8d3c, stack 400,
+pot 20), DCFR, 8 threads, ReleaseFast. These predate the pruning correction and
+must not be interpreted as a precision limit or current performance guarantee:
 
 | Solver | ~iters | wall | exploitability |
 |--------|--------|------|----------------|
@@ -135,22 +168,16 @@ Measured on the `v2` cross-validation spot (As8d3c, 400bb, flop-only), DCFR,
 | Zolver | 2240 (plateau) | 34 s | 0.201% |
 | TexasSolver | ~1000 | ~270 s | 0.047% |
 
-- **Per-iteration throughput is the strength**: Zolver reaches a given iteration
-  count ~15× faster in wall time than TexasSolver on the same tree.
-- **There is an f32 precision floor** at ~0.2% of pot for DCFR. Exploitability
-  drops fast to ~0.2% then flatlines — iterations 2000→5250 move it only
-  0.200%→0.195%. CFR+ floors higher (~1.1%) and even drifts up, confirming the
-  limit is accumulation precision (`storage.zig` regrets/strategy are f32), not
-  a bug. DCFR is the right default. f32 keeps the dominant storage light (going
-  f64 would up to double it — e.g. spot 5 from 3.6 GB); ~0.2% is within the
-  range commercial solvers are commonly run to.
-- **Stall detection stops at the floor.** Because a target below ~0.2% is
-  unreachable, `SolverConfig.stall_patience`/`stall_rel_improvement` (defaults
-  5 / 0.01) end the solve once exploitability has not improved for several
-  checks, instead of spinning to `max_iterations` running a full
-  best-response + average pass at every check. On `v2` this stops at ~2240
-  iters (0.201%) rather than the 6000 cap; a reachable target (e.g. 0.5%) is hit
-  first and never triggers a stall. Set `stall_patience = 0` to disable.
+The September 2026 review reproduced 0.25645% with pruning enabled versus
+0.02022% with pruning disabled at 1,000 iterations, both using f32 storage.
+Zero-opponent-reach branches must still update discounts and own-reach strategy
+averages. Corrected pruning preserves those updates. Compression also now updates
+each canonical subtree once per iteration and expands its values by permutation.
+
+`stall_patience` defaults to 0 (disabled). Users may opt into a progress heuristic,
+but a temporary plateau is not proof that the requested accuracy is unreachable.
+Compare algorithms by elapsed time to the same independently checked exploitability,
+not iteration throughput alone. The fixtures retain all-in actions on later streets.
 
 ## Accuracy cross-validation (vs TexasSolver)
 
@@ -177,7 +204,7 @@ coverage. All 8/8 now match. Notably the all-in branches agree tightly with
 TexasSolver (on `v2`, the all-in raise node: mean abs diff 0.004), independent
 evidence the runout enumeration is correct; residual disagreement concentrates
 at the near-indifferent root check/bet decision and shrinks as the Zolver side
-is solved closer to its floor.
+is solved to lower exploitability.
 
 ## How this harness paid off
 

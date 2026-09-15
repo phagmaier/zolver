@@ -220,7 +220,8 @@ fn runSolve(
 
     try printToStderr(io, "solving...\n");
 
-    var last_exp = best_response.exploitability(&solver);
+    var last_exp = best_response.exploitabilityGap(&solver);
+    var checked_at = solver.t;
     try printFormatted(io, "  start  exploitability: {d:.3}% ({d:.3} chips)\n", .{ last_exp.pct, last_exp.chips });
 
     const cfg = solver.config;
@@ -230,7 +231,8 @@ fn runSolve(
     while (solver.t < cfg.max_iterations) {
         solver.iterate(1);
         if (best_response.shouldCheck(solver.t, cfg.check_interval)) {
-            last_exp = best_response.exploitability(&solver);
+            last_exp = best_response.exploitabilityGap(&solver);
+            checked_at = solver.t;
             const now = std.Io.Clock.now(.awake, io);
             const elapsed_s = @as(f32, @floatFromInt(now.nanoseconds - solve_start.nanoseconds)) / @as(f32, @floatFromInt(std.time.ns_per_s));
             try printFormatted(io, "  iter {d:>6}  exploitability: {d:6.3}% ({d:.3} chips)  {d:.1}s\n", .{
@@ -245,8 +247,7 @@ fn runSolve(
                 break;
             }
             if (last_exp.pct <= cfg.target_exploitability_pct) break;
-            // Stop once exploitability has plateaued at the storage precision
-            // floor: further iterations only cost time (see StallDetector).
+            // Optional progress heuristic; a plateau does not prove convergence.
             if (stall.update(last_exp.pct)) {
                 try printFormatted(io, "  plateaued at {d:.3}% (no improvement for {d} checks); stopping short of the {d:.3}% target\n", .{
                     last_exp.pct, cfg.stall_patience, cfg.target_exploitability_pct,
@@ -256,6 +257,9 @@ fn runSolve(
         }
     }
 
+    // The iteration cap can fall between scheduled checks; report the actual
+    // final strategy, not the last checkpoint's exploitability.
+    if (checked_at != solver.t) last_exp = best_response.exploitabilityGap(&solver);
     const end_ts = std.Io.Clock.now(.awake, io);
     const total_secs = @as(f32, @floatFromInt(end_ts.nanoseconds - start_ts.nanoseconds)) / @as(f32, @floatFromInt(std.time.ns_per_s));
 
@@ -404,9 +408,9 @@ fn runExample(arena: std.mem.Allocator, io: std.Io, output_path: ?[]const u8) !v
         \\# Interval between exploitability checks after 128 iters (default: 64)
         \\check_interval = 64
         \\# Stop early once exploitability plateaus: consecutive non-improving
-        \\# checks tolerated before stopping (0 disables; default: 5), and the
+        \\# checks tolerated before stopping (0 disables; default: 0), and the
         \\# minimum fractional drop that counts as improvement (default: 0.01).
-        \\stall_patience = 5
+        \\stall_patience = 0
         \\stall_rel_improvement = 0.01
         \\
         \\[solver.dcfr]

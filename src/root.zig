@@ -15,6 +15,7 @@ pub const remap = @import("remap.zig");
 pub const init = @import("init.zig");
 pub const kernels = @import("kernels.zig");
 pub const terminal_eval = @import("terminal_eval.zig");
+pub const allin_cache = @import("allin_cache.zig");
 pub const scratch = @import("scratch.zig");
 pub const cfr = @import("cfr.zig");
 pub const best_response = @import("best_response.zig");

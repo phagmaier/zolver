@@ -10,11 +10,9 @@
 //!     specific real `(turn[, river])` card, or every canonical runout under
 //!     `all_runouts`.
 //!
-//! Strategy grids are cheap (a normalized read of stored strategy). Per-hand
-//! EVs cost one full average-profile pass per node (`captureNodeValues`), so
-//! they are computed for the bounded targeted dumps but skipped (emitted as
-//! `null`) under `all_runouts`, where the node × runout count makes per-node
-//! passes infeasible.
+//! Strategy grids are normalized reads. Conditional EVs for selected runouts
+//! are collected in two shared profile traversals, one per player. Under
+//! all_runouts only flop EVs are collected, keeping output memory bounded.
 
 const std = @import("std");
 const card = @import("card.zig");
@@ -67,8 +65,14 @@ pub fn writeJson(
     const n_max = @max(solver.N[0], solver.N[1]);
     const grid = try allocator.alloc(f32, 8 * n_max); // A ≤ 8 children per node
     defer allocator.free(grid);
-    const evs = try allocator.alloc(f32, n_max);
+    const evs = try allocator.alloc(f32, solver.init_state.tree.action_nodes.items.len * n_max);
     defer allocator.free(evs);
+    var runouts: [3]?u32 = .{ 0, null, null };
+    if (!options.all_runouts) {
+        if (options.turn) |t| runouts[1] = (try extract.resolveRunout(solver.init_state, t, null)).runoutId();
+        if (options.river) |r| runouts[2] = (try extract.resolveRunout(solver.init_state, options.turn, r)).runoutId();
+    }
+    solver.captureNodeEVBatch(runouts, evs);
 
     try w.writeAll("{\n");
     try writeMeta(w, solver, meta);
@@ -186,10 +190,7 @@ const StreetEmitter = struct {
         // Strategy grid, action-major: grid[ai*n + h].
         self.solver.averageStrategy(self.target, self.runout_id, v.ref, self.grid[0 .. a * n]);
 
-        var have_ev = false;
-        if (self.with_ev) {
-            have_ev = self.solver.captureNodeValues(player, v.ref, self.runout_id, self.evs[0..n]);
-        }
+        const node_evs = self.evs[game_tree.refIndex(v.ref) * @max(self.solver.N[0], self.solver.N[1]) ..][0..n];
 
         if (!self.first_node) try w.writeAll(",\n");
         self.first_node = false;
@@ -221,8 +222,8 @@ const StreetEmitter = struct {
                 try w.print("{d:.6}", .{self.grid[ai * n + ci]});
             }
             try w.writeAll("], \"ev\": ");
-            if (have_ev) {
-                try w.print("{d:.4}", .{self.evs[ci]});
+            if (self.with_ev and std.math.isFinite(node_evs[ci])) {
+                try w.print("{d:.4}", .{node_evs[ci]});
             } else {
                 try w.writeAll("null");
             }

@@ -155,6 +155,7 @@ pub const BuildConfig = struct {
     }
 
     fn validate(self: BuildConfig) !void {
+        if (self.initial_pot == 0) return error.InvalidInitialPot;
         if (self.effective_stack == 0) return error.InvalidEffectiveStack;
         if (self.min_bet == 0) return error.InvalidMinBet;
         if (self.range_sizes[0] == 0 or self.range_sizes[1] == 0) return error.InvalidRangeSize;

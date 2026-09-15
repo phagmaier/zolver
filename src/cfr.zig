@@ -6,6 +6,7 @@ const kernels = @import("kernels.zig");
 const terminal_eval = @import("terminal_eval.zig");
 const threading = @import("threading.zig");
 const remap = @import("remap.zig");
+const AllInCache = @import("allin_cache.zig").Cache;
 
 const Allocator = std.mem.Allocator;
 const SolverInit = init_mod.SolverInit;
@@ -20,6 +21,8 @@ pub const Algorithm = enum { dcfr, cfr_plus };
 
 pub const WalkMode = enum {
     solve,
+    /// Maintain discounts and own-reach averages without evaluating terminals.
+    zero_reach,
     evaluate,
     best_response,
     average,
@@ -31,10 +34,10 @@ pub const WalkMode = enum {
         return self == .best_response or self == .average;
     }
     fn writes(self: WalkMode) bool {
-        return self == .solve;
+        return self == .solve or self == .zero_reach;
     }
     fn parallel(self: WalkMode) bool {
-        return self == .solve or self == .best_response;
+        return self != .evaluate;
     }
 };
 
@@ -46,18 +49,15 @@ pub const SolverConfig = struct {
     max_iterations: u32 = 1000,
     target_exploitability_pct: f32 = 0.5,
     check_interval: u32 = 64,
-    /// Early-stop when the average strategy's exploitability stops improving. A
-    /// solve plateaus above `target_exploitability_pct` at the f32 storage
-    /// precision floor (~0.2% of pot for DCFR); without this guard it spins to
-    /// `max_iterations` running a costly best-response + average pass at every
-    /// check while making no measurable progress. After `stall_patience`
-    /// consecutive checks that fail to drop exploitability by at least
-    /// `stall_rel_improvement` (a fraction of the best value seen) the solve
-    /// stops. Set `stall_patience = 0` to disable and always run to the target
-    /// or `max_iterations`. See `best_response.StallDetector`.
-    stall_patience: u32 = 5,
+    /// Optional heuristic: stop after this many checks without sufficient
+    /// improvement. A plateau is not a precision bound or a convergence proof.
+    /// Disabled by default; normally run to the target or iteration limit.
+    stall_patience: u32 = 0,
     stall_rel_improvement: f32 = 0.01,
     num_threads: u32 = 0,
+    /// Optional all-in equity cache; 0 disables. Includes construction scratch
+    /// in its budget. Wide ranges use river sweeps to bound initialization work.
+    allin_cache_max_bytes: u64 = 16 * 1024 * 1024,
     /// When true, run debug invariant sweeps (NaN/Inf scan of the regret arrays)
     /// after every pass. Defaults on in Debug builds, off otherwise; the spec
     /// (§9, §13) calls for these only in debug builds. Has no effect on the
@@ -98,6 +98,8 @@ pub const WalkCtx = struct {
     use_simd: bool,
     prune_zero_reach: bool,
     algorithm: Algorithm,
+    fixed_turn: ?card.Card = null,
+    fixed_river: ?card.Card = null,
     /// If non-null, used to parallelise flop→turn chance nodes.
     pool: ?*threading.Pool = null,
     /// Worker scratches (borrowed); only accessed when `pool != null`. Indexed
@@ -106,29 +108,72 @@ pub const WalkCtx = struct {
     /// Pre-allocated `num_turns × N_max` reduction buffer for the parallel
     /// flop→turn dispatch (borrowed). Only one flop→turn section is ever live at
     /// a time — the flop descent is serial — so a single buffer is reused across
-    /// all such nodes, passes, and iterations. Empty when `pool == null`.
+    /// all such nodes, passes, and iterations. Also used by serial compressed
+    /// traversal to preserve the same reduction order as threaded traversal.
     turn_results: []f32 = &.{},
     /// Optional per-node value capture, used only by the `.average` query pass
     /// (`Solver.captureNodeValues`). The matching/copy code compiles only into
     /// the `.average` specialization of `walk`, so the `.solve` hot path is
     /// unaffected.
     capture: ?Capture = null,
+    batch: ?CaptureBatch = null,
+    allin_cache: ?*const AllInCache = null,
+
+    pub const CaptureBatch = struct {
+        runouts: [3]?u32,
+        values: []f32,
+        stride: usize,
+    };
 
     pub const Capture = struct {
         node_ref: NodeRef,
         runout_id: u32,
         out: []f32,
         found: *bool,
+        conditional: bool = false,
     };
 
     /// Copy this node's CFV vector into the capture buffer if it is the target.
     /// `node_ref` is globally unique and `runout_id` selects the runout instance,
     /// so the pair identifies a single node visit (no `street` needed).
-    fn tryCapture(self: *WalkCtx, node_ref: NodeRef, runout_id: u32, node_v: []const f32) void {
-        const cap = self.capture orelse return;
-        if (node_ref == cap.node_ref and runout_id == cap.runout_id) {
-            @memcpy(cap.out[0..node_v.len], node_v);
-            cap.found.* = true;
+    fn tryCapture(self: *WalkCtx, node_ref: NodeRef, street: Street, runout_id: u32, reach_opp: []const f32, node_v: []const f32) void {
+        if (self.capture) |cap| {
+            if (node_ref == cap.node_ref and runout_id == cap.runout_id) {
+                @memcpy(cap.out[0..node_v.len], node_v);
+                if (cap.conditional) self.normalizeValues(cap.out[0..node_v.len], reach_opp, street, runout_id);
+                cap.found.* = true;
+            }
+        }
+        if (self.batch) |batch| {
+            if (batch.runouts[street.index()] != runout_id or (game_tree.refTag(node_ref) catch unreachable) != .action) return;
+            const index = game_tree.refIndex(node_ref);
+            if (self.is.tree.action_nodes.items[index].player != self.u) return;
+            const out = batch.values[index * batch.stride ..][0..node_v.len];
+            @memcpy(out, node_v);
+            self.normalizeValues(out, reach_opp, street, runout_id);
+        }
+    }
+
+    fn normalizeValues(self: *WalkCtx, values: []f32, reach_opp: []const f32, street: Street, runout_id: u32) void {
+        var cards = [_]f64{0} ** 52;
+        var total: f64 = 0;
+        const ci = self.is.card_idx[self.opp];
+        for (reach_opp, 0..) |r, h| {
+            total += r;
+            cards[ci[2 * h]] += r;
+            cards[ci[2 * h + 1]] += r;
+        }
+        const own = self.is.card_idx[self.u];
+        const live = switch (street) {
+            .flop => self.is.mask_flop[self.u],
+            .turn => self.is.mask_turn[self.u][runout_id * self.N[self.u] ..][0..self.N[self.u]],
+            .river => self.is.mask_river[self.u][runout_id * self.N[self.u] ..][0..self.N[self.u]],
+        };
+        for (values, 0..) |*v, h| {
+            var mass = total - cards[own[2 * h]] - cards[own[2 * h + 1]];
+            const same = self.is.same_combo_idx[self.u][h];
+            if (same != std.math.maxInt(u32)) mass += reach_opp[same];
+            v.* = if (mass > 0 and live[h] != 0) @floatCast(@as(f64, v.*) / mass) else std.math.nan(f32);
         }
     }
 
@@ -144,10 +189,15 @@ pub const WalkCtx = struct {
         depth: u32,
         comptime mode: WalkMode,
     ) []f32 {
-        if (self.prune_zero_reach and sum(reach_opp) == 0.0) {
+        if (mode == .solve and self.prune_zero_reach and sum(reach_opp) == 0.0) {
+            return self.walk(node_ref, street, runout_id, reach_u, reach_opp, depth, .zero_reach);
+        }
+        if ((mode == .zero_reach and (game_tree.refTag(node_ref) catch unreachable) == .terminal) or
+            (!mode.writes() and mode != .average and self.prune_zero_reach and sum(reach_opp) == 0.0))
+        {
             const nv = self.scratch.nodeValues(depth, self.N[self.u]);
             @memset(nv, 0);
-            if (comptime mode == .average) self.tryCapture(node_ref, runout_id, nv);
+            if (comptime mode == .average) self.tryCapture(node_ref, street, runout_id, reach_opp, nv);
             return nv;
         }
         const v = switch (game_tree.refTag(node_ref) catch unreachable) {
@@ -162,7 +212,7 @@ pub const WalkCtx = struct {
             .chance => self.walkChance(node_ref, street, runout_id, reach_u, reach_opp, depth, mode),
             .action => self.walkAction(node_ref, street, runout_id, reach_u, reach_opp, depth, mode),
         };
-        if (comptime mode == .average) self.tryCapture(node_ref, runout_id, v);
+        if (comptime mode == .average) self.tryCapture(node_ref, street, runout_id, reach_opp, v);
         return v;
     }
 
@@ -178,6 +228,7 @@ pub const WalkCtx = struct {
     ) []f32 {
         return switch (mode) {
             .solve => self.walk(node_ref, street, runout_id, reach_u, reach_opp, depth, .solve),
+            .zero_reach => self.walk(node_ref, street, runout_id, reach_u, reach_opp, depth, .zero_reach),
             .best_response => self.walk(node_ref, street, runout_id, reach_u, reach_opp, depth, .best_response),
             .evaluate => self.walk(node_ref, street, runout_id, reach_u, reach_opp, depth, .evaluate),
             .average => self.walk(node_ref, street, runout_id, reach_u, reach_opp, depth, .average),
@@ -275,6 +326,7 @@ pub const WalkCtx = struct {
                         }
                     },
                 }
+                if (self.is.compress_suits) self.symmetrizeRegrets(regret_block, n_act, a);
             }
             return node_v;
         } else {
@@ -318,37 +370,9 @@ pub const WalkCtx = struct {
         switch (next_street) {
             .turn => {
                 if (self.is.compress_suits) {
-                    // One task owns one canonical turn and all of its physical
-                    // members. This keeps every canonical turn/river storage
-                    // block single-writer while distributing independent turns.
-                    if (comptime mode.parallel()) {
-                        if (self.pool) |pool| {
-                            self.walkChanceTurnRemappedParallel(node.child, n_u, n_opp, reach_u, reach_opp, node_v, depth, mode, pool);
-                            return node_v;
-                        }
-                    }
-                    const rm = &self.is.remap.?;
-                    for (self.is.runout_tables.canonical_turns, 0..) |_, t| {
-                        const cr: u32 = @intCast(t);
-                        const cmu = self.is.mask_turn[self.u][cr * n_u ..][0..n_u];
-                        const cmo = self.is.mask_turn[self.opp][cr * n_opp ..][0..n_opp];
-                        for (rm.turn_members[t]) |member| {
-                            self.descendChanceRemapped(
-                                node.child,
-                                .turn,
-                                cr,
-                                cmu,
-                                cmo,
-                                rm.weight_turn,
-                                rm.hand_perms[member.perm_index],
-                                reach_u,
-                                reach_opp,
-                                node_v,
-                                depth,
-                                mode,
-                            );
-                        }
-                    }
+                    // Use identical per-turn partial sums with or without a
+                    // pool, so thread count cannot change floating-point order.
+                    self.walkChanceTurnRemappedParallel(node.child, n_u, n_opp, reach_u, reach_opp, node_v, depth, mode, if (mode.parallel()) self.pool else null);
                     return node_v;
                 }
                 if (comptime mode.parallel()) {
@@ -386,22 +410,20 @@ pub const WalkCtx = struct {
                         const full = turn.first_river + r;
                         const cmu = self.is.mask_river[self.u][full * n_u ..][0..n_u];
                         const cmo = self.is.mask_river[self.opp][full * n_opp ..][0..n_opp];
-                        for (rm.river_members[full]) |member| {
-                            self.descendChanceRemapped(
-                                node.child,
-                                .river,
-                                full,
-                                cmu,
-                                cmo,
-                                rm.weight_river,
-                                rm.hand_perms[member.perm_index],
-                                reach_u,
-                                reach_opp,
-                                node_v,
-                                depth,
-                                mode,
-                            );
-                        }
+                        self.descendChanceOrbit(
+                            node.child,
+                            .river,
+                            full,
+                            cmu,
+                            cmo,
+                            rm.weight_river,
+                            rm.river_members[full],
+                            reach_u,
+                            reach_opp,
+                            node_v,
+                            depth,
+                            mode,
+                        );
                     }
                     return node_v;
                 }
@@ -463,22 +485,11 @@ pub const WalkCtx = struct {
         }
     }
 
-    /// Compressed-runout descent for one physical orbit member. The canonical
-    /// subtree at `canonical_runout` uses canonical masks/showdown/storage, so we
-    /// permute the parent reaches into canonical hand order on the way in and
-    /// permute the returned CFVs back to physical order on the way out.
-    ///
-    /// `cmask_u`/`cmask_opp` are the *canonical* runout's blocking masks. Because
-    /// a valid permutation carries a hand live on the member board onto a hand
-    /// live on the canonical board, applying the canonical mask to the permuted
-    /// reach equals applying the member's physical mask to the original reach — so
-    /// no per-member physical mask array is needed. `weight` is the plain physical
-    /// chance probability (1/45 or 1/44), not multiplicity-scaled.
-    ///
-    /// With an identity permutation (rainbow: every orbit is size one) the gathers
-    /// are pure copies and the arithmetic is bit-identical to `descendChance` with
-    /// the SIMD kernels, keeping compressed==physical exact on rainbow flops.
-    fn descendChanceRemapped(
+    /// Evaluate and update a canonical subtree once, then expand its CFVs to
+    /// every physical orbit member. Only board/range-preserving suit groups are
+    /// used, so parent reaches are symmetric. The child receives a single-card
+    /// probability (1/45 or 1/44); permutations account for private-card blocking.
+    fn descendChanceOrbit(
         self: *WalkCtx,
         child_ref: NodeRef,
         child_street: Street,
@@ -486,7 +497,7 @@ pub const WalkCtx = struct {
         cmask_u: []const f32,
         cmask_opp: []const f32,
         weight: f32,
-        hp: remap.HandPerm,
+        members: []const remap.Member,
         reach_u: []const f32,
         reach_opp: []const f32,
         node_v: []f32,
@@ -498,22 +509,67 @@ pub const WalkCtx = struct {
         const child_ru = self.scratch.reachU(depth + 1, n_u);
         const child_ro = self.scratch.reachOpp(depth + 1, n_opp);
 
-        // Gather parent reach into canonical hand order and apply the canonical
-        // mask (and chance weight on the opponent side), fused into one pass.
-        const fu = hp.from_canon[self.u];
-        const fo = hp.from_canon[self.opp];
-        for (0..n_u) |j| child_ru[j] = reach_u[fu[j]] * cmask_u[j];
-        for (0..n_opp) |j| child_ro[j] = reach_opp[fo[j]] * cmask_opp[j] * weight;
+        // Ranges and the parent strategy are invariant under the parent board's
+        // suit group. Evaluate its canonical child exactly once, with a SINGLE
+        // physical card's chance weight. In particular, do not discount/update
+        // shared regrets once per orbit member. Expand the returned vector by
+        // hand permutation, not by multiplying every hand by the orbit size.
+        for (0..n_u) |j| child_ru[j] = reach_u[j] * cmask_u[j];
+        for (0..n_opp) |j| child_ro[j] = reach_opp[j] * cmask_opp[j] * weight;
 
+        const old_turn = self.fixed_turn;
+        const old_river = self.fixed_river;
+        defer {
+            self.fixed_turn = old_turn;
+            self.fixed_river = old_river;
+        }
+        if (child_street == .turn) self.fixed_turn = self.is.runout_tables.canonical_turns[canonical_runout].card;
+        if (child_street == .river) self.fixed_river = self.is.runout_tables.canonical_rivers[canonical_runout].card;
         const child_v = self.walk(child_ref, child_street, canonical_runout, child_ru, child_ro, depth + 1, mode);
 
         // Fold the canonical CFV back into physical hand order: for physical hand
         // h, its canonical image is tu[h], and the physical mask for h equals the
         // canonical mask at tu[h].
-        const tu = hp.to_canon[self.u];
-        for (0..n_u) |h| {
-            const g = tu[h];
-            node_v[h] += cmask_u[g] * child_v[g];
+        for (members) |member| {
+            const tu = self.is.remap.?.hand_perms[member.perm_index].to_canon[self.u];
+            for (0..n_u) |h| {
+                const g = tu[h];
+                node_v[h] += cmask_u[g] * child_v[g];
+            }
+        }
+    }
+
+    /// Keep the strategy exactly invariant under the current board's stabilizer.
+    /// Mathematically equivalent hands receive identical regrets; projecting
+    /// roundoff back onto that invariant prevents canonical reuse from amplifying
+    /// arbitrary suit-dependent differences over many iterations.
+    fn symmetrizeRegrets(self: *WalkCtx, regrets: []f32, n: u32, actions: u32) void {
+        const rm = &self.is.remap.?;
+        var maps: [24][]const u32 = undefined;
+        var count: usize = 0;
+        for (rm.perms, rm.hand_perms) |perm, hp| {
+            if (self.fixed_turn) |c| if (perm.applyCard(c) != c) continue;
+            if (self.fixed_river) |c| if (perm.applyCard(c) != c) continue;
+            maps[count] = hp.to_canon[self.u];
+            count += 1;
+        }
+        if (count <= 1) return;
+        for (0..n) |h| {
+            var representative = true;
+            for (maps[0..count]) |map| {
+                if (map[h] < h) {
+                    representative = false;
+                    break;
+                }
+            }
+            if (!representative) continue;
+            for (0..actions) |a| {
+                const base = a * n;
+                var total: f64 = 0;
+                for (maps[0..count]) |map| total += regrets[base + map[h]];
+                const mean: f32 = @floatCast(total / @as(f64, @floatFromInt(count)));
+                for (maps[0..count]) |map| regrets[base + map[h]] = mean;
+            }
         }
     }
 
@@ -625,8 +681,8 @@ pub const WalkCtx = struct {
     }
 
     /// Parallel compressed flop→turn dispatch. Each task owns an entire
-    /// canonical turn orbit so its member visits can update that canonical
-    /// subtree without races; canonical-order reduction remains deterministic.
+    /// canonical turn orbit and updates its subtree once. Canonical-order
+    /// reduction remains deterministic regardless of task scheduling.
     const CompressedTurnTask = struct {
         wc: *WalkCtx,
         child_ref: NodeRef,
@@ -643,47 +699,30 @@ pub const WalkCtx = struct {
         fn process(ctx_ptr: *anyopaque, t: u32, worker_id: u32) void {
             const ctx: *CompressedTurnTask = @ptrCast(@alignCast(ctx_ptr));
             var worker_ctx = ctx.wc.*;
-            worker_ctx.scratch = &ctx.worker_scratches[worker_id];
+            worker_ctx.scratch = if (ctx.wc.pool != null) &ctx.worker_scratches[worker_id] else ctx.wc.scratch;
 
             const result_slot = ctx.results[t * ctx.n_u ..][0..ctx.n_u];
             @memset(result_slot, 0);
             const m_u = worker_ctx.is.mask_turn[worker_ctx.u][t * ctx.n_u ..][0..ctx.n_u];
             const m_opp = worker_ctx.is.mask_turn[worker_ctx.opp][t * ctx.n_opp ..][0..ctx.n_opp];
-            for (ctx.rm.turn_members[t]) |member| {
-                // Pool callbacks are runtime functions, while the recursive
-                // walk is specialized by mode. The task is only created for
-                // solve/BR modes; dispatch back to the matching specialization.
-                switch (ctx.mode) {
-                    .solve => worker_ctx.descendChanceRemapped(
-                        ctx.child_ref,
-                        .turn,
-                        t,
-                        m_u,
-                        m_opp,
-                        ctx.rm.weight_turn,
-                        ctx.rm.hand_perms[member.perm_index],
-                        ctx.parent_ru,
-                        ctx.parent_ro,
-                        result_slot,
-                        ctx.depth,
-                        .solve,
-                    ),
-                    .best_response => worker_ctx.descendChanceRemapped(
-                        ctx.child_ref,
-                        .turn,
-                        t,
-                        m_u,
-                        m_opp,
-                        ctx.rm.weight_turn,
-                        ctx.rm.hand_perms[member.perm_index],
-                        ctx.parent_ru,
-                        ctx.parent_ro,
-                        result_slot,
-                        ctx.depth,
-                        .best_response,
-                    ),
-                    .evaluate, .average => unreachable,
-                }
+            // Pool callbacks are runtime functions, while the recursive
+            // walk is specialized by mode; dispatch back to the matching
+            // specialization for both serial and threaded orbit evaluation.
+            switch (ctx.mode) {
+                inline .solve, .zero_reach, .best_response, .average, .evaluate => |mode| worker_ctx.descendChanceOrbit(
+                    ctx.child_ref,
+                    .turn,
+                    t,
+                    m_u,
+                    m_opp,
+                    ctx.rm.weight_turn,
+                    ctx.rm.turn_members[t],
+                    ctx.parent_ru,
+                    ctx.parent_ro,
+                    result_slot,
+                    ctx.depth,
+                    mode,
+                ),
             }
         }
     };
@@ -698,7 +737,7 @@ pub const WalkCtx = struct {
         node_v: []f32,
         depth: u32,
         comptime mode: WalkMode,
-        pool: *threading.Pool,
+        pool: ?*threading.Pool,
     ) void {
         const num_turns: u32 = @intCast(self.is.runout_tables.canonical_turns.len);
         const needed: usize = @as(usize, num_turns) * n_u;
@@ -718,7 +757,11 @@ pub const WalkCtx = struct {
             .worker_scratches = self.worker_scratches,
             .rm = &self.is.remap.?,
         };
-        pool.forkJoin(CompressedTurnTask.process, @ptrCast(&task), num_turns);
+        if (pool) |p| {
+            p.forkJoin(CompressedTurnTask.process, @ptrCast(&task), num_turns);
+        } else {
+            for (0..num_turns) |t| CompressedTurnTask.process(&task, @intCast(t), 0);
+        }
 
         for (0..num_turns) |t| {
             const r = results[t * n_u ..][0..n_u];
@@ -837,6 +880,11 @@ pub const WalkCtx = struct {
                 );
             },
             .showdown => {
+                if (street != .river and !self.probe) {
+                    if (self.allin_cache) |cache| {
+                        if (cache.evaluate(u, if (street == .turn) runout_id else null, reach_opp, term.pot, is.tree.initial_pot, node_v)) return node_v;
+                    }
+                }
                 const c = if (self.probe)
                     ShowdownCoeffs{ .win = ip_f, .loss = -ip_f, .tie = ip_f }
                 else
@@ -1003,12 +1051,20 @@ pub const Solver = struct {
     pool: ?threading.Pool,
     worker_scratches: std.ArrayList(Scratch),
     /// `num_turns × N_max` reduction buffer for parallel flop→turn dispatch.
-    /// Allocated once (empty when running serially); see `WalkCtx.turn_results`.
+    /// Allocated once for serial and threaded runs; see `WalkCtx.turn_results`.
     turn_results: []f32,
+
+    allin_cache: ?AllInCache,
 
     /// Primary dynamically allocated working memory, excluding native thread
     /// stacks and small thread-pool bookkeeping.
     pub fn workingMemoryEstimate(init_state: *const SolverInit, config: SolverConfig) !u64 {
+        const base = try workingMemoryWithoutCache(init_state, config);
+        const available = init_state.max_budget_bytes -| (try init_state.memoryBytes()) -| base;
+        return base + AllInCache.plan(init_state, @min(config.allin_cache_max_bytes, available)).retained;
+    }
+
+    fn workingMemoryWithoutCache(init_state: *const SolverInit, config: SolverConfig) !u64 {
         const n_max = @max(init_state.ranges[0].N(), init_state.ranges[1].N());
         const scratch_bytes = try Scratch.memoryBytesForTree(&init_state.tree, n_max);
         const scratch_count: u64 = if (config.num_threads > 0)
@@ -1024,6 +1080,17 @@ pub const Solver = struct {
 
     pub fn init(allocator: Allocator, init_state: *SolverInit, config: SolverConfig) !Solver {
         try config.validate();
+        var compatible = false;
+        outer: for (init_state.ranges[0].hands, init_state.mask_flop[0]) |h0, m0| {
+            if (m0 == 0) continue;
+            for (init_state.ranges[1].hands, init_state.mask_flop[1]) |h1, m1| {
+                if (m1 != 0 and h0.cardMask() & h1.cardMask() == 0) {
+                    compatible = true;
+                    break :outer;
+                }
+            }
+        }
+        if (!compatible) return error.NoCompatibleHands;
         const n0 = init_state.ranges[0].N();
         const n1 = init_state.ranges[1].N();
         const n_max = @max(n0, n1);
@@ -1062,6 +1129,10 @@ pub const Solver = struct {
         }
 
         const turn_results = try allocator.alloc(f32, @as(usize, init_state.runout_tables.canonical_turns.len) * n_max);
+        errdefer allocator.free(turn_results);
+        const available = init_state.max_budget_bytes -| init_bytes -| (try workingMemoryWithoutCache(init_state, config));
+        var cache_scratch = scratch;
+        const allin_cache = try AllInCache.init(allocator, init_state, @min(config.allin_cache_max_bytes, available), &cache_scratch);
 
         return .{
             .init_state = init_state,
@@ -1081,11 +1152,13 @@ pub const Solver = struct {
             .pool = pool,
             .worker_scratches = worker_scratches,
             .turn_results = turn_results,
+            .allin_cache = allin_cache,
         };
     }
 
     pub fn deinit(self: *Solver) void {
         if (self.pool) |*p| p.deinit();
+        if (self.allin_cache) |*cache| cache.deinit();
         for (self.worker_scratches.items) |*ws| ws.deinit();
         self.worker_scratches.deinit(self.allocator);
         if (self.turn_results.len > 0) self.allocator.free(self.turn_results);
@@ -1094,6 +1167,7 @@ pub const Solver = struct {
 
     pub fn workingMemoryBytes(self: *const Solver) u64 {
         var total: u64 = self.scratch.memoryBytes();
+        if (self.allin_cache) |cache| total += cache.memoryBytes();
         for (self.worker_scratches.items) |scratch| total += scratch.memoryBytes();
         total += @as(u64, @intCast(self.turn_results.len)) * @sizeOf(f32);
         total += @as(u64, @intCast(self.worker_scratches.items.len)) * @sizeOf(Scratch);
@@ -1129,26 +1203,34 @@ pub const Solver = struct {
         for (s.regrets_river) |r| std.debug.assert(std.math.isFinite(r));
     }
 
-    fn rootValue(self: *Solver, u: u8, comptime mode: WalkMode) f32 {
+    fn rootValue(self: *Solver, u: u8, comptime mode: WalkMode) f64 {
         self.setPassFactors(u);
         var ctx = self.makeCtx(&self.scratch);
         const root = self.init_state.tree.root;
         const ru, const ro = self.initRootReaches(u);
         const v = ctx.walk(root, .flop, 0, ru, ro, 0, mode);
-        var ev: f32 = 0;
-        for (ru, v) |r, val| ev += r * val;
+        var ev: f64 = 0;
+        for (ru, v) |r, val| ev += @as(f64, r) * @as(f64, val);
         return ev;
     }
 
     pub fn rootEV(self: *Solver, u: u8) f32 {
-        return self.rootValue(u, .evaluate);
+        return @floatCast(self.rootValue(u, .evaluate));
     }
 
     pub fn averageEV(self: *Solver, u: u8) f32 {
-        return self.rootValue(u, .average);
+        return @floatCast(self.rootValue(u, .average));
     }
 
     pub fn bestResponseEV(self: *Solver, u: u8) f32 {
+        return @floatCast(self.rootValue(u, .best_response));
+    }
+
+    pub fn averageEV64(self: *Solver, u: u8) f64 {
+        return self.rootValue(u, .average);
+    }
+
+    pub fn bestResponseEV64(self: *Solver, u: u8) f64 {
         return self.rootValue(u, .best_response);
     }
 
@@ -1169,14 +1251,40 @@ pub const Solver = struct {
     /// true if the node was reached during the walk (false ⇒ unreachable, e.g.
     /// inconsistent runout for the node's street, or a zero-reach prune).
     pub fn captureNodeValues(self: *Solver, u: u8, node_ref: NodeRef, runout_id: u32, out: []f32) bool {
+        return self.captureValues(u, node_ref, runout_id, out, false);
+    }
+
+    /// Conditional net EV in chips, measured from the solve root. NaN denotes
+    /// a hand with zero compatible opponent reach (serialized as JSON null).
+    pub fn captureNodeEVs(self: *Solver, u: u8, node_ref: NodeRef, runout_id: u32, out: []f32) bool {
+        return self.captureValues(u, node_ref, runout_id, out, true);
+    }
+
+    fn captureValues(self: *Solver, u: u8, node_ref: NodeRef, runout_id: u32, out: []f32, conditional: bool) bool {
         self.setPassFactors(u);
         var ctx = self.makeCtx(&self.scratch);
         var found = false;
-        ctx.capture = .{ .node_ref = node_ref, .runout_id = runout_id, .out = out, .found = &found };
+        ctx.capture = .{ .node_ref = node_ref, .runout_id = runout_id, .out = out, .found = &found, .conditional = conditional };
         const root = self.init_state.tree.root;
         const ru, const ro = self.initRootReaches(u);
         _ = ctx.walk(root, .flop, 0, ru, ro, 0, .average);
         return found;
+    }
+
+    /// Collect all acting-player conditional EVs for selected runouts with two
+    /// traversals total. Layout: action-node index × max(N0,N1) + hand index.
+    /// Each chance task owns distinct node/runout output slots.
+    pub fn captureNodeEVBatch(self: *Solver, runouts: [3]?u32, out: []f32) void {
+        const stride = @max(self.N[0], self.N[1]);
+        std.debug.assert(out.len == self.init_state.tree.action_nodes.items.len * stride);
+        @memset(out, std.math.nan(f32));
+        for (0..2) |player| {
+            self.setPassFactors(@intCast(player));
+            var ctx = self.makeCtx(&self.scratch);
+            ctx.batch = .{ .runouts = runouts, .values = out, .stride = stride };
+            const ru, const ro = self.initRootReaches(@intCast(player));
+            _ = ctx.walk(self.init_state.tree.root, .flop, 0, ru, ro, 0, .average);
+        }
     }
 
     fn makeCtx(self: *Solver, scratch: *Scratch) WalkCtx {
@@ -1201,31 +1309,31 @@ pub const Solver = struct {
             .pool = pool_ptr,
             .worker_scratches = self.worker_scratches.items,
             .turn_results = self.turn_results,
+            .allin_cache = if (self.allin_cache) |*cache| cache else null,
         };
     }
 
     fn setPassFactors(self: *Solver, u: u8) void {
         self.u = u;
         self.opp = 1 - u;
-        const tf: f32 = @floatFromInt(self.t);
-        const ta = std.math.pow(f32, tf, self.config.dcfr.alpha);
-        self.pos_discount = ta / (ta + 1.0);
-        const tb = std.math.pow(f32, tf, self.config.dcfr.beta);
-        self.neg_discount = tb / (tb + 1.0);
-        self.strat_scale = std.math.pow(f32, tf / (tf + 1.0), self.config.dcfr.gamma);
+        const tf: f64 = @floatFromInt(self.t);
+        // Reciprocal powers avoid inf/inf for valid large exponents.
+        self.pos_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, tf, -@as(f64, self.config.dcfr.alpha))));
+        self.neg_discount = @floatCast(1.0 / (1.0 + std.math.pow(f64, tf, -@as(f64, self.config.dcfr.beta))));
+        self.strat_scale = @floatCast(std.math.pow(f64, tf / (tf + 1.0), self.config.dcfr.gamma));
         if (self.t == 0) {
             self.avg_history_scale = 0;
             self.avg_current_scale = 0;
             return;
         }
-        const previous: f32 = @floatFromInt(self.t - 1);
-        self.avg_current_scale = 1.0 / tf;
-        self.avg_history_scale = switch (self.config.algorithm) {
+        const previous: f64 = @floatFromInt(self.t - 1);
+        self.avg_current_scale = @floatCast(1.0 / tf);
+        self.avg_history_scale = @floatCast(switch (self.config.algorithm) {
             // DCFR: S_t = d_t S_(t-1) + x_t, stored as S_t / t.
             .dcfr => self.strat_scale * previous / tf,
             // CFR+: S_t = S_(t-1) + t x_t, stored as S_t / t².
             .cfr_plus => (previous / tf) * (previous / tf),
-        };
+        });
     }
 
     fn initRootReaches(self: *Solver, u: u8) struct { []f32, []f32 } {
@@ -1333,6 +1441,20 @@ test "fold utility conventions (signs and magnitudes)" {
     try testing.expectEqual(@as(f32, -6.0), foldUtility(initial_pot, term, 0));
     try testing.expectEqual(@as(f32, 16.0), foldUtility(initial_pot, term, 1));
     try testing.expectEqual(@as(f32, 10.0), foldUtility(initial_pot, term, 0) + foldUtility(initial_pot, term, 1));
+}
+
+test "large valid discount exponents remain finite" {
+    const alloc = testing.allocator;
+    const oop = [_]WeightedCombo{try wc(spade(9), spade(8))};
+    const ip = [_]WeightedCombo{try wc(spade(7), spade(6))};
+    var is = try buildInit(alloc, mono_flop, &oop, &ip);
+    defer is.deinit();
+    var solver = try Solver.init(alloc, &is, .{ .dcfr = .{ .alpha = 1000, .beta = 1000, .gamma = 1000 } });
+    defer solver.deinit();
+    solver.iterate(3);
+    try testing.expect(std.math.isFinite(solver.pos_discount));
+    try testing.expect(std.math.isFinite(solver.neg_discount));
+    try testing.expect(std.math.isFinite(solver.rootEV(0)));
 }
 
 test "showdown coefficients (win/loss/tie and constant-sum)" {
@@ -1452,6 +1574,26 @@ test "zero-reach pruning produces the same root EV as the full walk" {
     const ev_pruned = pruned.rootEV(0);
 
     try testing.expect(@abs(ev_full - ev_pruned) < 1e-3);
+}
+
+test "zero-reach pruning preserves trained regrets and averages for both algorithms" {
+    const alloc = testing.allocator;
+    const r = try monoSymRanges();
+    for ([_]bool{ false, true }) |compressed| {
+        for ([_]Algorithm{ .dcfr, .cfr_plus }) |algorithm| {
+            var is_full = try buildInitC(alloc, mono_flop, &r[0], &r[1], compressed);
+            defer is_full.deinit();
+            var full = try Solver.init(alloc, &is_full, .{ .algorithm = algorithm });
+            defer full.deinit();
+            var is_pruned = try buildInitC(alloc, mono_flop, &r[0], &r[1], compressed);
+            defer is_pruned.deinit();
+            var pruned = try Solver.init(alloc, &is_pruned, .{ .algorithm = algorithm, .prune_zero_reach = true });
+            defer pruned.deinit();
+            full.iterate(12);
+            pruned.iterate(12);
+            try expectIdenticalStorage(&is_full, &is_pruned);
+        }
+    }
 }
 
 test "parallel solve matches serial solve" {
@@ -1685,12 +1827,11 @@ test "compressed threaded solve matches serial values and remains constant-sum" 
     defer parallel.deinit();
     parallel.iterate(4);
 
-    // Task-local reductions can round differently from the serial member walk,
-    // but they must evaluate the same physical game and preserve chance mass.
-    try testing.expectApproxEqAbs(serial.rootEV(0), parallel.rootEV(0), 1e-3);
-    try testing.expectApproxEqAbs(serial.rootEV(1), parallel.rootEV(1), 1e-3);
-    try testing.expectApproxEqAbs(serial.bestResponseEV(0), parallel.bestResponseEV(0), 1e-3);
-    try testing.expectApproxEqAbs(serial.bestResponseEV(1), parallel.bestResponseEV(1), 1e-3);
+    try expectIdenticalStorage(&is_serial, &is_parallel);
+    try testing.expectEqual(serial.rootEV(0), parallel.rootEV(0));
+    try testing.expectEqual(serial.rootEV(1), parallel.rootEV(1));
+    try testing.expectEqual(serial.bestResponseEV(0), parallel.bestResponseEV(0));
+    try testing.expectEqual(serial.bestResponseEV(1), parallel.bestResponseEV(1));
     try checkConstantSum(&parallel, 1e-2);
 }
 
@@ -1720,13 +1861,12 @@ test "compressed monotone solve stays constant-sum and tracks the oracle" {
     try testing.expect(sc.bestResponseEV(0) - sc.averageEV(0) >= -1e-2);
     try testing.expect(sc.bestResponseEV(1) - sc.averageEV(1) >= -1e-2);
 
-    // Both are valid DCFR on the same game and head to the same equilibrium.
-    // Their trajectories differ (a canonical infoset is discounted once per orbit
-    // member per iteration, so per-iteration values are not bit-equal — see the
-    // plan), so this is only a gross-divergence sanity bound, not an exact match;
-    // the exact remap check lives in the uniform-profile parity tests above.
-    try testing.expectApproxEqAbs(su.averageEV(0), sc.averageEV(0), 1.0);
-    try testing.expectApproxEqAbs(su.averageEV(1), sc.averageEV(1), 1.0);
+    // Canonical nodes now receive one update per iteration. Both traversals
+    // must track the same learning process, allowing only summation roundoff.
+    try testing.expectApproxEqAbs(su.averageEV(0), sc.averageEV(0), 1e-3);
+    try testing.expectApproxEqAbs(su.averageEV(1), sc.averageEV(1), 1e-3);
+    try testing.expectApproxEqAbs(su.bestResponseEV(0), sc.bestResponseEV(0), 1e-3);
+    try testing.expectApproxEqAbs(su.bestResponseEV(1), sc.bestResponseEV(1), 1e-3);
 }
 
 test "compression reduces total solver memory on symmetric boards" {
@@ -1742,4 +1882,77 @@ test "compression reduces total solver memory on symmetric boards" {
     try testing.expect(is_c.runout_tables.canonical_turns.len < is_u.runout_tables.canonical_turns.len);
     try testing.expect(is_c.runout_tables.canonical_rivers.len < is_u.runout_tables.canonical_rivers.len);
     try testing.expect(try is_c.memoryBytes() < try is_u.memoryBytes());
+}
+
+test "review convergence regression: compressed and physical mixed-strength ranges" {
+    const alloc = testing.allocator;
+    var oop: [9]WeightedCombo = undefined;
+    var ip: [9]WeightedCombo = undefined;
+    const op = [_][2]u32{ .{ 12, 11 }, .{ 8, 7 }, .{ 1, 0 } };
+    const pp = [_][2]u32{ .{ 12, 10 }, .{ 9, 8 }, .{ 3, 2 } };
+    for (0..3) |i| for (1..4) |s| {
+        oop[i * 3 + s - 1] = try wc(card.makeCard(op[i][0], @intCast(s)), card.makeCard(op[i][1], @intCast(s)));
+        ip[i * 3 + s - 1] = try wc(card.makeCard(pp[i][0], @intCast(s)), card.makeCard(pp[i][1], @intCast(s)));
+    };
+    const flop = [3]card.Card{ spade(12), spade(6), spade(4) };
+    var physical = try buildInitC(alloc, flop, &oop, &ip, false);
+    defer physical.deinit();
+    var compressed = try buildInitC(alloc, flop, &oop, &ip, true);
+    defer compressed.deinit();
+    var a = try Solver.init(alloc, &physical, .{ .prune_zero_reach = true });
+    defer a.deinit();
+    var b = try Solver.init(alloc, &compressed, .{ .prune_zero_reach = true, .num_threads = 2 });
+    defer b.deinit();
+    a.iterate(128);
+    b.iterate(128);
+    const br = @import("best_response.zig");
+    const ea = br.exploitability(&a);
+    const eb = br.exploitability(&b);
+    try testing.expect(ea.pct < 0.3);
+    try testing.expect(eb.pct < 0.3);
+    // Projection preserves suit symmetry; physical f32 traversal can break
+    // ties differently. Compare achieved accuracy, not identical trajectories.
+    try testing.expectApproxEqAbs(ea.pct, eb.pct, 0.03);
+    try testing.expectApproxEqAbs(ea.avg_ev[0] / ea.z, eb.avg_ev[0] / eb.z, 0.001);
+}
+
+test "all-in equity cache matches river sweeps and supports a flop-only budget" {
+    const alloc = testing.allocator;
+    const r = try monoSymRanges();
+    for ([_]bool{ false, true }) |compressed| {
+        // Equal-rank ranges cover ties and identical-combo exclusion; distinct
+        // ranks also exercise nontrivial win/loss equities for both players.
+        for ([_][3]WeightedCombo{ r[0], r[1] }) |opponent| {
+            var is = try buildInitC(alloc, mono_flop, &r[0], &opponent, compressed);
+            defer is.deinit();
+            var reference = try Solver.init(alloc, &is, .{ .allin_cache_max_bytes = 0 });
+            defer reference.deinit();
+            for ([_]u64{ 16 * 9, 1024 * 1024 }) |budget| {
+                var cached = try Solver.init(alloc, &is, .{ .allin_cache_max_bytes = budget });
+                defer cached.deinit();
+                try testing.expect(cached.allin_cache != null);
+                try testing.expectEqual(budget == 16 * 9, cached.allin_cache.?.boards == 1);
+                for (0..2) |player| {
+                    cached.setPassFactors(@intCast(player));
+                    reference.setPassFactors(@intCast(player));
+                    var cc = cached.makeCtx(&cached.scratch);
+                    var rc = reference.makeCtx(&reference.scratch);
+                    for ([_]Street{ .flop, .turn }) |street| {
+                        for ([_]u32{ 0, 5 }) |runout| {
+                            var reach = [_]f32{ 0.2, 0.7, 0.13 };
+                            const turn_id = if (street == .flop) 0 else runout;
+                            if (street == .turn) for (&reach, is.mask_turn[1 - player][turn_id * 3 ..][0..3]) |*v, m| {
+                                v.* *= m;
+                            };
+                            var own = [_]f32{1} ** 3;
+                            const term = TerminalNode{ .kind = .showdown, .pot = 42, .who_folded = 0, .folder_committed = 0 };
+                            const a = cc.evalTerminal(term, street, turn_id, &own, &reach, 0);
+                            const b = rc.evalTerminal(term, street, turn_id, &own, &reach, 0);
+                            for (a, b) |x, y| try testing.expectApproxEqAbs(x, y, 1e-4);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -6,6 +6,23 @@ pub const DcfrParams = struct {
     gamma: f32 = 2.0,
 };
 
+test "zero instantaneous regret preserves small history beside large values" {
+    const n = simd_width + 1; // vector lanes and scalar remainder
+    var regrets: [2 * n]f32 = undefined;
+    const children = [_]f32{1_000_000} ** (2 * n);
+    const values = [_]f32{1_000_000} ** n;
+    inline for (.{ dcfrRegretUpdate, dcfrRegretUpdateSimd }) |update| {
+        @memset(&regrets, 0.001);
+        update(&regrets, &children, &values, 1, 1, n, 2);
+        for (regrets) |r| try std.testing.expectEqual(@as(f32, 0.001), r);
+    }
+    inline for (.{ cfrRegretUpdate, cfrRegretUpdateSimd }) |update| {
+        @memset(&regrets, 0.001);
+        update(&regrets, &children, &values, n, 2);
+        for (regrets) |r| try std.testing.expectEqual(@as(f32, 0.001), r);
+    }
+}
+
 /// Compute regret-matching strategy from regrets for a single action node.
 ///
 /// regrets: flat array, action-major layout [A * N_p]f32
@@ -72,7 +89,7 @@ pub fn dcfrRegretUpdate(
                 older * pos_discount
             else
                 older * neg_discount;
-            regrets[r_base + h] = discounted + child_values[cv_base + h] - node_value[h];
+            regrets[r_base + h] = discounted + (child_values[cv_base + h] - node_value[h]);
         }
     }
 }
@@ -144,7 +161,7 @@ pub fn cfrRegretUpdate(
         const cv_base = a * N_p;
         var h: u32 = 0;
         while (h < N_p) : (h += 1) {
-            const updated = regrets[r_base + h] + child_values[cv_base + h] - node_value[h];
+            const updated = regrets[r_base + h] + (child_values[cv_base + h] - node_value[h]);
             regrets[r_base + h] = if (updated > 0.0) updated else 0.0;
         }
     }
@@ -313,7 +330,7 @@ pub fn dcfrRegretUpdateSimd(
             const discounted = @select(f32, older > zero_vec, older * pos_disc_vec, older * neg_disc_vec);
             const cv = vecLoad(child_values.ptr, cv_base + h);
             const nv = vecLoad(node_value.ptr, h);
-            vecStore(regrets.ptr, r_base + h, discounted + cv - nv);
+            vecStore(regrets.ptr, r_base + h, discounted + (cv - nv));
         }
         while (h < N_p) : (h += 1) {
             const older = regrets[r_base + h];
@@ -321,7 +338,7 @@ pub fn dcfrRegretUpdateSimd(
                 older * pos_discount
             else
                 older * neg_discount;
-            regrets[r_base + h] = discounted + child_values[cv_base + h] - node_value[h];
+            regrets[r_base + h] = discounted + (child_values[cv_base + h] - node_value[h]);
         }
     }
 }
@@ -345,11 +362,11 @@ pub fn cfrRegretUpdateSimd(
             const existing = vecLoad(regrets.ptr, r_base + h);
             const cv = vecLoad(child_values.ptr, cv_base + h);
             const nv = vecLoad(node_value.ptr, h);
-            const updated = existing + cv - nv;
+            const updated = existing + (cv - nv);
             vecStore(regrets.ptr, r_base + h, @select(f32, updated > zero_vec, updated, zero_vec));
         }
         while (h < N_p) : (h += 1) {
-            const updated = regrets[r_base + h] + child_values[cv_base + h] - node_value[h];
+            const updated = regrets[r_base + h] + (child_values[cv_base + h] - node_value[h]);
             regrets[r_base + h] = if (updated > 0.0) updated else 0.0;
         }
     }

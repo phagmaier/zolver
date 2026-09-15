@@ -9,15 +9,15 @@
 //! This module precomputes, for each physical orbit member, (a) the canonical
 //! runout id it maps to and (b) the per-player hand-index permutation induced by
 //! the suit permutation that carries the member board onto the canonical board.
-//! The traversal (`cfr.zig`) permutes reaches into canonical hand order before
-//! descending the canonical subtree and inverse-permutes the returned CFVs.
+//! The traversal (`cfr.zig`) maintains suit-symmetric reaches, evaluates the
+//! canonical subtree once, and inverse-permutes its CFVs for each member.
 //!
 //! Key economy: the hand permutation depends only on the `SuitPermutation`, and
 //! there are at most 24 valid permutations (typically ≤6). So hand tables are
 //! precomputed once per distinct permutation, and each member merely references
 //! a permutation index. Member weights are the plain physical chance
-//! probabilities (1/45 turn, 1/44 river) — NOT multiplicity-scaled — because the
-//! traversal visits each physical member individually.
+//! probabilities (1/45 turn, 1/44 river) — NOT multiplicity-scaled — because
+//! expansion accounts for each physical member separately.
 
 const std = @import("std");
 const card = @import("card.zig");
@@ -266,12 +266,15 @@ fn buildHandPerm(allocator: Allocator, hands: [2][]const Combo, perm: SuitPermut
         if (done > 0) allocator.free(hp.to_canon[0]);
         if (done > 1) allocator.free(hp.from_canon[0]);
         if (done > 2) allocator.free(hp.to_canon[1]);
+        if (done > 3) allocator.free(hp.from_canon[1]);
     }
     inline for (0..2) |p| {
         const n = hands[p].len;
         const to_canon = try allocator.alloc(u32, n);
+        hp.to_canon[p] = to_canon;
         done += 1;
         const from_canon = try allocator.alloc(u32, n);
+        hp.from_canon[p] = from_canon;
         done += 1;
         for (hands[p], 0..) |h, i| {
             const mapped = try h.applySuitMap(perm.map);
